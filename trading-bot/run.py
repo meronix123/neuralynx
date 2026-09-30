@@ -104,8 +104,11 @@ def main() -> None:
     from bot.engine import Bot
     bot = Bot(cfg, ex)
     if cfg["dashboard"]["enabled"]:
+        from bot.account import Account, refresher
         from bot.dashboard import start_dashboard
-        start_dashboard(bot, cfg["dashboard"]["port"])
+        account = Account(cfg, ex.symbols)   # echtes Bitget-Konto (Schluessel in der Oberflaeche eingeben)
+        refresher(account)
+        start_dashboard(bot, cfg["dashboard"]["port"], account)
         print(f"Oberflaeche im Browser oeffnen: http://localhost:{cfg['dashboard']['port']}")
     try:
         bot.run()

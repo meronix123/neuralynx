@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from .config import ROOT
 from .context import MarketContext
 from .derivs import fetch_funding_history, funding_blocks, live_rank
-from .exchange import is_metal
+from .exchange import is_metal, spread_from_ticker
 from .macro import fetch_macro, latest as macro_latest, macro_blocks
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .flow import FlowMonitor, flow_score, flow_verdict
@@ -69,6 +69,7 @@ class Bot:
         self.tf_conf = {tf: tf_cfg(cfg, tf) for tf in self.tfs}
         self.tf_stats: dict = {}
         self._sig_cache: dict = {}
+        self.manual_close: list[str] = []      # Schliessen-Knopf in der Oberflaeche
         self.model = None
         self._model_trained_on = -1
         self._train_model()
@@ -126,6 +127,9 @@ class Bot:
         self.state["peak_equity"] = max(self.state["peak_equity"], equity)
 
         positions = self.ex.positions()
+        if self.manual_close:
+            self._do_manual_close(positions)
+            positions = self.ex.positions()
         self._check_pending(positions, now)
         self._handle_closed(positions, now)
 
@@ -152,6 +156,30 @@ class Bot:
                 continue
             reasons[sym] = self._enter_any(sym, equity, positions, views[sym], risk_factor, now)
         self._update_status(now, equity, positions, views, reasons, block)
+
+    def request_close(self, sym: str) -> str:
+        """Von der Oberflaeche: Bot-Position beim naechsten Durchlauf schliessen."""
+        if sym not in self.state["meta"] and sym not in self.state["pending"]:
+            raise RuntimeError(f"Der Bot hat in {sym} keine Position")
+        self.manual_close.append(sym)
+        return f"{sym} wird geschlossen (naechster Durchlauf, max. {self.cfg['loop_seconds']} s)"
+
+    def _do_manual_close(self, positions: dict) -> None:
+        while self.manual_close:
+            sym = self.manual_close.pop(0)
+            try:
+                o = self.state["pending"].pop(sym, None)
+                if o:
+                    self.ex.cancel(sym, o["order_id"])
+                p = positions.get(sym)
+                if p:
+                    m = self.state["meta"].get(sym, {})
+                    self._cancel_tp(sym, m)
+                    self.ex.close(sym, p["side"], p["amount"])
+                    self.notify.send(f"MANUELL {sym} {p['side']} geschlossen (Oberflaeche)")
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s manuell schliessen: %s", sym, e)
+                self.status["error"] = f"{sym} schliessen fehlgeschlagen: {e}"
 
     def _global_block(self, equity: float, now: datetime) -> tuple[str, float]:
         """Gruende, warum gerade GAR KEIN neuer Trade eroeffnet wird ('' = alles frei)."""
@@ -585,7 +613,65 @@ class Bot:
                 log.debug("Flow-Anzeige %s: %s", sym, e)
         return m
 
+    def _market(self, sym: str) -> dict:
+        """Echte Marktdaten fuer die Uebersicht (Ticker jede Runde, Funding alle 2 Minuten)."""
+        out: dict = {}
+        try:
+            tk = self.ex.c.fetch_ticker(sym)
+            out = {"last": tk.get("last"), "change_pct": tk.get("percentage"), "high": tk.get("high"),
+                   "low": tk.get("low"), "volume_usd": tk.get("quoteVolume"), "bid": tk.get("bid"),
+                   "ask": tk.get("ask"), "spread_pct": spread_from_ticker(tk)}
+        except Exception as e:  # noqa: BLE001 - Anzeige darf den Bot nie stoppen
+            log.debug("Ticker %s: %s", sym, e)
+        cache = self.__dict__.setdefault("_funding_now", {})
+        at, rate = cache.get(sym, (0, None))
+        if time.time() - at > 120:
+            try:
+                rate = self.ex.funding_rate(sym)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Funding %s: %s", sym, e)
+            cache[sym] = (time.time(), rate)
+        out["funding"] = rate
+        return out
+
+    def _position_rows(self, positions: dict, market: dict, now: datetime) -> list[dict]:
+        """Offene Positionen mit aktuellem Kurs: Gewinn/Verlust, Abstand zu Stop/Ziel, Liquidation."""
+        lev = self.cfg["leverage"]
+        rows = []
+        for sym, p in positions.items():
+            m = self.state["meta"].get(sym, {})
+            price = (market.get(sym) or {}).get("last")
+            if price is None:
+                try:
+                    price = self.ex.last_price(sym)
+                except Exception:  # noqa: BLE001
+                    continue
+            sign = 1 if p["side"] == "long" else -1
+            entry, amount = float(p["entry"]), float(p["amount"])
+            sl, tp = m.get("sl"), m.get("tp")
+            r0 = m.get("r0") or (abs(entry - m["sl_init"]) if m.get("sl_init") else None)
+            upnl = sign * (price - entry) * amount - price * amount * self.fee  # inkl. Ausstiegsgebuehr
+            margin = entry * amount / lev
+            rows.append({
+                "symbol": sym, "side": p["side"], "tf": m.get("tf") or self.cfg["timeframe"],
+                "strategy": m.get("strategy"), "entry": entry, "price": price, "amount": amount,
+                "value": price * amount, "margin": margin, "pnl": upnl,
+                "pnl_pct": 100 * upnl / margin if margin else None,
+                "r": sign * (price - entry) / r0 if r0 else None,
+                "sl": sl, "tp": tp,
+                "sl_dist_pct": 100 * abs(price - sl) / price if sl else None,
+                "tp_dist_pct": 100 * abs(tp - price) / price if tp else None,
+                # isoliert: Liquidation grob bei 1/Hebel minus 0,5 % Wartungsmarge
+                "liq": entry * (1 - sign * (1 / lev - 0.005)),
+                "at_sl": sign * (sl - entry) * amount if sl else None,
+                "at_tp": sign * (tp - entry) * amount if tp else None,
+                "opened_ms": m.get("opened_ms"), "partial_done": m.get("partial_done", False),
+            })
+        return rows
+
     def _update_status(self, now, equity, positions, views, reasons, block) -> None:
+        market = {sym: self._market(sym) for sym in views}
+        pos_rows = self._position_rows(positions, market, now)
         syms = {}
         for sym, v in views.items():
             df = v["sig_df"]
@@ -595,6 +681,7 @@ class Bot:
                 "reason": reasons.get(sym, ""),
                 "position": {**positions[sym], **(m or {})} if sym in positions else None,
                 "pending": self.state["pending"].get(sym),
+                "market": market.get(sym),
                 "flow": self._flow_for_display(sym),
                 "candles": [
                     {"time": int(r.ts // 1000), "open": r.open, "high": r.high, "low": r.low, "close": r.close}
@@ -619,11 +706,17 @@ class Bot:
             "trades_today": self.guard.s["trades_today"],
             "max_trades_per_day": self.r["max_trades_per_day"],
             "block": block,
+            "paused": STOP_FILE.exists(),
             "fear_greed": fng,
             "calendar_ok": self.ctx.cal_ok,
             "next_events": [
                 {**e, "time": e["time"].isoformat()} for e in self.ctx.next_events(now)
             ],
             "symbols": syms,
+            "positions": pos_rows,
+            "unrealized": sum(r["pnl"] for r in pos_rows),
+            "max_positions": self.r["max_open_positions"],
+            "pending_orders": [{"symbol": k, **{f: o.get(f) for f in ("side", "price", "amount", "sl", "tp", "expires_ms")},
+                                "tf": (o.get("info") or {}).get("tf")} for k, o in self.state["pending"].items()],
             "history": self.state["history"][-50:],
         }

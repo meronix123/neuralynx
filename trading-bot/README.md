@@ -84,6 +84,20 @@ Beim Start von `python run.py bot` laeuft automatisch eine Oberflaeche:
 
 Die Oberflaeche ist nur auf deinem PC erreichbar, nicht aus dem Internet.
 
+## Bitget-Konto in der Oberflaeche
+
+Reiter **Bitget-Konto** in der Oberflaeche: API-Key, Secret und Passphrase eingeben, "Verbinden".
+Die Schluessel werden einmal gegen Bitget geprueft und nur lokal in `.env` gespeichert.
+Danach siehst du Guthaben (gesamt / verfuegbar / gebunden), alle offenen Positionen mit
+Mark-Preis, Liquidation, Margin und unrealisiertem Ergebnis, offene Orders inkl. Stop/Ziel
+und die abgeschlossenen Trades der letzten 30 Tage.
+
+Knoepfe: Position schliessen (ganz oder 50 %), Stop-Loss/Take-Profit aendern, Order
+stornieren, neue Position eroeffnen (Stop-Loss ist Pflicht), Bot pausieren/fortsetzen.
+Achtung: Diese Knoepfe wirken auf das ECHTE Konto (bzw. Demokonto bei "Demo-Schluessel"),
+auch wenn der Bot selbst im Paper-Modus laeuft. Die Oberflaeche ist nur auf diesem PC
+erreichbar. API-Schluessel immer OHNE Auszahlungsrecht anlegen.
+
 ## Installation (Windows)
 
 1. Python 3.11 oder neuer installieren: https://www.python.org/downloads/

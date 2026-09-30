@@ -55,6 +55,30 @@ def to_df(rows: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
 
 
+def place_pos_tpsl(client, symbol: str, side: str, sl: float | None, tp: float | None) -> None:
+    """Stop-Loss und/oder Take-Profit fuer die ganze Position auf Bitget setzen (place-pos-tpsl)."""
+    if sl is None and tp is None:
+        return
+    market = client.market(symbol)
+    product_type, _ = client.handle_product_type_and_params(market, {})
+    base = {"symbol": market["id"], "productType": product_type, "marginCoin": "USDT"}
+    if sl is not None:
+        base.update(stopLossTriggerPrice=client.price_to_precision(symbol, sl), stopLossTriggerType="mark_price")
+    if tp is not None:
+        base.update(stopSurplusTriggerPrice=client.price_to_precision(symbol, tp),
+                    stopSurplusTriggerType="fill_price")
+    # One-Way-Modus erwartet je nach Konto "buy"/"sell" oder "long"/"short"
+    hold = ["buy", "long"] if side == "long" else ["sell", "short"]
+    last_err = None
+    for h in hold:
+        try:
+            client.privateMixPostV2MixOrderPlacePosTpsl({**base, "holdSide": h})
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise RuntimeError(f"Stop/Ziel konnte nicht gesetzt werden: {last_err}")
+
+
 class BitgetExchange:
     """Echter Handel (mode live) oder Bitget-Demokonto (mode demo)."""
 
@@ -154,28 +178,7 @@ class BitgetExchange:
 
     def set_stop(self, symbol: str, side: str, sl: float, tp: float | None) -> None:
         """Stop-Loss/Take-Profit der ganzen Position neu setzen (Bitget place-pos-tpsl)."""
-        market = self.c.market(symbol)
-        product_type, _ = self.c.handle_product_type_and_params(market, {})
-        base = {
-            "symbol": market["id"],
-            "productType": product_type,
-            "marginCoin": "USDT",
-            "stopLossTriggerPrice": self.c.price_to_precision(symbol, sl),
-            "stopLossTriggerType": "mark_price",
-        }
-        if tp is not None:
-            base.update(stopSurplusTriggerPrice=self.c.price_to_precision(symbol, tp),
-                        stopSurplusTriggerType="fill_price")
-        # One-Way-Modus erwartet je nach Konto "buy"/"sell" oder "long"/"short"
-        hold = ["buy", "long"] if side == "long" else ["sell", "short"]
-        last_err = None
-        for h in hold:
-            try:
-                self.c.privateMixPostV2MixOrderPlacePosTpsl({**base, "holdSide": h})
-                return
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-        raise RuntimeError(f"Stop konnte nicht gesetzt werden: {last_err}")
+        place_pos_tpsl(self.c, symbol, side, sl, tp)
 
     def close(self, symbol: str, side: str, amount: float) -> None:
         self.c.create_order(

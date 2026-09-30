@@ -14,6 +14,7 @@
   .kpi { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
   .kpi b { display:block; font-size:16px; }
   .kpi span { color:var(--dim); font-size:12px; }
+  .kpi b span { font-size:inherit; }
   .badge { padding:2px 8px; border-radius:99px; font-weight:600; font-size:12px; }
   .paper { background:#334155; } .demo { background:#1e3a8a; } .live { background:#7f1d1d; }
   main { display:grid; grid-template-columns: 230px minmax(0, 1fr) 320px; gap:12px; padding:12px 16px; }
@@ -36,12 +37,71 @@
   .mtf div { text-align:center; background:#11141a; border-radius:6px; padding:4px 0; font-size:12px; }
   .mtf b { display:block; font-size:16px; }
   .legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--dim); font-size:12px; margin-top:6px; }
+  .bar { position:relative; height:6px; background:linear-gradient(90deg, #7f1d1d, #334155 45%, #334155 55%, #14532d); border-radius:3px; min-width:90px; }
+  .bar i { position:absolute; top:-3px; width:3px; height:12px; background:#e6e8ee; border-radius:2px; }
+  .wrap { overflow-x:auto; }
+  nav { display:flex; gap:6px; padding:10px 16px 0; }
+  nav button, .btn { background:#1d2230; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; }
+  nav button.on { border-color:var(--blue); background:#1a2233; }
+  .btn:hover { border-color:var(--blue); } .btn.red { border-color:#7f1d1d; } .btn.red:hover { background:#7f1d1d; }
+  .btn.sm { padding:2px 8px; font-size:12px; }
+  .grid2 { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }
+  label { display:block; font-size:12px; color:var(--dim); }
+  input, select { width:100%; background:#11141a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; margin-top:2px; }
+  input[type=checkbox] { width:auto; }
+  #toast { position:fixed; right:16px; bottom:16px; max-width:420px; padding:10px 14px; border-radius:8px; background:#1d2230; border:1px solid var(--line); display:none; z-index:9; }
+  .note { color:var(--dim); font-size:12px; margin:6px 0; }
+  [hidden] { display:none !important; }
   .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
 </style>
 </head>
 <body>
 <header id="head">Lade ...</header>
-<main>
+<nav><button id="tab-bot" class="on" onclick="tab('bot')">Bot</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button></nav>
+<div id="toast"></div>
+<main id="view-acc" hidden>
+  <section class="panel" style="grid-column:1/-1" id="acc-connect">
+    <h3>Bitget-Konto verbinden</h3>
+    <p class="note">Bitget &rarr; Profil &rarr; API-Verwaltung &rarr; neuen Schluessel anlegen. Rechte: <b>nur Futures lesen + handeln</b>, <b>KEIN Auszahlungsrecht</b>, wenn moeglich IP-Beschraenkung.
+      Die Schluessel werden einmal geprueft und nur auf diesem PC in der Datei <code>.env</code> gespeichert - nie angezeigt, nie hochgeladen.</p>
+    <div class="grid2">
+      <label>API-Key<input id="k-key" autocomplete="off"></label>
+      <label>Secret<input id="k-secret" type="password" autocomplete="off"></label>
+      <label>Passphrase<input id="k-pass" type="password" autocomplete="off"></label>
+      <label><input id="k-demo" type="checkbox"> Demo-Schluessel (Bitget Demo-Handel)</label>
+    </div>
+    <p><button class="btn" onclick="connectAcc()">Verbinden</button></p>
+    <p id="acc-err" class="down"></p>
+  </section>
+  <section class="panel" style="grid-column:1/-1" id="acc-main" hidden>
+    <div id="acc-head" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center"></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1" id="acc-pos-p" hidden>
+    <h3>Offene Positionen (Bitget)</h3><div class="wrap"><table id="acc-pos"></table></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1" id="acc-ord-p" hidden>
+    <h3>Offene Orders (inkl. Stop-Loss / Take-Profit)</h3><div class="wrap"><table id="acc-ord"></table></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1" id="acc-new-p" hidden>
+    <h3>Neue Position eroeffnen</h3>
+    <div class="grid2">
+      <label>Markt<select id="o-sym"></select></label>
+      <label>Richtung<select id="o-side"><option value="long">Long (steigt)</option><option value="short">Short (faellt)</option></select></label>
+      <label>Art<select id="o-type" onchange="document.getElementById('o-price-l').hidden=this.value!=='limit'"><option value="market">Market (sofort)</option><option value="limit">Limit</option></select></label>
+      <label id="o-price-l" hidden>Limit-Preis<input id="o-price" inputmode="decimal"></label>
+      <label>Positionswert in USDT<input id="o-usdt" inputmode="decimal" placeholder="z. B. 50"></label>
+      <label>Hebel<input id="o-lev" inputmode="numeric" value="10"></label>
+      <label>Stop-Loss (Pflicht)<input id="o-sl" inputmode="decimal"></label>
+      <label>Take-Profit<input id="o-tp" inputmode="decimal"></label>
+    </div>
+    <p id="o-info" class="note"></p>
+    <p><button class="btn" onclick="newOrder()">Order senden</button></p>
+  </section>
+  <section class="panel" style="grid-column:1/-1" id="acc-hist-p" hidden>
+    <h3>Vergangene Trades (letzte 30 Tage)</h3><div class="wrap"><table id="acc-hist"></table></div>
+  </section>
+</main>
+<main id="view-bot">
   <section class="panel"><h3>Maerkte</h3><div id="list"></div></section>
   <section class="panel">
     <h3 id="title">Chart</h3>
@@ -67,12 +127,45 @@
     <div id="events"></div>
   </section>
   <section class="panel" style="grid-column:1/-1">
+    <h3>Offene Positionen (live)</h3>
+    <div class="wrap"><table id="positions"></table></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
+    <h3>Markt live (Bitget)</h3>
+    <div class="wrap"><table id="market"></table></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
     <h3>Letzte Trades</h3>
     <table id="hist"></table>
   </section>
 </main>
 <script>
-let selected = null, data = null, lines = [];
+let selected = null, data = null, lines = [], acc = null, view = "bot";
+const TOKEN = "__TOKEN__";
+function toast(msg, ok) {
+  const el = document.getElementById("toast");
+  el.innerHTML = `<span class="${ok ? "up" : "down"}">${ok ? "OK" : "Fehler"}</span>: ${msg}`;
+  el.style.display = "block"; clearTimeout(el._t); el._t = setTimeout(() => el.style.display = "none", 7000);
+}
+async function act(path, body, ask) {
+  if (ask && !confirm(ask)) return null;
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN }, body: JSON.stringify(body || {}) });
+    const d = await r.json();
+    toast(d.msg, d.ok);
+    poll(); pollAcc();
+    return d.ok ? d : null;
+  } catch (e) { toast("Keine Verbindung zum Bot", false); return null; }
+}
+function tab(v) {
+  view = v;
+  document.getElementById("view-bot").hidden = v !== "bot";
+  document.getElementById("view-acc").hidden = v !== "acc";
+  document.getElementById("tab-bot").classList.toggle("on", v === "bot");
+  document.getElementById("tab-acc").classList.toggle("on", v === "acc");
+  if (v === "bot") setTimeout(() => chart.applyOptions({ width: document.getElementById("chart").clientWidth }), 0);
+  pollAcc();
+}
 const TZ = -new Date().getTimezoneOffset() * 60; // Chart in Ortszeit
 const fmt = (v, d = 2) => v == null ? "-" : Number(v).toLocaleString("de-DE", {maximumFractionDigits: d, minimumFractionDigits: d});
 const px = v => v == null ? "-" : Number(v).toPrecision(6);
@@ -95,6 +188,47 @@ function line(price, color, title, dashed) {
 }
 
 const STRAT = { trend: "Trend-Ruecksetzer", range: "Rueckkehr zur Mitte", breakout: "Ausbruch" };
+const chg = v => v == null ? "" : `<span class="${v >= 0 ? "up" : "down"}">${v >= 0 ? "+" : ""}${fmt(v)} %</span>`;
+const usd = v => v == null ? "-" : `<span class="${v >= 0 ? "up" : "down"}">${v >= 0 ? "+" : ""}${fmt(v)}</span>`;
+const big = v => v == null ? "-" : v >= 1e9 ? fmt(v / 1e9, 1) + " Mrd" : v >= 1e6 ? fmt(v / 1e6, 1) + " Mio" : fmt(v, 0);
+const since = ms => { if (!ms) return "-"; const m = Math.floor((Date.now() - ms) / 60000); return m < 60 ? m + " Min" : Math.floor(m / 60) + " Std " + (m % 60) + " Min"; };
+
+function renderPositions() {
+  const rows = data.positions || [], pend = data.pending_orders || [];
+  const head = `<tr><th>Markt</th><th>Richtung</th><th>Zeiteinheit / Strategie</th><th>Einstieg</th><th>Aktuell</th><th>Menge</th><th>Wert</th><th>Margin</th>
+    <th>Ergebnis USDT</th><th>auf Margin</th><th>R</th><th>Stop-Loss (Abstand)</th><th>Weg SL &rarr; TP</th><th>Take-Profit (Abstand)</th><th>Liquidation ca.</th><th>bei SL</th><th>bei TP</th><th>seit</th><th></th></tr>`;
+  const body = rows.map(r => {
+    const pos = r.sl != null && r.tp != null && r.tp !== r.sl ? Math.max(0, Math.min(100, 100 * (r.price - r.sl) / (r.tp - r.sl))) : null;
+    return `<tr><td>${r.symbol.split(":")[0]}</td><td class="${r.side === "long" ? "up" : "down"}">${r.side.toUpperCase()}</td>
+      <td>${r.tf} / ${STRAT[r.strategy] || "-"}${r.partial_done ? " (Teil verkauft)" : ""}</td><td>${px(r.entry)}</td><td><b>${px(r.price)}</b></td>
+      <td>${fmt(r.amount, 4)}</td><td>${fmt(r.value)}</td><td>${fmt(r.margin)}</td><td><b>${usd(r.pnl)}</b></td><td>${chg(r.pnl_pct)}</td>
+      <td>${r.r == null ? "-" : (r.r >= 0 ? "+" : "") + fmt(r.r) + "R"}</td>
+      <td class="down">${px(r.sl)} (${fmt(r.sl_dist_pct)} %)</td>
+      <td>${pos == null ? "-" : `<div class="bar"><i style="left:calc(${pos}% - 1px)"></i></div>`}</td>
+      <td class="up">${px(r.tp)} (${fmt(r.tp_dist_pct)} %)</td><td class="warn">${px(r.liq)}</td>
+      <td>${usd(r.at_sl)}</td><td>${usd(r.at_tp)}</td><td>${since(r.opened_ms)}</td>
+      <td><button class="btn sm red" onclick="act('/api/bot/close', {symbol: '${r.symbol}'}, 'Position ${r.symbol.split(":")[0]} jetzt zum Marktpreis schliessen?')">Schliessen</button></td></tr>`;
+  }).join("");
+  const pbody = pend.map(o => `<tr><td>${o.symbol.split(":")[0]}</td><td class="${o.side === "long" ? "up" : "down"}">${o.side.toUpperCase()}</td>
+      <td>${o.tf || "-"} / Limit-Order wartet</td><td>${px(o.price)}</td><td colspan="7" class="sub">bis ${time(o.expires_ms)}</td>
+      <td class="down">${px(o.sl)}</td><td></td><td class="up">${px(o.tp)}</td><td colspan="4"></td>
+      <td><button class="btn sm red" onclick="act('/api/bot/close', {symbol: '${o.symbol}'}, 'Limit-Order stornieren?')">Stornieren</button></td></tr>`).join("");
+  document.getElementById("positions").innerHTML = head + (body + pbody ||
+    `<tr><td colspan="19" class="sub">Keine offene Position - der Bot wartet auf ein passendes Signal.</td></tr>`);
+}
+
+function renderMarket(syms) {
+  const head = `<tr><th>Markt</th><th>Kurs</th><th>24h</th><th>24h Hoch</th><th>24h Tief</th><th>24h Umsatz (USDT)</th><th>Geld / Brief</th><th>Spread</th><th>Funding (8h)</th><th>Marktlage</th><th>Position</th><th>Bot</th></tr>`;
+  document.getElementById("market").innerHTML = head + syms.map(sym => {
+    const s = data.symbols[sym], m = s.market || {}, pos = s.position;
+    const f = m.funding == null ? "-" : `<span class="${Math.abs(m.funding) > 0.0005 ? "warn" : ""}">${fmt(m.funding * 100, 4)} %</span>`;
+    return `<tr onclick="selected='${sym}';render()" style="cursor:pointer"><td>${sym.split(":")[0]}</td><td><b>${px(m.last ?? s.snapshot.close)}</b></td><td>${chg(m.change_pct)}</td>
+      <td>${px(m.high)}</td><td>${px(m.low)}</td><td>${big(m.volume_usd)}</td><td>${px(m.bid)} / ${px(m.ask)}</td>
+      <td>${m.spread_pct == null ? "-" : fmt(m.spread_pct, 3) + " %"}</td><td>${f}</td><td>${s.snapshot.regime_text}</td>
+      <td>${pos ? `<span class="${pos.side === "long" ? "up" : "down"}">${pos.side.toUpperCase()}</span>` : "-"}</td><td style="text-align:left">${s.reason}</td></tr>`;
+  }).join("");
+}
+
 function tfRows() {
   const st = data.tf_stats || {};
   if (data.tf_select === "fixed" || !Object.keys(st).length) return [];
@@ -153,11 +287,14 @@ function render() {
     <span class="badge ${data.mode}">${data.mode.toUpperCase()}</span>
     <div class="kpi"><span>Konto</span><b>${fmt(data.equity)} USDT</b></div>
     <div class="kpi"><span>Heute</span><b class="${dayPnl >= 0 ? "up" : "down"}">${dayPnl >= 0 ? "+" : ""}${fmt(dayPnl)} USDT</b></div>
+    <div class="kpi"><span>Offen (unrealisiert)</span><b class="${(data.unrealized||0) >= 0 ? "up" : "down"}">${(data.unrealized||0) >= 0 ? "+" : ""}${fmt(data.unrealized||0)} USDT</b></div>
+    <div class="kpi"><span>Positionen</span><b>${(data.positions||[]).length} / ${data.max_positions ?? "-"}</b></div>
     <div class="kpi"><span>Trades heute</span><b>${data.trades_today} / ${data.max_trades_per_day}</b></div>
     <div class="kpi"><span>Hebel</span><b>${data.leverage}x</b></div>
     <div class="kpi"><span>Fear &amp; Greed</span><b>${fg ? fg.value + " " + fg.label : "-"}</b></div>
     <div class="kpi"><span>Neue Trades</span><b class="${data.block ? "warn" : "up"}">${data.block || "erlaubt"}</b></div>
-    <div class="kpi"><span>Aktualisiert</span><b>${time(data.updated)}</b></div>`;
+    <div class="kpi"><span>Aktualisiert</span><b>${time(data.updated)}</b></div>
+    <button class="btn ${data.paused ? "" : "red"}" onclick="act('/api/bot/pause', {on: ${!data.paused}}, ${data.paused ? "null" : "'Bot pausieren? Er eroeffnet dann keine neuen Trades.'"})">${data.paused ? "Bot fortsetzen" : "Bot pausieren"}</button>`;
 
   const syms = Object.keys(data.symbols);
   if (!selected || !data.symbols[selected]) selected = syms[0];
@@ -166,7 +303,7 @@ function render() {
     const tag = pos ? `<span class="${pos.side === "long" ? "up" : "down"}">${pos.side.toUpperCase()}</span>` : `<span class="sub">${v.regime_text}</span>`;
     return `<div class="sym ${sym === selected ? "active" : ""}" onclick="selected='${sym}';render()">
       <div class="top"><span>${sym.split(":")[0]}</span>${tag}</div>
-      <div class="sub">${px(v.close)} &middot; RSI ${v.rsi} &middot; ${s.reason}</div></div>`;
+      <div class="sub">${px((s.market||{}).last ?? v.close)} ${chg((s.market||{}).change_pct)} &middot; RSI ${v.rsi} &middot; ${s.reason}</div></div>`;
   }).join("");
 
   const s = data.symbols[selected];
@@ -212,6 +349,9 @@ function render() {
     ...flowRows(s.flow),
   ].map(([k, val]) => `<div class="row"><span>${k}</span><b>${val}</b></div>`).join("");
 
+  renderPositions();
+  renderMarket(syms);
+
   document.getElementById("events").innerHTML = (data.next_events.length ? data.next_events.map(e =>
     `<div class="row"><span>${e.country} ${e.title}</span><b>${time(e.time)}</b></div>`).join("")
     : `<div class="sub">${data.calendar_ok ? "Keine wichtigen Termine" : "Kalender nicht abrufbar"}</div>`);
@@ -223,6 +363,79 @@ function render() {
       <td class="${t.pnl >= 0 ? "up" : "down"}">${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}</td><td>${time(t.closed_ms)}</td></tr>`).join("")
       : `<tr><td colspan="10" class="sub">Noch keine Trades</td></tr>`);
 }
+
+function renderAcc() {
+  const a = acc || {};
+  document.getElementById("acc-connect").hidden = !!a.connected;
+  for (const id of ["acc-main", "acc-pos-p", "acc-ord-p", "acc-new-p", "acc-hist-p"]) document.getElementById(id).hidden = !a.connected;
+  if (!a.connected) {
+    document.getElementById("acc-err").textContent = a.error || "";
+    return;
+  }
+  const b = a.balance || {};
+  document.getElementById("acc-head").innerHTML = `
+    <span class="badge ${a.demo ? "demo" : "live"}">${a.demo ? "DEMO-KONTO" : "ECHTES KONTO"}</span>
+    <div class="kpi"><span>Gesamt (USDT)</span><b>${fmt(b.total)}</b></div>
+    <div class="kpi"><span>Verfuegbar</span><b>${fmt(b.free)}</b></div>
+    <div class="kpi"><span>In Positionen / Orders</span><b>${fmt(b.used)}</b></div>
+    <div class="kpi"><span>Unrealisiert</span><b>${usd(a.unrealized)}</b></div>
+    <div class="kpi"><span>Bot handelt im Modus</span><b>${(a.bot_mode || "-").toUpperCase()}</b></div>
+    <div class="kpi"><span>Stand</span><b>${a.updated_ms ? time(a.updated_ms) : "-"}</b></div>
+    <button class="btn" onclick="act('/api/account/refresh')">Aktualisieren</button>
+    <button class="btn" onclick="act('/api/account/disconnect', {forget:false})">Trennen</button>
+    <button class="btn red" onclick="act('/api/account/disconnect', {forget:true}, 'Schluessel aus der .env loeschen?')">Schluessel loeschen</button>
+    ${a.error ? `<div class="down" style="flex-basis:100%">${a.error}</div>` : ""}`;
+  const pos = a.positions || [];
+  document.getElementById("acc-pos").innerHTML = `<tr><th>Markt</th><th>Richtung</th><th>Hebel</th><th>Menge</th><th>Wert</th><th>Einstieg</th><th>Mark-Preis</th><th>Liquidation</th><th>Margin</th><th>Unrealisiert</th><th>%</th><th>Stop-Loss</th><th>Take-Profit</th><th>seit</th><th></th></tr>` +
+    (pos.length ? pos.map(p => `<tr><td>${p.symbol.split(":")[0]}</td><td class="${p.side === "long" ? "up" : "down"}">${(p.side || "").toUpperCase()}</td>
+      <td>${p.leverage ?? "-"}x ${p.margin_mode || ""}</td><td>${fmt(p.amount, 4)}</td><td>${fmt(p.value)}</td><td>${px(p.entry)}</td><td><b>${px(p.mark)}</b></td>
+      <td class="warn">${px(p.liq)}</td><td>${fmt(p.margin)}</td><td><b>${usd(p.pnl)}</b></td><td>${chg(p.pnl_pct)}</td>
+      <td class="down">${px(p.sl)}</td><td class="up">${px(p.tp)}</td><td>${since(p.opened_ms)}</td>
+      <td style="white-space:nowrap"><button class="btn sm red" onclick="act('/api/account/close', {symbol:'${p.symbol}', fraction:1}, '${p.symbol.split(":")[0]} komplett zum Marktpreis schliessen?')">Schliessen</button>
+        <button class="btn sm" onclick="act('/api/account/close', {symbol:'${p.symbol}', fraction:0.5}, 'Haelfte von ${p.symbol.split(":")[0]} schliessen?')">50 %</button>
+        <button class="btn sm" onclick="editTpsl('${p.symbol}', ${p.sl ?? "null"}, ${p.tp ?? "null"})">SL/TP</button></td></tr>`).join("")
+      : `<tr><td colspan="15" class="sub">Keine offenen Positionen</td></tr>`);
+  const ord = a.orders || [];
+  const KIND = { normal: "Order", tpsl: "Stop/Ziel", plan: "Ausloese-Order" };
+  document.getElementById("acc-ord").innerHTML = `<tr><th>Markt</th><th>Art</th><th>Typ</th><th>Seite</th><th>Preis</th><th>Ausloesepreis</th><th>Menge</th><th>ausgefuehrt</th><th>nur reduzieren</th><th>erstellt</th><th></th></tr>` +
+    (ord.length ? ord.map(o => `<tr><td>${(o.symbol || "").split(":")[0]}</td><td>${KIND[o.kind] || o.kind}</td><td>${o.type || "-"}</td><td>${o.side || "-"}</td>
+      <td>${px(o.price)}</td><td>${px(o.trigger)}</td><td>${fmt(o.amount, 4)}</td><td>${fmt(o.filled, 4)}</td><td>${o.reduce_only ? "ja" : "-"}</td><td>${o.ts ? time(o.ts) : "-"}</td>
+      <td><button class="btn sm red" onclick="act('/api/account/cancel', {id:'${o.id}', symbol:'${o.symbol}', kind:'${o.kind}'}, 'Order stornieren?')">Stornieren</button></td></tr>`).join("")
+      : `<tr><td colspan="11" class="sub">Keine offenen Orders</td></tr>`);
+  const sel = document.getElementById("o-sym");
+  const syms = [...new Set([...(a.symbols || []), ...pos.map(p => p.symbol)])];
+  if (sel.options.length !== syms.length) sel.innerHTML = syms.map(s => `<option value="${s}">${s.split(":")[0]}</option>`).join("");
+  const h = a.history || [];
+  document.getElementById("acc-hist").innerHTML = `<tr><th>Markt</th><th>Richtung</th><th>Einstieg</th><th>Ausstieg</th><th>Menge</th><th>Ergebnis</th><th>Gebuehren</th><th>Funding</th><th>geoeffnet</th><th>geschlossen</th></tr>` +
+    (h.length ? h.map(t => `<tr><td>${(t.symbol || "").split(":")[0]}</td><td class="${t.side === "long" ? "up" : "down"}">${(t.side || "").toUpperCase()}</td>
+      <td>${px(t.entry)}</td><td>${px(t.exit)}</td><td>${fmt(t.amount, 4)}</td><td><b>${usd(t.pnl)}</b></td><td>${fmt(t.fees, 4)}</td><td>${fmt(t.funding, 4)}</td>
+      <td>${t.opened_ms ? time(t.opened_ms) : "-"}</td><td>${t.closed_ms ? time(t.closed_ms) : "-"}</td></tr>`).join("")
+      : `<tr><td colspan="10" class="sub">Keine abgeschlossenen Trades in den letzten 30 Tagen</td></tr>`);
+  const sum = h.reduce((s, t) => s + (t.pnl || 0), 0), wins = h.filter(t => (t.pnl || 0) > 0).length;
+  if (h.length) document.getElementById("acc-hist").innerHTML += `<tr><td colspan="5"><b>${h.length} Trades, ${wins} Gewinner</b></td><td><b>${usd(sum)}</b></td><td colspan="4"></td></tr>`;
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+async function connectAcc() {
+  const ok = await act("/api/account/connect", { key: val("k-key"), secret: val("k-secret"), password: val("k-pass"), demo: document.getElementById("k-demo").checked });
+  if (ok) for (const id of ["k-key", "k-secret", "k-pass"]) document.getElementById(id).value = "";
+}
+function editTpsl(sym, sl, tp) {
+  const nsl = prompt(`Neuer Stop-Loss fuer ${sym.split(":")[0]} (leer = unveraendert):`, sl ?? "");
+  if (nsl === null) return;
+  const ntp = prompt(`Neuer Take-Profit (leer = keiner/unveraendert):`, tp ?? "");
+  if (ntp === null) return;
+  act("/api/account/tpsl", { symbol: sym, sl: nsl, tp: ntp });
+}
+function newOrder() {
+  const b = { symbol: val("o-sym"), side: val("o-side"), type: val("o-type"), price: val("o-price"), usdt: val("o-usdt"), leverage: val("o-lev"), sl: val("o-sl"), tp: val("o-tp") };
+  const margin = Number(b.usdt.replace(",", ".")) / Number(b.leverage || 1);
+  act("/api/account/order", b, `${acc && acc.demo ? "DEMO" : "ECHTES GELD"}: ${b.side.toUpperCase()} ${b.symbol.split(":")[0]} fuer ${b.usdt} USDT (${b.leverage}x Hebel, Margin ca. ${fmt(margin)} USDT), Stop ${b.sl}, Ziel ${b.tp || "-"}. Senden?`);
+}
+async function pollAcc() {
+  if (view !== "acc" && acc) return;
+  try { acc = await (await fetch("/api/account")).json(); renderAcc(); } catch (e) { /* Bot nicht erreichbar */ }
+}
+setInterval(pollAcc, 5000);
 
 async function poll() {
   try {

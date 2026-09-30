@@ -820,6 +820,8 @@ def test_paper_bot_chooses_timeframe(tmp_path, monkeypatch):
     cfg = copy.deepcopy(CFG)
     cfg["symbols"] = ["AAA/USDT:USDT"]
     cfg["tf_select"], cfg["timeframes"] = "adaptive", ["5m", "15m"]
+    # unabhaengig von config.yaml: genug Signale, Anlaufphase laesst alle Zeiteinheiten zu
+    cfg["strategy"].update(strategies=["trend", "range", "breakout"], tf_warmup=10_000)
     client = FakeClient(synthetic(1800, 3))
     ex = PaperExchange(cfg, client)
     bot = engine.Bot(cfg, ex, FakeContext())
@@ -860,3 +862,170 @@ def test_real_config_timeframes_are_supported():
     cfg = load_config()
     for tf in active_tfs(cfg):
         assert tf in TREND_FOR and tf in cfg["strategy"]["atr_limits"]
+
+
+class FakeBitget:
+    """Simuliertes Bitget-Konto fuer die Konto-Ansicht (ohne Internet)."""
+
+    def __init__(self, api=None, demo=False):
+        if api and api.get("key") == "falsch":
+            raise_on = True
+        else:
+            raise_on = False
+        self.bad = raise_on
+        self.calls = []
+        self.pos = [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.004, "entryPrice": 60000,
+                     "markPrice": 61000, "liquidationPrice": 54500, "unrealizedPnl": 4.0, "percentage": 16.4,
+                     "leverage": 10, "marginMode": "isolated", "initialMargin": 24.0, "notional": 244.0,
+                     "stopLossPrice": 59000, "takeProfitPrice": 63000, "timestamp": 1_790_000_000_000}]
+
+    def fetch_balance(self, params=None):
+        if self.bad:
+            raise RuntimeError("apikey does not exist")
+        return {"USDT": {"total": 35.5, "free": 11.5, "used": 24.0}}
+
+    def fetch_positions(self, symbols=None):
+        return [p for p in self.pos if not symbols or p["symbol"] in symbols]
+
+    def fetch_open_orders(self, sym, since=None, limit=None, params=None):
+        if (params or {}).get("planType") == "profit_loss" and sym == "BTC/USDT:USDT":
+            return [{"id": "77", "symbol": sym, "type": "market", "side": "sell", "triggerPrice": 59000,
+                     "amount": 0.004, "filled": 0, "reduceOnly": True, "timestamp": 1_790_000_000_000}]
+        return []
+
+    def fetch_positions_history(self, symbols=None, since=None, limit=None):
+        return [{"symbol": "ETH/USDT:USDT", "side": "short", "entryPrice": 3000, "contracts": 0.1,
+                 "realizedPnl": -1.2, "timestamp": 1_789_000_000_000, "lastUpdateTimestamp": 1_789_100_000_000,
+                 "info": {"closeAvgPrice": "3012", "totalFee": "-0.36", "totalFunding": "0.01"}}]
+
+    def load_markets(self):
+        return {}
+
+    def fetch_ticker(self, sym):
+        return {"last": 61000.0}
+
+    def amount_to_precision(self, sym, v):
+        return f"{int(v * 1000) / 1000:.3f}"
+
+    def price_to_precision(self, sym, v):
+        return str(v)
+
+    def market(self, sym):
+        return {"id": sym.split("/")[0] + "USDT"}
+
+    def handle_product_type_and_params(self, market, params):
+        return "USDT-FUTURES", params
+
+    def close_position(self, sym, side=None, params=None):
+        self.calls.append(("close_position", sym, side))
+        self.pos = [p for p in self.pos if p["symbol"] != sym]
+
+    def create_order(self, *a):
+        self.calls.append(("create_order",) + a)
+        return {"id": "1"}
+
+    def cancel_order(self, oid, sym, params=None):
+        self.calls.append(("cancel_order", oid, sym, params))
+
+    def set_margin_mode(self, *a):
+        pass
+
+    def set_leverage(self, *a):
+        self.calls.append(("set_leverage",) + a)
+
+    def privateMixPostV2MixOrderPlacePosTpsl(self, req):  # noqa: N802 - Name von ccxt
+        self.calls.append(("tpsl", req))
+
+
+def test_account_view_and_actions(tmp_path):
+    from bot.account import Account
+
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_TOKEN=abc\n", encoding="utf-8")
+    fake = {}
+
+    def factory(api, demo=False):
+        fake["c"] = FakeBitget(api, demo)
+        return fake["c"]
+
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, ["BTC/USDT:USDT"], factory=factory, env_path=env)
+    assert not acc.connected
+    with pytest.raises(RuntimeError):
+        acc.connect("falsch", "s", "p")
+    assert not acc.connected and "BITGET" not in env.read_text()  # falsche Schluessel nie speichern
+    acc.connect(" key1 ", "sec", "pass", demo=True)
+    text = env.read_text()
+    assert "BITGET_API_KEY=key1" in text and "TELEGRAM_TOKEN=abc" in text and "BITGET_DEMO=1" in text
+    v = acc.view()
+    assert v["connected"] and v["demo"] and v["balance"]["free"] == 11.5
+    assert v["positions"][0]["liq"] == 54500 and v["unrealized"] == 4.0
+    assert v["orders"][0]["kind"] == "tpsl" and v["orders"][0]["trigger"] == 59000
+    assert v["history"][0]["exit"] == 3012 and v["history"][0]["pnl"] == -1.2
+    c = fake["c"]
+    acc.close("BTC/USDT:USDT", 0.5)
+    assert c.calls[-1][0] == "create_order" and c.calls[-1][3] == "sell" and c.calls[-1][4] == 0.002
+    acc.set_tpsl("BTC/USDT:USDT", 59500, None)
+    req = [x for x in c.calls if x[0] == "tpsl"][-1][1]
+    assert req["stopLossTriggerPrice"] == "59500" and "stopSurplusTriggerPrice" not in req
+    acc.cancel("77", "BTC/USDT:USDT", "tpsl")
+    assert c.calls[-1] == ("cancel_order", "77", "BTC/USDT:USDT", {"trigger": True, "planType": "profit_loss"})
+    with pytest.raises(ValueError):  # Stop auf der falschen Seite
+        acc.order("BTC/USDT:USDT", "long", 100, 10, sl=62000)
+    with pytest.raises(ValueError):  # ohne Stop keine Order
+        acc.order("BTC/USDT:USDT", "long", 100, 10, sl=None)
+    acc.order("BTC/USDT:USDT", "short", 122, 5, sl=62000, tp=58000)
+    o = c.calls[-1]
+    assert o[1:5] == ("BTC/USDT:USDT", "market", "sell", 0.002) and o[6]["stopLoss"]["triggerPrice"] == 62000
+    acc.close("BTC/USDT:USDT")
+    assert ("close_position", "BTC/USDT:USDT", "buy") in c.calls
+    acc.disconnect(forget=True)
+    assert "BITGET_API_KEY=\n" in env.read_text() and not acc.connected
+
+
+def test_dashboard_actions_need_token(tmp_path, monkeypatch):
+    import json
+    import re
+    import urllib.error
+    import urllib.request
+
+    from bot.account import Account
+    from bot.dashboard import start_dashboard
+
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    client = FakeClient(synthetic(1000, 3))
+    bot = engine.Bot(cfg, PaperExchange(cfg, client), FakeContext())
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, [], factory=lambda api, demo=False: FakeBitget(api, demo), env_path=tmp_path / ".env")
+    stop = tmp_path / "STOP"
+    srv = start_dashboard(bot, 8093, acc, stop_file=stop)
+    try:
+        html = urllib.request.urlopen("http://127.0.0.1:8093/").read().decode()
+        token = re.search(r'const TOKEN = "([0-9a-f]{32})"', html).group(1)
+
+        def post(path, body, tok):
+            req = urllib.request.Request("http://127.0.0.1:8093" + path, json.dumps(body).encode(),
+                                         {"Content-Type": "application/json", "X-Token": tok})
+            try:
+                return json.loads(urllib.request.urlopen(req).read())
+            except urllib.error.HTTPError as e:
+                return {"code": e.code, **json.loads(e.read())}
+
+        assert post("/api/bot/pause", {"on": True}, "falsch")["code"] == 403
+        assert not stop.exists()
+        assert post("/api/bot/pause", {"on": True}, token)["ok"] and stop.exists()
+        assert post("/api/bot/pause", {"on": False}, token)["ok"] and not stop.exists()
+        r = post("/api/account/connect", {"key": "k", "secret": "s", "password": "p"}, token)
+        assert r["ok"]
+        view = json.loads(urllib.request.urlopen("http://127.0.0.1:8093/api/account").read())
+        assert view["connected"] and view["balance"]["total"] == 35.5 and "k" not in json.dumps(view.get("error"))
+        assert "secret" not in json.dumps(view)
+        r = post("/api/bot/close", {"symbol": "AAA/USDT:USDT"}, token)
+        assert not r["ok"] and "keine Position" in r["msg"]
+    finally:
+        srv.shutdown()
