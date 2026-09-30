@@ -243,6 +243,16 @@ class PaperExchange:
                             "realized": 0.0, "fee_in": entry * amount * self.fee}
         return entry
 
+    def dump(self) -> dict:
+        """Spielgeld-Konto sichern (ueberlebt Neustarts)."""
+        return {"cash": self.cash, "pos": self.pos, "orders": self.orders, "closed": self.closed}
+
+    def restore(self, d: dict) -> None:
+        self.cash = float(d.get("cash", self.cash))
+        self.pos = d.get("pos", {})
+        self.orders = d.get("orders", {})
+        self.closed = d.get("closed", {})
+
     def place_limit(self, symbol, side, amount, price, sl, tp):
         oid = f"paper-{symbol}-{len(self.closed)}-{price}"
         self.orders[symbol] = {"id": oid, "side": side, "amount": amount, "price": price, "sl": sl, "tp": tp}

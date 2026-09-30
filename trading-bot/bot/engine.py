@@ -46,6 +46,8 @@ class Bot:
         self.state.setdefault("peak_equity", 0.0)
         self.state.setdefault("pending", {})    # offene Limit-Orders fuer den Einstieg
         self.guard = RiskGuard(self.r, self.state["guard"])
+        if hasattr(self.ex, "restore") and "paper" in self.state:
+            self.ex.restore(self.state["paper"])
         self.ctx = context or MarketContext(cfg["context"])
         self.notify = Notifier(cfg["telegram"]["token"], cfg["telegram"]["chat_id"])
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
@@ -63,6 +65,8 @@ class Bot:
             except Exception as e:  # noqa: BLE001 - Bot soll bei Netzfehlern weiterlaufen
                 log.exception("Fehler im Durchlauf: %s", e)
                 self.status["error"] = str(e)
+            if hasattr(self.ex, "dump"):
+                self.state["paper"] = self.ex.dump()
             save_state(self.state)
             time.sleep(self.cfg["loop_seconds"])
 

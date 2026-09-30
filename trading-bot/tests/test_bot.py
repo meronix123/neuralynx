@@ -401,3 +401,24 @@ def test_real_config_is_consistent():
     assert cfg["timeframe"] in TF_MS and cfg["trend_timeframe"] in TF_MS
     assert cfg["fees"]["entry_order"] in ("market", "limit")
     assert stop_is_safe(100, 100 - cfg["strategy"]["sl_atr"] * 1.5, cfg["leverage"])  # ATR 1,5 %
+
+
+def test_paper_account_survives_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    client = FakeClient(synthetic(1000, 1))
+    ex = PaperExchange(cfg, client)
+    price = ex.last_price("AAA/USDT:USDT")
+    ex.open("AAA/USDT:USDT", "long", 1.0, price * 0.9, price * 1.2)
+    ex.cash -= 5
+    bot = engine.Bot(cfg, ex, FakeContext())
+    bot.state["paper"] = ex.dump()
+    engine.save_state(bot.state)
+
+    ex2 = PaperExchange(cfg, client)
+    engine.Bot(cfg, ex2, FakeContext())       # Neustart
+    assert ex2.cash == pytest.approx(ex.cash)
+    assert "AAA/USDT:USDT" in ex2.positions()
