@@ -337,6 +337,7 @@ def test_regimes_and_strategies_produce_signals():
     """Alle drei Strategien feuern auf passenden Daten, und nur in ihrer Marktlage."""
     df = synthetic(12000, 5)
     s = copy.deepcopy(CFG["strategy"])
+    s["strategies"] = ["trend", "range", "breakout"]
     d = compute_signals(df, resample(df, "1h"), s, "5m", "1h")
     assert set(d["regime"].unique()) >= {"trend_up", "range", "squeeze"}
     fired = d[d.signal != 0]
