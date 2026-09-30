@@ -937,16 +937,21 @@ class FakeBitget:
         self.calls.append(("tpsl", req))
 
 
-def test_account_view_and_actions(tmp_path):
-    from bot.account import Account
+def test_account_view_and_actions(tmp_path, monkeypatch):
+    from bot.account import PROFILE_KEYS, Account
+
+    for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
+        monkeypatch.delenv(n, raising=False)
 
     env = tmp_path / ".env"
     env.write_text("TELEGRAM_TOKEN=abc\n", encoding="utf-8")
     fake = {}
 
     def factory(api, demo=False):
-        fake["c"] = FakeBitget(api, demo)
-        return fake["c"]
+        c = FakeBitget(api, demo)
+        if demo:
+            fake["c"] = c
+        return c
 
     cfg = copy.deepcopy(CFG)
     cfg["api"] = {"key": "", "secret": "", "password": ""}
@@ -957,9 +962,17 @@ def test_account_view_and_actions(tmp_path):
     assert not acc.connected and "BITGET" not in env.read_text()  # falsche Schluessel nie speichern
     acc.connect(" key1 ", "sec", "pass", demo=True)
     text = env.read_text()
-    assert "BITGET_API_KEY=key1" in text and "TELEGRAM_TOKEN=abc" in text and "BITGET_DEMO=1" in text
+    assert "BITGET_DEMO_API_KEY=key1" in text and "TELEGRAM_TOKEN=abc" in text and "BITGET_API_KEY" not in text
     v = acc.view()
     assert v["connected"] and v["demo"] and v["balance"]["free"] == 11.5
+    assert v["profiles"] == {"live": False, "demo": True}
+    # Echtkonto ist getrennt: umschalten -> noch nicht verbunden, eigene Schluessel
+    acc.switch("live")
+    assert not acc.view()["connected"] and acc.view()["active"] == "live"
+    acc.connect("livekey", "s2", "p2", demo=False)
+    assert "BITGET_API_KEY=livekey" in env.read_text() and acc.view()["profiles"] == {"live": True, "demo": True}
+    acc.switch("demo")
+    v = acc.view()
     assert v["positions"][0]["liq"] == 54500 and v["unrealized"] == 4.0
     assert v["orders"][0]["kind"] == "tpsl" and v["orders"][0]["trigger"] == 59000
     assert v["history"][0]["exit"] == 3012 and v["history"][0]["pnl"] == -1.2
@@ -980,8 +993,10 @@ def test_account_view_and_actions(tmp_path):
     assert o[1:5] == ("BTC/USDT:USDT", "market", "sell", 0.002) and o[6]["stopLoss"]["triggerPrice"] == 62000
     acc.close("BTC/USDT:USDT")
     assert ("close_position", "BTC/USDT:USDT", "buy") in c.calls
+    assert acc.close_all() == "Keine offene Position"
     acc.disconnect(forget=True)
-    assert "BITGET_API_KEY=\n" in env.read_text() and not acc.connected
+    text = env.read_text()
+    assert "BITGET_DEMO_API_KEY=\n" in text and "BITGET_API_KEY=livekey" in text and not acc.connected
 
 
 def test_dashboard_actions_need_token(tmp_path, monkeypatch):
@@ -1027,5 +1042,21 @@ def test_dashboard_actions_need_token(tmp_path, monkeypatch):
         assert "secret" not in json.dumps(view)
         r = post("/api/bot/close", {"symbol": "AAA/USDT:USDT"}, token)
         assert not r["ok"] and "keine Position" in r["msg"]
+        assert "keine offene" in post("/api/bot/close_all", {}, token)["msg"]
+        r = post("/api/account/close_all", {}, token)
+        assert r["ok"] and "1 Position" in r["msg"]
+        # Modus: Echtgeld nur mit JA und nur mit Echtkonto-Schluesseln
+        from bot.dashboard import switch_mode
+        for n in ("BITGET_API_KEY", "BITGET_API_SECRET", "BITGET_API_PASSPHRASE", "BITGET_DEMO", "BOT_MODE"):
+            monkeypatch.delenv(n, raising=False)
+        with pytest.raises(RuntimeError):
+            switch_mode(bot, {"mode": "live", "confirm": "JA"}, restart=False, env_path=tmp_path / ".env")
+        monkeypatch.setenv("BITGET_API_KEY", "k")
+        monkeypatch.setenv("BITGET_API_SECRET", "s")
+        monkeypatch.setenv("BITGET_API_PASSPHRASE", "p")
+        with pytest.raises(RuntimeError):
+            switch_mode(bot, {"mode": "live"}, restart=False, env_path=tmp_path / ".env")
+        msg = switch_mode(bot, {"mode": "live", "confirm": "JA"}, restart=False, env_path=tmp_path / ".env")
+        assert "gespeichert" in msg and "BOT_MODE=live" in (tmp_path / ".env").read_text()
     finally:
         srv.shutdown()

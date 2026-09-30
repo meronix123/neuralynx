@@ -5,8 +5,11 @@ das nur die eigene Seite kennt - fremde Webseiten im selben Browser koennen nich
 """
 import json
 import logging
+import os
 import secrets
+import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,6 +25,46 @@ def _num(v):
     return float(str(v).replace(",", "."))
 
 
+MODE_NAMES = {"paper": "Simulation (Paper)", "demo": "Testkonto (Bitget-Demo)", "live": "ECHTES KONTO"}
+
+
+def restart_bot(bot, live_ok: bool) -> None:
+    """Zustand speichern und den Bot mit dem neuen Modus neu starten (gleiches Terminal)."""
+    from .engine import save_state
+    time.sleep(1.5)  # Antwort an die Oberflaeche geht noch raus
+    try:
+        if hasattr(bot.ex, "dump"):
+            bot.state["paper"] = bot.ex.dump()
+        save_state(bot.state, bot.cfg["mode"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("Zustand vor Neustart: %s", e)
+    if live_ok:
+        os.environ["BOT_LIVE_OK"] = "1"
+    run_py = str(Path(__file__).resolve().parent.parent / "run.py")
+    log.info("Neustart im neuen Modus ...")
+    os.execv(sys.executable, [sys.executable, run_py, "bot"])
+
+
+def switch_mode(bot, body: dict, restart=True, env_path=None) -> str:
+    from .account import PROFILE_KEYS, save_env
+    mode = body.get("mode")
+    if mode not in MODE_NAMES:
+        raise ValueError("Modus paper, demo oder live")
+    if mode != "paper":
+        profile = PROFILE_KEYS["demo" if mode == "demo" else "live"]
+        legacy = mode == "demo" and os.getenv("BITGET_DEMO") == "1" and os.getenv("BITGET_API_KEY")
+        if not all(os.getenv(n) for n in profile) and not legacy:
+            raise RuntimeError(f"Erst im Reiter 'Bitget-Konto' die Schluessel fuer {MODE_NAMES[mode]} verbinden")
+    if mode == "live" and body.get("confirm") != "JA":
+        raise RuntimeError("Echtgeld nur mit Bestaetigung JA")
+    if mode == bot.cfg["mode"]:
+        return f"Bot laeuft bereits im Modus {MODE_NAMES[mode]}"
+    save_env({"BOT_MODE": mode}, env_path)
+    if restart:
+        threading.Thread(target=restart_bot, args=(bot, mode == "live"), daemon=True).start()
+    return f"Modus {MODE_NAMES[mode]} gespeichert - Bot startet neu (ca. 5 s), Seite laedt dann neu"
+
+
 def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     """Alle Knoepfe der Oberflaeche. Rueckgabe: Meldung fuer den Nutzer (Fehler -> Exception)."""
     if path == "/api/bot/pause":
@@ -32,6 +75,10 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
         return "Bot handelt wieder"
     if path == "/api/bot/close":
         return bot.request_close(body["symbol"])
+    if path == "/api/bot/close_all":
+        return bot.request_close_all()
+    if path == "/api/bot/mode":
+        return switch_mode(bot, body, env_path=getattr(account, "env_path", None))
     if account is None:
         raise RuntimeError("Konto-Funktion nicht verfuegbar")
     if path == "/api/account/connect":
@@ -41,6 +88,10 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     if path == "/api/account/disconnect":
         account.disconnect(forget=bool(body.get("forget")))
         return "Schluessel geloescht" if body.get("forget") else "Getrennt"
+    if path == "/api/account/switch":
+        return account.switch(body["profile"])
+    if path == "/api/account/close_all":
+        return account.close_all()
     if path == "/api/account/refresh":
         account.refresh(force=True)
         return "Aktualisiert"

@@ -45,6 +45,12 @@
   nav button.on { border-color:var(--blue); background:#1a2233; }
   .btn:hover { border-color:var(--blue); } .btn.red { border-color:#7f1d1d; } .btn.red:hover { background:#7f1d1d; }
   .btn.sm { padding:2px 8px; font-size:12px; }
+  .onoff { font-weight:700; display:flex; align-items:center; gap:8px; }
+  .onoff span { width:30px; height:16px; border-radius:99px; background:#475569; position:relative; }
+  .onoff span::after { content:""; position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:#fff; transition:left .15s; }
+  .onoff.on { border-color:#14532d; } .onoff.on span { background:var(--green); } .onoff.on span::after { left:16px; }
+  .onoff.off { border-color:#7f1d1d; color:var(--red); }
+  select.badge option { background:#171a21; }
   .grid2 { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }
   label { display:block; font-size:12px; color:var(--dim); }
   input, select { width:100%; background:#11141a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; margin-top:2px; }
@@ -60,15 +66,22 @@
 <nav><button id="tab-bot" class="on" onclick="tab('bot')">Bot</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button></nav>
 <div id="toast"></div>
 <main id="view-acc" hidden>
+  <section class="panel" style="grid-column:1/-1">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="note" style="margin:0">Konto anzeigen:</span>
+      <button class="btn" id="prof-demo" onclick="act('/api/account/switch', {profile:'demo'})">Testkonto (Demo)</button>
+      <button class="btn" id="prof-live" onclick="act('/api/account/switch', {profile:'live'})">Echtes Konto</button>
+      <span class="note" style="margin:0">Test- und Echtkonto haben eigene Schluessel. Welches Konto der <b>Bot</b> handelt, waehlst du oben links.</span>
+    </div>
+  </section>
   <section class="panel" style="grid-column:1/-1" id="acc-connect">
-    <h3>Bitget-Konto verbinden</h3>
+    <h3 id="acc-connect-title">Bitget-Konto verbinden</h3>
     <p class="note">Bitget &rarr; Profil &rarr; API-Verwaltung &rarr; neuen Schluessel anlegen. Rechte: <b>nur Futures lesen + handeln</b>, <b>KEIN Auszahlungsrecht</b>, wenn moeglich IP-Beschraenkung.
       Die Schluessel werden einmal geprueft und nur auf diesem PC in der Datei <code>.env</code> gespeichert - nie angezeigt, nie hochgeladen.</p>
     <div class="grid2">
       <label>API-Key<input id="k-key" autocomplete="off"></label>
       <label>Secret<input id="k-secret" type="password" autocomplete="off"></label>
       <label>Passphrase<input id="k-pass" type="password" autocomplete="off"></label>
-      <label><input id="k-demo" type="checkbox"> Demo-Schluessel (Bitget Demo-Handel)</label>
     </div>
     <p><button class="btn" onclick="connectAcc()">Verbinden</button></p>
     <p id="acc-err" class="down"></p>
@@ -284,7 +297,10 @@ function render() {
   const dayPnl = data.equity - data.day_start_equity;
   const fg = data.fear_greed;
   document.getElementById("head").innerHTML = `
-    <span class="badge ${data.mode}">${data.mode.toUpperCase()}</span>
+    <select id="mode-sel" class="badge ${data.mode}" style="width:auto;color:#fff;border:0;padding:4px 8px" onchange="switchMode(this.value)" title="Modus des Bots">
+      <option value="paper" ${data.mode === "paper" ? "selected" : ""}>SIMULATION</option>
+      <option value="demo" ${data.mode === "demo" ? "selected" : ""}>TESTKONTO</option>
+      <option value="live" ${data.mode === "live" ? "selected" : ""}>ECHTES KONTO</option></select>
     <div class="kpi"><span>Konto</span><b>${fmt(data.equity)} USDT</b></div>
     <div class="kpi"><span>Heute</span><b class="${dayPnl >= 0 ? "up" : "down"}">${dayPnl >= 0 ? "+" : ""}${fmt(dayPnl)} USDT</b></div>
     <div class="kpi"><span>Offen (unrealisiert)</span><b class="${(data.unrealized||0) >= 0 ? "up" : "down"}">${(data.unrealized||0) >= 0 ? "+" : ""}${fmt(data.unrealized||0)} USDT</b></div>
@@ -294,7 +310,8 @@ function render() {
     <div class="kpi"><span>Fear &amp; Greed</span><b>${fg ? fg.value + " " + fg.label : "-"}</b></div>
     <div class="kpi"><span>Neue Trades</span><b class="${data.block ? "warn" : "up"}">${data.block || "erlaubt"}</b></div>
     <div class="kpi"><span>Aktualisiert</span><b>${time(data.updated)}</b></div>
-    <button class="btn ${data.paused ? "" : "red"}" onclick="act('/api/bot/pause', {on: ${!data.paused}}, ${data.paused ? "null" : "'Bot pausieren? Er eroeffnet dann keine neuen Trades.'"})">${data.paused ? "Bot fortsetzen" : "Bot pausieren"}</button>`;
+    <button class="btn onoff ${data.paused ? "off" : "on"}" onclick="act('/api/bot/pause', {on: ${!data.paused}}, ${data.paused ? "null" : "'Bot AUS? Er eroeffnet dann keine neuen Trades (offene Positionen behalten Stop/Ziel).'"})"><span></span>Bot ${data.paused ? "AUS" : "AN"}</button>
+    <button class="btn red" onclick="act('/api/bot/close_all', {}, 'ALLE Positionen und Limit-Orders des Bots jetzt zum Marktpreis schliessen?')">Alle Bot-Positionen schliessen</button>`;
 
   const syms = Object.keys(data.symbols);
   if (!selected || !data.symbols[selected]) selected = syms[0];
@@ -365,7 +382,16 @@ function render() {
 }
 
 function renderAcc() {
-  const a = acc || {};
+  const a = acc || {}, prof = a.profiles || {};
+  for (const p of ["demo", "live"]) {
+    const b = document.getElementById("prof-" + p);
+    b.classList.toggle("on", a.active === p);
+    b.style.borderColor = a.active === p ? (p === "live" ? "#ef4444" : "#3b82f6") : "";
+    b.textContent = (p === "demo" ? "Testkonto (Demo)" : "Echtes Konto") + (prof[p] ? " \u2713" : " - nicht verbunden");
+  }
+  document.getElementById("acc-connect-title").textContent = a.active === "demo"
+    ? "Testkonto verbinden (Bitget: Demo-Handel -> API-Verwaltung, Demo-Schluessel)"
+    : "Echtes Bitget-Konto verbinden";
   document.getElementById("acc-connect").hidden = !!a.connected;
   for (const id of ["acc-main", "acc-pos-p", "acc-ord-p", "acc-new-p", "acc-hist-p"]) document.getElementById(id).hidden = !a.connected;
   if (!a.connected) {
@@ -382,6 +408,7 @@ function renderAcc() {
     <div class="kpi"><span>Bot handelt im Modus</span><b>${(a.bot_mode || "-").toUpperCase()}</b></div>
     <div class="kpi"><span>Stand</span><b>${a.updated_ms ? time(a.updated_ms) : "-"}</b></div>
     <button class="btn" onclick="act('/api/account/refresh')">Aktualisieren</button>
+    <button class="btn red" onclick="act('/api/account/close_all', {}, '${a.demo ? "TESTKONTO" : "ECHTES KONTO"}: ALLE offenen Positionen jetzt zum Marktpreis schliessen?')">Alle Positionen schliessen</button>
     <button class="btn" onclick="act('/api/account/disconnect', {forget:false})">Trennen</button>
     <button class="btn red" onclick="act('/api/account/disconnect', {forget:true}, 'Schluessel aus der .env loeschen?')">Schluessel loeschen</button>
     ${a.error ? `<div class="down" style="flex-basis:100%">${a.error}</div>` : ""}`;
@@ -414,9 +441,22 @@ function renderAcc() {
   const sum = h.reduce((s, t) => s + (t.pnl || 0), 0), wins = h.filter(t => (t.pnl || 0) > 0).length;
   if (h.length) document.getElementById("acc-hist").innerHTML += `<tr><td colspan="5"><b>${h.length} Trades, ${wins} Gewinner</b></td><td><b>${usd(sum)}</b></td><td colspan="4"></td></tr>`;
 }
+async function switchMode(m) {
+  const names = { paper: "Simulation (kein echtes Geld)", demo: "Testkonto (Bitget-Demo, Spielgeld)", live: "ECHTES KONTO (echtes Geld!)" };
+  let body = { mode: m };
+  if (m === "live") {
+    const c = prompt("ACHTUNG: Der Bot handelt dann mit ECHTEM GELD und " + data.leverage + "x Hebel.\nZum Bestaetigen JA eingeben:");
+    if (c !== "JA") { render(); return; }
+    body.confirm = "JA";
+  } else if (!confirm(`Bot auf ${names[m]} umstellen? Er startet dazu neu.`)) { render(); return; }
+  const ok = await act("/api/bot/mode", body);
+  if (ok && !/bereits/.test(ok.msg)) setTimeout(() => location.reload(), 7000);
+  else render();
+}
 function val(id) { return document.getElementById(id).value.trim(); }
 async function connectAcc() {
-  const ok = await act("/api/account/connect", { key: val("k-key"), secret: val("k-secret"), password: val("k-pass"), demo: document.getElementById("k-demo").checked });
+  const demo = (acc || {}).active === "demo";
+  const ok = await act("/api/account/connect", { key: val("k-key"), secret: val("k-secret"), password: val("k-pass"), demo });
   if (ok) for (const id of ["k-key", "k-secret", "k-pass"]) document.getElementById(id).value = "";
 }
 function editTpsl(sym, sl, tp) {

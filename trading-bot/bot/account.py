@@ -16,7 +16,11 @@ from .exchange import make_client, place_pos_tpsl
 
 log = logging.getLogger("bot")
 ENV_FILE = ROOT / ".env"
-ENV_KEYS = {"key": "BITGET_API_KEY", "secret": "BITGET_API_SECRET", "password": "BITGET_API_PASSPHRASE"}
+PROFILE_KEYS = {
+    "live": ("BITGET_API_KEY", "BITGET_API_SECRET", "BITGET_API_PASSPHRASE"),
+    "demo": ("BITGET_DEMO_API_KEY", "BITGET_DEMO_API_SECRET", "BITGET_DEMO_API_PASSPHRASE"),
+}
+PROFILE_NAMES = {"live": "Echtkonto", "demo": "Testkonto"}
 HISTORY_DAYS = 30
 REFRESH_S = 15
 
@@ -57,43 +61,73 @@ class Account:
         self.symbols = list(symbols or [])
         self.factory = factory
         self.env_path = env_path
-        self.client = None
-        self.demo = False
+        self.clients: dict = {"live": None, "demo": None}   # Echtkonto / Testkonto (Bitget-Demo)
+        self.active = "demo" if cfg.get("mode") == "demo" else "live"
         self.error = ""
         self.data: dict = {}
         self.updated = 0.0
         self.lock = threading.RLock()
-        api = cfg.get("api") or {}
-        if api.get("key") and api.get("secret") and api.get("password"):
-            try:
-                demo = cfg.get("mode") == "demo" or os.getenv("BITGET_DEMO") == "1"
-                self.connect(api["key"], api["secret"], api["password"], demo, save=False)
-            except Exception as e:  # noqa: BLE001 - Oberflaeche zeigt den Fehler an
-                self.error = f"Gespeicherte Schluessel funktionieren nicht: {e}"
+        for profile, names in PROFILE_KEYS.items():
+            vals = [os.getenv(n, "") for n in names]
+            if profile == "live" and os.getenv("BITGET_DEMO") == "1" and not os.getenv(PROFILE_KEYS["demo"][0]):
+                continue  # alte Speicherung: Demo-Schluessel standen im Echt-Platz
+            if profile == "demo" and not all(vals) and os.getenv("BITGET_DEMO") == "1":
+                vals = [os.getenv(n, "") for n in PROFILE_KEYS["live"]]
+            if all(vals):
+                try:
+                    self.connect(*vals, demo=profile == "demo", save=False, activate=False)
+                except Exception as e:  # noqa: BLE001 - Oberflaeche zeigt den Fehler an
+                    self.error = f"Gespeicherte {PROFILE_NAMES[profile]}-Schluessel funktionieren nicht: {e}"
+        if self.clients[self.active] is None:
+            other = "demo" if self.active == "live" else "live"
+            if self.clients[other] is not None:
+                self.active = other
+        self.refresh(force=True)
 
     # --- Verbindung ------------------------------------------------------
+    @property
+    def client(self):
+        return self.clients.get(self.active)
+
+    @property
+    def demo(self) -> bool:
+        return self.active == "demo"
+
     @property
     def connected(self) -> bool:
         return self.client is not None
 
-    def connect(self, key: str, secret: str, password: str, demo: bool = False, save: bool = True) -> None:
+    def connect(self, key: str, secret: str, password: str, demo: bool = False, save: bool = True,
+                activate: bool = True) -> None:
         key, secret, password = key.strip(), secret.strip(), password.strip()
         if not (key and secret and password):
             raise ValueError("API-Key, Secret und Passphrase eingeben")
+        profile = "demo" if demo else "live"
         client = self.factory({"key": key, "secret": secret, "password": password}, demo=demo)
         client.fetch_balance({"type": "swap"})  # prueft die Schluessel (Fehler -> Exception)
         with self.lock:
-            self.client, self.demo, self.error = client, demo, ""
+            self.clients[profile] = client
+            if activate:
+                self.active, self.error, self.data = profile, "", {}
         if save:
-            save_env({ENV_KEYS["key"]: key, ENV_KEYS["secret"]: secret, ENV_KEYS["password"]: password,
-                      "BITGET_DEMO": "1" if demo else "0"}, self.env_path)
+            save_env(dict(zip(PROFILE_KEYS[profile], (key, secret, password))), self.env_path)
+        if activate:
+            self.refresh(force=True)
+
+    def switch(self, profile: str) -> str:
+        """Zwischen Testkonto (demo) und Echtkonto (live) umschalten."""
+        if profile not in self.clients:
+            raise ValueError("demo oder live")
+        with self.lock:
+            self.active, self.data, self.error, self.updated = profile, {}, "", 0.0
         self.refresh(force=True)
+        return f"{PROFILE_NAMES[profile]} gewaehlt" + ("" if self.connected else " - bitte Schluessel eingeben")
 
     def disconnect(self, forget: bool = False) -> None:
         with self.lock:
-            self.client, self.data, self.error = None, {}, ""
+            self.clients[self.active], self.data, self.error = None, {}, ""
         if forget:
-            save_env({v: "" for v in ENV_KEYS.values()}, self.env_path)
+            save_env({v: "" for v in PROFILE_KEYS[self.active]}, self.env_path)
 
     # --- Daten -----------------------------------------------------------
     def refresh(self, force: bool = False) -> None:
@@ -179,7 +213,8 @@ class Account:
 
     def view(self) -> dict:
         with self.lock:
-            return {"connected": self.connected, "demo": self.demo, "error": self.error,
+            return {"connected": self.connected, "demo": self.demo, "error": self.error, "active": self.active,
+                    "profiles": {k: v is not None for k, v in self.clients.items()},
                     "bot_mode": self.cfg.get("mode"), "symbols": self.symbols, **self.data}
 
     # --- Aktionen --------------------------------------------------------
@@ -210,6 +245,23 @@ class Account:
             msg = f"{symbol}: {qty:g} von {_f(p['contracts']):g} geschlossen"
         self.refresh(force=True)
         return msg
+
+    def close_all(self) -> str:
+        """Alle offenen Positionen des gewaehlten Kontos zum Marktpreis schliessen."""
+        c = self._need()
+        done, failed = [], []
+        for p in c.fetch_positions():
+            if (_f(p.get("contracts")) or 0) <= 0:
+                continue
+            try:
+                c.close_position(p["symbol"], "buy" if p.get("side") == "long" else "sell")
+                done.append(p["symbol"].split(":")[0])
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{p['symbol']}: {e}")
+        self.refresh(force=True)
+        if failed:
+            raise RuntimeError(f"Geschlossen: {', '.join(done) or '-'} | Fehler: {'; '.join(failed)}")
+        return f"{len(done)} Position(en) geschlossen: {', '.join(done)}" if done else "Keine offene Position"
 
     def cancel(self, order_id: str, symbol: str, kind: str = "normal") -> str:
         c = self._need()

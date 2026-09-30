@@ -92,6 +92,13 @@ Danach siehst du Guthaben (gesamt / verfuegbar / gebunden), alle offenen Positio
 Mark-Preis, Liquidation, Margin und unrealisiertem Ergebnis, offene Orders inkl. Stop/Ziel
 und die abgeschlossenen Trades der letzten 30 Tage.
 
+Oben links waehlst du, womit der **Bot** handelt: SIMULATION (Paper), TESTKONTO (Bitget-Demo)
+oder ECHTES KONTO (nur nach Eingabe von JA). Der Bot startet dann selbst neu. Jeder Modus hat
+seine eigene Trade-Historie (state.json, state_demo.json, state_live.json).
+Test- und Echtkonto haben getrennte Schluessel; im Reiter Bitget-Konto kannst du zwischen
+beiden umschalten. "Bot AN/AUS" stoppt neue Trades, "Alle Positionen schliessen" gibt es
+fuer den Bot und fuer das Bitget-Konto.
+
 Knoepfe: Position schliessen (ganz oder 50 %), Stop-Loss/Take-Profit aendern, Order
 stornieren, neue Position eroeffnen (Stop-Loss ist Pflicht), Bot pausieren/fortsetzen.
 Achtung: Diese Knoepfe wirken auf das ECHTE Konto (bzw. Demokonto bei "Demo-Schluessel"),

@@ -8,6 +8,7 @@
     python run.py bot                  # Bot starten (Modus aus config.yaml)
 """
 import argparse
+import os
 import logging
 import sys
 
@@ -36,11 +37,12 @@ def make_exchange(cfg):
     return BitgetExchange(cfg)
 
 
-def report() -> None:
-    """Ist der Bot reif fuer Echtgeld? Auswertung aus state.json."""
+def report(mode: str = "paper") -> None:
+    """Ist der Bot reif fuer Echtgeld? Auswertung der Trades im aktuellen Modus."""
     from bot.engine import load_state
 
-    hist = load_state().get("history", [])
+    print(f"Auswertung Modus: {mode}")
+    hist = load_state(mode).get("history", [])
     if not hist:
         print("Noch keine abgeschlossenen Trades.")
         return
@@ -86,7 +88,7 @@ def main() -> None:
         return
 
     if args.command == "report":
-        report()
+        report(cfg["mode"])
         return
 
     ex = make_exchange(cfg)
@@ -98,7 +100,9 @@ def main() -> None:
 
     if cfg["mode"] == "live":
         print("\n!!! ACHTUNG: ECHTES GELD, Hebel", cfg["leverage"], "!!!")
-        if input("Zum Starten JA eingeben: ").strip() != "JA":
+        if os.environ.pop("BOT_LIVE_OK", "") == "1":
+            print("Echtgeld in der Oberflaeche mit JA bestaetigt.")
+        elif input("Zum Starten JA eingeben: ").strip() != "JA":
             sys.exit("Abgebrochen.")
 
     from bot.engine import Bot

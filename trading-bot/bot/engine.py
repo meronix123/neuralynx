@@ -24,14 +24,20 @@ STOP_FILE = ROOT / "STOP"
 CHART_BARS = 150
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+def state_file(mode: str = "paper"):
+    """Eigene Datei je Modus - Paper-, Test- und Echtgeld-Trades mischen sich nie."""
+    return STATE_FILE if mode == "paper" else STATE_FILE.with_name(f"state_{mode}.json")
+
+
+def load_state(mode: str = "paper") -> dict:
+    f = state_file(mode)
+    if f.exists():
+        return json.loads(f.read_text(encoding="utf-8"))
     return {}
 
 
-def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+def save_state(state: dict, mode: str = "paper") -> None:
+    state_file(mode).write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def _series(df, col):
@@ -45,7 +51,7 @@ class Bot:
         self.s = cfg["strategy"]
         self.r = cfg["risk"]
         self.fee = cfg["fees"]["taker"]
-        self.state = load_state()
+        self.state = load_state(cfg["mode"])
         self.state.setdefault("guard", {})
         self.state.setdefault("meta", {})       # Stop-Verwaltung je offener Position
         self.state.setdefault("last_sig", {})   # zuletzt gehandelter Bar je Symbol
@@ -114,7 +120,7 @@ class Bot:
                 self.status["error"] = str(e)
             if hasattr(self.ex, "dump"):
                 self.state["paper"] = self.ex.dump()
-            save_state(self.state)
+            save_state(self.state, self.cfg["mode"])
             time.sleep(self.cfg["loop_seconds"])
 
     # ------------------------------------------------------------------
@@ -163,6 +169,13 @@ class Bot:
             raise RuntimeError(f"Der Bot hat in {sym} keine Position")
         self.manual_close.append(sym)
         return f"{sym} wird geschlossen (naechster Durchlauf, max. {self.cfg['loop_seconds']} s)"
+
+    def request_close_all(self) -> str:
+        syms = sorted(set(self.state["meta"]) | set(self.state["pending"]))
+        if not syms:
+            return "Der Bot hat keine offene Position"
+        self.manual_close.extend(s for s in syms if s not in self.manual_close)
+        return f"{len(syms)} Position(en)/Order(s) werden geschlossen (max. {self.cfg['loop_seconds']} s)"
 
     def _do_manual_close(self, positions: dict) -> None:
         while self.manual_close:
