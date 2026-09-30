@@ -25,6 +25,7 @@ STRATEGY_SETS = {
     "nur_trend": ["trend"],
     "nur_seitwaerts": ["range"],
     "nur_ausbruch": ["breakout"],
+    "trend+ausbruch": ["trend", "breakout"],
     "alle_nach_lage": ["trend", "range", "breakout"],
 }
 ENTRY = ["market", "limit"]
@@ -112,18 +113,29 @@ def optimize_cli(base: dict, days: int) -> None:
     out = DATA / "optimierung.csv"
     res.to_csv(out, index=False, sep=";", decimal=",")
 
-    ok = res[res.train_trades >= MIN_TRAIN_TRADES].sort_values("train_pf", ascending=False)
+    # Varianten mit identischem Ergebnis (Einstellung wirkt dort gar nicht) nur einmal zeigen
+    result_cols = ["zeit", "strategien", "einstieg", "fuehrung", "filter", "train_trades", "train_pf",
+                   "test_trades", "test_pf", "test_rendite_%"]
+    uniq = res.drop_duplicates(subset=result_cols)
+    ok = uniq[uniq.train_trades >= MIN_TRAIN_TRADES].sort_values("train_pf", ascending=False)
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 30)
     show = [c for c in ok.columns if c != "test_je_strategie"]
+    print(f"\n{len(res)} Varianten, davon {len(uniq)} mit unterschiedlichem Ergebnis.")
     print("\n===== TOP 15 (sortiert nach Training, entscheidend ist TEST) =====")
     print(ok.head(15)[show].to_string(index=False))
     robust = ok[(ok.train_pf > 1.2) & (ok.test_pf > 1.2) & (ok.test_trades >= 10)]
-    print(f"\nVarianten, die in Training UND Test profitabel waren (PF > 1,2): {len(robust)} von {len(res)}")
+    print(f"\nIn Training UND Test profitabel (PF > 1,2): {len(robust)} von {len(uniq)}")
     if len(robust):
-        best = robust.sort_values("test_pf", ascending=False).head(10)
+        best = robust.sort_values("test_pf", ascending=False)
         print(best[show].to_string(index=False))
-        print("\nAufteilung der besten Variante im TEST nach Strategie:")
-        print("  " + best.iloc[0]["test_je_strategie"])
+        print("\nAufteilung im TEST nach Strategie (je robuste Variante):")
+        for _, r in best.head(8).iterrows():
+            print(f"  {r['strategien']:<15} {r['fuehrung']:<12} {r['filter']:<10} -> {r['test_je_strategie']}")
+    print("\nSo haben die Strategie-Kombinationen im Schnitt im TEST abgeschnitten (4h):")
+    four = uniq[uniq.zeit == "4h"]
+    print(four.groupby("strategien")[["test_pf", "test_rendite_%"]].median().round(2).to_string())
+    print("\nWirkung der Zusatz-Filter im Schnitt (4h, TEST):")
+    print(four.groupby("filter")[["test_trades", "test_pf", "test_rendite_%"]].median().round(2).to_string())
     print(f"\nAlle Ergebnisse: {out}  (mit Excel oeffnen)")
     print("Hinweis: Auch eine gute Variante kann kuenftig verlieren. Erst Paper/Demo, dann Echtgeld.")

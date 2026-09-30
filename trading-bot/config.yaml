@@ -46,13 +46,13 @@ strategy:
   rsi_overbought: 70
   rsi_oversold: 30
   adx_min: 20              # Trendstaerke
-  min_score: 5             # Punkte (von 6) fuer einen Einstieg. 3 = mehr Trades, 5 = weniger
+  min_score: 4             # Punkte (von 6) fuer einen Einstieg. 3 = mehr Trades, 5 = weniger
   atr_period: 14
   # Welche Strategien darf der Bot je nach Marktlage einsetzen?
   #   trend    = Trend-Ruecksetzer (bei klarem Trend)
   #   range    = Rueckkehr zur Mitte (seitwaerts)
   #   breakout = Ausbruch nach Ruhephase
-  strategies: [trend, range, breakout]
+  strategies: [trend, breakout]   # "range" (seitwaerts) hat im Jahrestest verloren -> aus
   adx_trend: 22            # ADX ab hier = Trend
   adx_range: 18            # ADX unter hier = seitwaerts
   squeeze_pct: 0.2         # Bollinger-Breite in den untersten 20 % = Ruhephase
