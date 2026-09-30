@@ -80,6 +80,12 @@ strategy:
   funding_block_rank: 0.9  #   -> nicht mit der Masse handeln
   macro_filter: true       # Makro-Ampel (Aktien, Dollar, Zinsen, Stablecoins, DVOL) klar dagegen -> kein Trade
   macro_min: 0.3           #   Long nur, wenn Ampel > -0,3; Short nur, wenn < +0,3
+  ob_filter: "off"         # Order Blocks: off | avoid (Gegen-Zone vor dem Ziel -> kein Trade)
+                           #   | confirm (nur nach Antest einer passenden Zone) | both
+                           #   Erst mit "python run.py optimize --orderblocks" pruefen, dann einschalten
+  ob_disp_atr: 1.5         # Zone zaehlt, wenn der Kurs danach mind. 1,5 x ATR weglaeuft
+  ob_look: 3               #   ... innerhalb von 3 Kerzen
+  ob_room: 0.6             # avoid: 60 % des Weges zum Ziel muessen frei von Gegen-Zonen sein
   health_window: 10        # letzte 10 Trades je Strategie beobachten ...
   health_min_pf: 0.6       # ... Profit-Faktor darunter -> Strategie pausiert
   health_pause_signals: 10 # nach 10 ausgelassenen Signalen ein Probe-Trade (sonst bliebe sie ewig aus)
@@ -114,6 +120,12 @@ strategy:
 flow:
   book_depth_pct: 0.5      # Orderbuch im Bereich +-0,5 % um den Kurs auswerten
   flow_block: 0.35         # Orderbuch + Taker-Fluss klar dagegen (<= -0,35) -> kein Trade
+  wall_range_pct: 2.0      # Orderbuch-Waende im Bereich +-2 % um den Kurs suchen
+  wall_bucket_pct: 0.1     #   in Preisstufen von 0,1 %
+  wall_factor: 3.0         #   Wand = mind. 3 x so viel wie ueblich (Anzeige im Chart)
+  wall_filter: false       # true = keine Trades, wenn eine sehr grosse Gegen-Wand vor dem Ziel liegt
+  wall_block_x: 5.0        #   "sehr gross" = mind. 5 x so viel wie ueblich (nur live, nicht testbar)
+  wall_refresh_s: 60
   display_refresh_s: 120   # wie oft die Oberflaeche Orderbuch-Daten neu holt
 
 filters:

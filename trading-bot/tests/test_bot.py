@@ -517,8 +517,8 @@ def test_filters_and_ml_run_in_simulation():
     filt = simulate(cfg, prep, rules)
     sk = filt["skipped"]
     assert sk["leader"] > 0 and sk["leader"] + sk["health"] + sk["ml"] > 0
-    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "zeiteinheit": 0,
-                               "health": 0, "ml": 0}
+    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "orderblock": 0,
+                               "zeiteinheit": 0, "health": 0, "ml": 0}
     assert filt["end"] == pytest.approx(filt["start"] + filt["table"].pnl.sum())
     assert (filt["table"].why == "zeit").any()
 
@@ -1060,3 +1060,71 @@ def test_dashboard_actions_need_token(tmp_path, monkeypatch):
         assert "gespeichert" in msg and "BOT_MODE=live" in (tmp_path / ".env").read_text()
     finally:
         srv.shutdown()
+
+
+def test_order_blocks_detection_and_filter():
+    import numpy as np
+    from bot.orderblocks import detect, ob_blocks
+
+    # rote Kerze (Bar 2) -> kraeftiger Anstieg -> Ruecklauf in die Zone -> haelt
+    o = np.array([100, 100, 100.5, 99.8, 101.0, 103.0, 102.0, 100.4, 100.6, 101.5])
+    c = np.array([100, 100.5, 99.8, 101.0, 103.0, 102.5, 100.6, 100.5, 101.4, 102.0])
+    h = np.maximum(o, c) + 0.2
+    lo = np.minimum(o, c) - 0.2
+    atr = np.full(10, 1.0)
+    above, below, support, zones = detect(o, h, lo, c, atr, disp_atr=1.5, look=3)
+    z = [z for z in zones if z["kind"] == "bull"][0]
+    assert z["i"] == 2 and z["top"] == pytest.approx(100.7) and z["bottom"] == pytest.approx(99.6)
+    assert z["confirm"] == 4                     # erst mit Bar 4 bekannt (kein Blick in die Zukunft)
+    assert np.isnan(below[3]) and below[4] == pytest.approx(100.7)
+    assert support[7] == 1                        # Antest in Bar 7 gehalten
+    # Ergebnis bis Bar t haengt nie von spaeteren Bars ab
+    a2, b2, s2, _ = detect(o[:6], h[:6], lo[:6], c[:6], atr[:6], 1.5, 3)
+    assert np.array_equal(np.nan_to_num(b2), np.nan_to_num(below[:6])) and np.array_equal(s2, support[:6])
+    # Zone bricht, wenn ein Bar darunter schliesst
+    c2 = c.copy(); c2[8] = 99.0; lo2 = np.minimum(o, c2) - 0.2
+    *_, zones2 = detect(o, h, lo2, c2, atr, 1.5, 3)
+    assert not [z for z in zones2 if z["kind"] == "bull"]
+    s = {"ob_filter": "avoid", "ob_room": 0.6}
+    assert ob_blocks("long", 100, 2.0, 100.8, np.nan, 0, s)       # Widerstand nach 0,8 < 1,2
+    assert not ob_blocks("long", 100, 2.0, 101.5, np.nan, 0, s)
+    assert not ob_blocks("long", 100, 2.0, np.nan, np.nan, 0, s)
+    assert ob_blocks("short", 100, 2.0, np.nan, 99.5, 0, s)
+    assert ob_blocks("long", 100, 2.0, np.nan, np.nan, 0, {"ob_filter": "confirm"})
+    assert not ob_blocks("long", 100, 2.0, np.nan, np.nan, 1, {"ob_filter": "confirm"})
+    assert not ob_blocks("long", 100, 2.0, 100.1, np.nan, 0, {"ob_filter": "off"})
+    assert not ob_blocks("long", 100, 2.0, 100.1, np.nan, 0, {"ob_filter": False})  # YAML: off -> False
+
+
+def test_order_book_walls():
+    from bot.flow import book_walls, wall_blocks
+
+    bids = [[100 - i * 0.01, 1.0] for i in range(1, 200)] + [[99.0, 80.0]]
+    asks = [[100 + i * 0.01, 1.0] for i in range(1, 200)] + [[101.2, 60.0]]
+    w = book_walls({"bids": sorted(bids, reverse=True), "asks": sorted(asks)}, 2.0, 0.1, 3.0)
+    assert w["bids"][0]["price"] == pytest.approx(99.0, abs=0.05) and w["bids"][0]["usdt"] > 7000
+    assert w["asks"][0]["price"] == pytest.approx(101.2, abs=0.05)
+    assert w["range_pct"] > 1.5
+    cfg = {"wall_filter": True, "wall_block_x": 5.0}
+    assert wall_blocks("long", 100.0, 102.0, w, cfg)          # Verkaufs-Wand vor dem Ziel
+    assert not wall_blocks("long", 100.0, 101.0, w, cfg)      # Ziel vor der Wand
+    assert not wall_blocks("long", 100.0, 102.0, w, {"wall_filter": False})
+    assert book_walls({"bids": [], "asks": []})["bids"] == []
+
+
+def test_orderblock_comparison_runs():
+    from bot import optimize
+
+    saved = (optimize.OB_DISP, optimize.OB_MODES)
+    try:
+        optimize.OB_DISP = [1.5]
+        optimize.OB_MODES = {k: optimize.OB_MODES[k] for k in ("ohne", "meiden_60%", "nur_nach_antest")}
+        cfg = copy.deepcopy(CFG)
+        cfg["strategy"]["strategies"] = ["trend", "range", "breakout"]
+        data = {"AAA/USDT:USDT": synthetic(6000, 1)}
+        res = optimize.compare_orderblocks(cfg, data, {"AAA/USDT:USDT": (0.0001, 0.0001)}, base_tf="5m")
+        assert list(res.order_blocks) == ["ohne", "meiden_60%", "nur_nach_antest"]
+        assert res.iloc[0]["aussortiert_test"] == 0 and res.iloc[2]["aussortiert_test"] > 0
+        assert res.iloc[2]["test_trades"] < res.iloc[0]["test_trades"]
+    finally:
+        optimize.OB_DISP, optimize.OB_MODES = saved

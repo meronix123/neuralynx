@@ -10,7 +10,8 @@ import time
 
 import pandas as pd
 
-from .backtest import DATA, fetch_history, load_funding, load_macro, prepare, simulate, streams, usable
+from .backtest import (DATA, fetch_history, load_funding, load_macro, prepare, prepare_multi, simulate, streams,
+                       usable)
 from .exchange import make_client, resolve_symbols
 from .tfselect import tf_cfg
 
@@ -264,3 +265,74 @@ def compare_cli(base: dict, days: int) -> None:
     for _, r in res[res.modus.str.startswith("auto")].iterrows():
         print(f"  {r['modus']:<12} {r['strategien']:<15} {r['filter']:<18} -> {r['test_je_zeiteinheit']}")
     print(f"\nAlle Ergebnisse: {out}  (mit Excel oeffnen)")
+
+
+# ---------------------------------------------------------------------------
+# Order-Block-Test: aktuelle Einstellungen (config.yaml) mit und ohne Order-Block-Filter
+OB_DISP = [1.0, 1.5, 2.0]          # wie kraeftig die Bewegung nach der Zone sein muss (x ATR)
+OB_MODES = {
+    "ohne": dict(ob_filter="off"),
+    "meiden_60%": dict(ob_filter="avoid", ob_room=0.6),
+    "meiden_100%": dict(ob_filter="avoid", ob_room=1.0),
+    "nur_nach_antest": dict(ob_filter="confirm"),
+    "beides": dict(ob_filter="both", ob_room=0.6),
+}
+
+
+def compare_orderblocks(base: dict, data: dict, rules: dict, base_tf: str = "15m",
+                        funding: dict | None = None, macro: pd.DataFrame | None = None) -> pd.DataFrame:
+    all_ts = sorted(set().union(*[set(df["ts"]) for df in data.values()]))
+    split = all_ts[int(len(all_ts) * 2 / 3)]
+    rows, t0, done = [], time.time(), 0
+    total = len(OB_DISP) * len(OB_MODES)
+    for disp in OB_DISP:
+        cfg0 = copy.deepcopy(base)
+        cfg0["strategy"]["ob_disp_atr"] = disp
+        prep = prepare_multi(cfg0, data, base_tf, funding, macro)
+        for name, upd in OB_MODES.items():
+            if name == "ohne" and disp != OB_DISP[0]:
+                continue  # ohne Filter spielt die Staerke keine Rolle
+            cfg = copy.deepcopy(cfg0)
+            cfg["strategy"].update(upd)
+            train = simulate(cfg, prep, rules, end_ts=split)
+            test = simulate(cfg, prep, rules, start_ts=split)
+            rows.append({
+                "order_blocks": name, "staerke_atr": disp if name != "ohne" else "-",
+                "train_trades": train["trades"], "train_pf": round(train.get("profit_factor", 0), 2),
+                "train_rendite_%": round(train.get("return_pct", 0), 1),
+                "test_trades": test["trades"], "test_pf": round(test.get("profit_factor", 0), 2),
+                "test_rendite_%": round(test.get("return_pct", 0), 1),
+                "test_max_rueckgang_%": round(test.get("max_drawdown_pct", 0), 1),
+                "test_trades_pro_tag": round(test.get("trades_per_day", 0), 2),
+                "aussortiert_test": test["skipped"].get("orderblock", 0),
+            })
+            done += 1
+            print(f"\r  Variante {done}/{total}  ({time.time() - t0:.0f} s)", end="", flush=True)
+    print()
+    return pd.DataFrame(rows)
+
+
+def orderblocks_cli(base: dict, days: int) -> None:
+    from .tfselect import active_tfs
+    from .strategy import TF_MS
+    base_tf = min(active_tfs(base), key=lambda t: TF_MS[t])
+    print(f"Order-Block-Test mit den aktuellen Einstellungen (Zeiteinheiten: {', '.join(active_tfs(base))}).")
+    client = make_client()
+    symbols = resolve_symbols(client, base["symbols"])
+    data, rules = {}, {}
+    for sym in symbols:
+        print(f"Lade {days} Tage {sym} ({base_tf}) ...")
+        data[sym] = fetch_history(client, sym, base_tf, days)
+        m = client.market(sym)
+        rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
+    data = usable(data)
+    res = compare_orderblocks(base, data, rules, base_tf, load_funding(client, list(data), days), load_macro(days))
+    DATA.mkdir(exist_ok=True)
+    out = DATA / "orderblocks.csv"
+    res.to_csv(out, index=False, sep=";", decimal=",")
+    pd.set_option("display.width", 250)
+    pd.set_option("display.max_columns", 30)
+    print("\n===== ERGEBNIS (sortiert nach TEST-Profit-Faktor) =====")
+    print(res.sort_values("test_pf", ascending=False).to_string(index=False))
+    print(f"\nAlle Ergebnisse: {out}")
+    print("Hinweis: Die Orderbuch-Waende lassen sich nicht rueckwirkend testen (Bitget speichert kein altes Orderbuch).")

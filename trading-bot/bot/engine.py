@@ -4,13 +4,16 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import numpy as np
+
 from .config import ROOT
 from .context import MarketContext
 from .derivs import fetch_funding_history, funding_blocks, live_rank
 from .exchange import is_metal, spread_from_ticker
 from .macro import fetch_macro, latest as macro_latest, macro_blocks
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
-from .flow import FlowMonitor, flow_score, flow_verdict
+from .flow import FlowMonitor, fetch_walls, flow_score, flow_verdict, wall_blocks
+from .orderblocks import ob_blocks, zones_for_chart
 from .ml import features, train_from_examples
 from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
@@ -561,6 +564,11 @@ class Bot:
             self.state["last_sig"][sig_key] = sig.ts
             return f"Strategie '{STRATEGY_NAMES.get(sig.strategy, sig.strategy)}' pausiert (laeuft gerade schlecht)"
         row = view["sig_df"].iloc[-2]
+        ob_why = ob_blocks(sig.side, float(row["close"]), float(row["tp_dist"]), row.get("ob_above", np.nan),
+                           row.get("ob_below", np.nan), int(row.get("ob_support", 0) or 0), s)
+        if ob_why:
+            self.state["last_sig"][sig_key] = sig.ts
+            return ob_why
         x = features({k: row[k] for k in ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n",
                                           "trend", "regime", "strategy") if k in row}, sig.side)
         prob = self.model.proba(x) if (self.s.get("ml_filter") and self.model) else None
@@ -575,6 +583,9 @@ class Bot:
         ok, flow_why, flow_factor = flow_verdict(sig.side, flow, self.flow_cfg)
         if not ok:
             return flow_why
+        wall_why = wall_blocks(sig.side, sig.price, sig.tp, self._walls(sym, force=True), self.flow_cfg)
+        if wall_why:
+            return wall_why
         risk_factor *= flow_factor
         info = {"strategy": sig.strategy, "regime": sig.regime, "x": x, "ml_prob": prob, "tf": tf,
                 "mtf": view["snapshot"].get("mtf"), "mtf_score": view["snapshot"].get("mtf_score"),
@@ -615,6 +626,18 @@ class Bot:
             f"Tagesbericht: {len(day)} Trades, {wins} Gewinner | Konto {start:.2f} -> {end:.2f} USDT "
             f"({(end / start - 1) * 100:+.1f} %)"
         )
+
+    def _walls(self, sym: str, force: bool = False) -> dict | None:
+        """Grosse Orderbuch-Waende (jede Minute neu, vor einem Einstieg sofort)."""
+        cache = self.__dict__.setdefault("_wall_cache", {})
+        at, w = cache.get(sym, (0, None))
+        if force or time.time() - at > self.flow_cfg.get("wall_refresh_s", 60):
+            try:
+                w = fetch_walls(self.ex.c, sym, self.flow_cfg)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Waende %s: %s", sym, e)
+            cache[sym] = (time.time(), w)
+        return w
 
     def _flow_for_display(self, sym: str) -> dict | None:
         at, m = self.last_flow.get(sym, (0, None))
@@ -695,6 +718,8 @@ class Bot:
                 "position": {**positions[sym], **(m or {})} if sym in positions else None,
                 "pending": self.state["pending"].get(sym),
                 "market": market.get(sym),
+                "order_blocks": zones_for_chart(df, self.s),
+                "walls": self._walls(sym),
                 "flow": self._flow_for_display(sym),
                 "candles": [
                     {"time": int(r.ts // 1000), "open": r.open, "high": r.high, "low": r.low, "close": r.close}

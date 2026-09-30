@@ -23,6 +23,74 @@ def book_imbalance(book: dict, depth_pct: float = 0.5) -> float | None:
     return (b - a) / (a + b) if a + b > 0 else None
 
 
+def book_walls(book: dict, range_pct: float = 2.0, bucket_pct: float = 0.1, factor: float = 3.0,
+               top: int = 3) -> dict:
+    """Grosse Orderbuch-Waende: Preisbereiche (je bucket_pct %), in denen deutlich mehr liegt
+    (>= factor x Median) als sonst im Bereich +-range_pct % um den Kurs.
+    Rueckgabe: {"bids": [...], "asks": [...], "range_pct": abgedeckter Bereich} - Groesse in USDT."""
+    bids, asks = book.get("bids") or [], book.get("asks") or []
+    if not bids or not asks:
+        return {"bids": [], "asks": [], "range_pct": 0.0}
+    mid = (bids[0][0] + asks[0][0]) / 2
+    step = mid * bucket_pct / 100
+    out = {}
+    buckets_all = []
+    for side, rows in (("bids", bids), ("asks", asks)):
+        b: dict[int, list[float]] = {}
+        for p, q, *_ in rows:
+            if abs(p - mid) / mid * 100 > range_pct:
+                continue
+            k = int((p - mid) // step)
+            x = b.setdefault(k, [0.0, 0.0])
+            x[0] += p * q          # USDT
+            x[1] += p * p * q      # fuer volumengewichteten Preis
+        out[side] = b
+        buckets_all += [v[0] for v in b.values()]
+    if not buckets_all:
+        return {"bids": [], "asks": [], "range_pct": 0.0}
+    med = float(sorted(buckets_all)[len(buckets_all) // 2])
+    res = {}
+    for side in ("bids", "asks"):
+        walls = [{"price": v[1] / v[0], "usdt": v[0], "x_median": v[0] / med if med else None}
+                 for v in out[side].values() if v[0] >= factor * med]
+        res[side] = sorted(walls, key=lambda w: -w["usdt"])[:top]
+    lo = min(p for p, *_ in bids)
+    hi = max(p for p, *_ in asks)
+    res["range_pct"] = round(min(mid - lo, hi - mid) / mid * 100, 3)
+    return res
+
+
+def fetch_walls(client, symbol: str, cfg: dict) -> dict:
+    """Orderbuch moeglichst tief laden (Bitget fasst Preisstufen zusammen) und Waende suchen."""
+    best = None
+    for params in ({"precision": "scale2", "limit": "max"}, {"precision": "scale1", "limit": "max"}, {}):
+        try:
+            book = client.fetch_order_book(symbol, None if params else 100, params)
+        except Exception as e:  # noqa: BLE001 - nicht jede Stufe gibt es fuer jeden Markt
+            log.debug("Orderbuch %s %s: %s", symbol, params, e)
+            continue
+        w = book_walls(book, cfg.get("wall_range_pct", 2.0), cfg.get("wall_bucket_pct", 0.1),
+                       cfg.get("wall_factor", 3.0))
+        if best is None or w["range_pct"] > best["range_pct"]:
+            best = w
+        if w["range_pct"] >= cfg.get("wall_range_pct", 2.0) * 0.8:
+            break
+    return best or {"bids": [], "asks": [], "range_pct": 0.0}
+
+
+def wall_blocks(side: str, price: float, tp: float, walls: dict | None, cfg: dict) -> str:
+    """Optional (flow.wall_filter): grosse Gegen-Wand zwischen Einstieg und Ziel -> kein Trade."""
+    if not cfg.get("wall_filter") or not walls:
+        return ""
+    min_x = cfg.get("wall_block_x", 5.0)
+    rows = walls.get("asks" if side == "long" else "bids") or []
+    for w in rows:
+        between = price < w["price"] < tp if side == "long" else tp < w["price"] < price
+        if between and (w.get("x_median") or 0) >= min_x:
+            return f"grosse {'Verkaufs' if side == 'long' else 'Kauf'}-Wand bei {w['price']:.6g} vor dem Ziel"
+    return ""
+
+
 def taker_flow(trades: list) -> float | None:
     """Anteil aggressiver Kaeufe minus Verkaeufe der letzten Trades (-1..+1)."""
     buy = sum(t["amount"] for t in trades if t.get("side") == "buy")

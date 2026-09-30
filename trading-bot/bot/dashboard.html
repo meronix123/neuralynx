@@ -127,6 +127,8 @@
       <span><i style="background:#ef4444"></i>Stop-Loss</span>
       <span><i style="background:#22c55e"></i>Take-Profit</span>
       <span>gestrichelt = Plan, falls jetzt eingestiegen wuerde</span>
+      <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-ob" onchange="toggleShow('ob')"> <i style="background:#22c55e;opacity:.6"></i><i style="background:#ef4444;opacity:.6"></i>Order Blocks (Ober-/Unterkante)</label>
+      <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-walls" onchange="toggleShow('walls')"> <i style="background:#38bdf8"></i><i style="background:#fb923c"></i>Orderbuch-Waende</label>
     </div>
   </section>
   <section class="panel">
@@ -196,6 +198,16 @@ const emaS = chart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisibl
 const vwap = chart.addLineSeries({ color:"#64748b", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false });
 new ResizeObserver(() => chart.applyOptions({ width: document.getElementById("chart").clientWidth })).observe(document.getElementById("chart"));
 
+function zline(price, color, title, style, width) {
+  lines.push(candles.createPriceLine({ price, color, title, lineWidth: width || 1, lineStyle: style, axisLabelVisible: !!title }));
+}
+let show = { ob: true, walls: true };
+try { show = { ...show, ...JSON.parse(localStorage.getItem("chart_show") || "{}") }; } catch (e) { /* ohne Speicher */ }
+function toggleShow(k) {
+  show[k] = !show[k];
+  try { localStorage.setItem("chart_show", JSON.stringify(show)); } catch (e) { /* egal */ }
+  render();
+}
 function line(price, color, title, dashed) {
   lines.push(candles.createPriceLine({ price, color, title, lineWidth: 2, lineStyle: dashed ? 2 : 0, axisLabelVisible: true }));
 }
@@ -231,17 +243,34 @@ function renderPositions() {
 }
 
 function renderMarket(syms) {
-  const head = `<tr><th>Markt</th><th>Kurs</th><th>24h</th><th>24h Hoch</th><th>24h Tief</th><th>24h Umsatz (USDT)</th><th>Geld / Brief</th><th>Spread</th><th>Funding (8h)</th><th>Marktlage</th><th>Position</th><th>Bot</th></tr>`;
+  const head = `<tr><th>Markt</th><th>Kurs</th><th>24h</th><th>24h Hoch</th><th>24h Tief</th><th>24h Umsatz (USDT)</th><th>Geld / Brief</th><th>Spread</th><th>Funding (8h)</th><th>Kauf-Wand</th><th>Verkaufs-Wand</th><th>Marktlage</th><th>Position</th><th>Bot</th></tr>`;
   document.getElementById("market").innerHTML = head + syms.map(sym => {
     const s = data.symbols[sym], m = s.market || {}, pos = s.position;
     const f = m.funding == null ? "-" : `<span class="${Math.abs(m.funding) > 0.0005 ? "warn" : ""}">${fmt(m.funding * 100, 4)} %</span>`;
     return `<tr onclick="selected='${sym}';render()" style="cursor:pointer"><td>${sym.split(":")[0]}</td><td><b>${px(m.last ?? s.snapshot.close)}</b></td><td>${chg(m.change_pct)}</td>
       <td>${px(m.high)}</td><td>${px(m.low)}</td><td>${big(m.volume_usd)}</td><td>${px(m.bid)} / ${px(m.ask)}</td>
-      <td>${m.spread_pct == null ? "-" : fmt(m.spread_pct, 3) + " %"}</td><td>${f}</td><td>${s.snapshot.regime_text}</td>
+      <td>${m.spread_pct == null ? "-" : fmt(m.spread_pct, 3) + " %"}</td><td>${f}</td>
+      <td style="color:#38bdf8">${(s.walls && s.walls.bids && s.walls.bids[0]) ? px(s.walls.bids[0].price) + " (" + big(s.walls.bids[0].usdt) + ")" : "-"}</td>
+      <td style="color:#fb923c">${(s.walls && s.walls.asks && s.walls.asks[0]) ? px(s.walls.asks[0].price) + " (" + big(s.walls.asks[0].usdt) + ")" : "-"}</td>
+      <td>${s.snapshot.regime_text}</td>
       <td>${pos ? `<span class="${pos.side === "long" ? "up" : "down"}">${pos.side.toUpperCase()}</span>` : "-"}</td><td style="text-align:left">${s.reason}</td></tr>`;
   }).join("");
 }
 
+function obRows(s) {
+  const price = (s.market || {}).last ?? s.snapshot.close;
+  const zs = s.order_blocks || [], w = s.walls || {};
+  const near = k => zs.filter(z => z.kind === k).sort((a, b) => Math.abs((a.top + a.bottom) / 2 - price) - Math.abs((b.top + b.bottom) / 2 - price))[0];
+  const zb = near("bull"), zr = near("bear");
+  const zt = z => z ? `${px(z.bottom)} - ${px(z.top)} (${fmt(Math.abs((z.top + z.bottom) / 2 - price) / price * 100)} %)` : "-";
+  const wt = a => a && a.length ? `${px(a[0].price)} (${big(a[0].usdt)} USDT, ${fmt(a[0].x_median, 1)}x)` : "-";
+  return [
+    ["Order Block Kauf (Unterstuetzung)", `<span class="up">${zt(zb)}</span>`],
+    ["Order Block Verkauf (Widerstand)", `<span class="down">${zt(zr)}</span>`],
+    ["Groesste Kauf-Wand", `<span style="color:#38bdf8">${wt(w.bids)}</span>`],
+    ["Groesste Verkaufs-Wand", `<span style="color:#fb923c">${wt(w.asks)}</span>`],
+  ];
+}
 function tfRows() {
   const st = data.tf_stats || {};
   if (data.tf_select === "fixed" || !Object.keys(st).length) return [];
@@ -331,6 +360,7 @@ function render() {
   emaF.setData(series(s.ema_fast)); emaS.setData(series(s.ema_slow)); vwap.setData(series(s.vwap));
 
   lines.forEach(l => candles.removePriceLine(l)); lines = [];
+  document.getElementById("cb-ob").checked = show.ob; document.getElementById("cb-walls").checked = show.walls;
   const p = s.position, plan = s.snapshot.plan;
   if (p) {
     line(p.entry, "#3b82f6", "Einstieg"); line(p.sl, "#ef4444", "SL"); line(p.tp, "#22c55e", "TP");
@@ -338,6 +368,15 @@ function render() {
     line(s.pending.price, "#3b82f6", "Limit-Order", true); line(s.pending.sl, "#ef4444", "SL", true); line(s.pending.tp, "#22c55e", "TP", true);
   } else if (plan) {
     line(plan.sl, "#ef4444", "Plan SL", true); line(plan.tp, "#22c55e", "Plan TP", true);
+  }
+  if (show.ob) for (const z of s.order_blocks || []) {
+    const col = z.kind === "bull" ? "rgba(34,197,94,0.55)" : "rgba(239,68,68,0.55)";
+    const name = z.kind === "bull" ? "OB Kauf" : "OB Verkauf";
+    zline(z.top, col, z.kind === "bull" ? name : "", 1); zline(z.bottom, col, z.kind === "bear" ? name : "", 1);
+  }
+  if (show.walls && s.walls) {
+    for (const w of (s.walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.9)", "Kauf-Wand " + big(w.usdt), 3, 2);
+    for (const w of (s.walls.asks || []).slice(0, 2)) zline(w.price, "rgba(251,146,60,0.9)", "Verk.-Wand " + big(w.usdt), 3, 2);
   }
   const markers = data.history.filter(t => t.symbol === selected).flatMap(t => [
     { time: Math.floor(t.opened_ms / 1000 / data.tf_seconds) * data.tf_seconds + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
@@ -363,6 +402,7 @@ function render() {
     ["VWAP", px(v.vwap)],
     ["Makro-Ampel", v.macro == null ? "-" : `<span class="${v.macro > 0.25 ? "up" : v.macro < -0.25 ? "down" : ""}">${v.macro > 0.25 ? "Risiko an" : v.macro < -0.25 ? "Risiko aus" : "neutral"} (${v.macro > 0 ? "+" : ""}${fmt(v.macro)})</span>`],
     ...tfRows(),
+    ...obRows(s),
     ...flowRows(s.flow),
   ].map(([k, val]) => `<div class="row"><span>${k}</span><b>${val}</b></div>`).join("");
 

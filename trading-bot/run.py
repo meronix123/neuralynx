@@ -3,6 +3,7 @@
     python run.py optimize --days 365  # viele Einstellungen testen (dauert)
     python run.py optimize --fast      # Schnell-Modus: 5m/15m/30m-Einstiege (120 Tage)
     python run.py optimize --zeiten    # feste Zeiteinheit gegen automatische Wahl (365 Tage)
+    python run.py optimize --orderblocks  # Order-Block-Filter testen (365 Tage)
     python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
@@ -71,6 +72,7 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
     ap.add_argument("--zeiten", action="store_true", help="feste Zeiteinheit gegen automatische Wahl")
+    ap.add_argument("--orderblocks", action="store_true", help="Order-Block-Filter testen")
     args = ap.parse_args()
     cfg = load_config()
     setup_logging()
@@ -80,7 +82,10 @@ def main() -> None:
         backtest_cli(cfg, args.days or 60)
         return
     if args.command == "optimize":
-        from bot.optimize import compare_cli, optimize_cli
+        from bot.optimize import compare_cli, optimize_cli, orderblocks_cli
+        if args.orderblocks:
+            orderblocks_cli(cfg, args.days or 365)
+            return
         if args.zeiten:
             compare_cli(cfg, args.days or 365)
             return

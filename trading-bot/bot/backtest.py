@@ -19,6 +19,7 @@ from .macro import fetch_macro, macro_blocks, merge_macro
 from .exchange import is_metal, make_client, resolve_symbols, to_df
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .ml import SignalModel, features
+from .orderblocks import ob_blocks
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
 from .strategy import TF_MS, compute_signals, higher_tfs, levels_from, resample, trail_stop
 from .tfselect import ShadowBook, active_tfs, adaptive, shadow_results, tf_cfg
@@ -75,7 +76,8 @@ def usable(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
 
 PREP_COLS = ("ts", "open", "high", "low", "close", "atr", "signal", "sl_dist", "tp_dist", "strategy", "regime",
-             "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "mtf_score", "funding_rank", "macro_score")
+             "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "mtf_score", "funding_rank", "macro_score",
+             "ob_above", "ob_below", "ob_support")
 FEATURE_COLS = ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "regime", "strategy")
 
 
@@ -141,7 +143,8 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     model, examples, trained_at = SignalModel(), list(seed_examples or []), 0
     strat_pnls: dict[str, list[float]] = {}
     health_skips: dict[str, int] = {}
-    skipped = {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "zeiteinheit": 0, "health": 0, "ml": 0}
+    skipped = {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "orderblock": 0, "zeiteinheit": 0,
+               "health": 0, "ml": 0}
 
     # Jeder Datenstrom (Markt oder Markt|Zeiteinheit) wird zum Bar-SCHLUSS verarbeitet
     meta = {k: (d.get("sym", k), d.get("tf", cfg["timeframe"])) for k, d in prep.items()}
@@ -292,6 +295,10 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 if "macro_score" in d and macro_blocks(side, d["macro_score"][i], s):
                     skipped["macro"] += 1
                     continue
+                if "ob_above" in d and ob_blocks(side, c, d["tp_dist"][i], d["ob_above"][i], d["ob_below"][i],
+                                                 d["ob_support"][i], s):
+                    skipped["orderblock"] += 1
+                    continue
                 if book is not None and not book.stats(tf, t_close, s)["ok"]:
                     skipped["zeiteinheit"] += 1
                     continue
@@ -439,7 +446,7 @@ def print_report(res: dict, days: int) -> None:
         if any(sk.values()):
             print(f"\nAussortierte Signale: BTC-Filter {sk.get('leader', 0)}, Zeitebenen {sk.get('mtf', 0)}, "
                   f"Funding {sk.get('funding', 0)}, Makro {sk.get('macro', 0)}, "
-                  f"Zeiteinheit laeuft schlecht {sk.get('zeiteinheit', 0)}, "
+                  f"Order Blocks {sk.get('orderblock', 0)}, Zeiteinheit laeuft schlecht {sk.get('zeiteinheit', 0)}, "
                   f"Strategie pausiert {sk.get('health', 0)}, ML-Filter {sk.get('ml', 0)}")
     print("==============================")
     print("Hinweis: Vergangene Ergebnisse garantieren keine zukuenftigen Gewinne.")

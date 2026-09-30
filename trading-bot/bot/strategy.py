@@ -252,7 +252,9 @@ def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
     # ---------------- Gesamtrichtung ueber alle hoeheren Zeitebenen ----------------
     # (der Filter selbst sitzt in filters.mtf_blocks - im Backtest und live gleich)
     d = _merge_mtf(d, mtf or {})
-    return d
+    # Order Blocks (Smart-Money-Zonen) - Filter sitzt in orderblocks.ob_blocks
+    from .orderblocks import add_columns
+    return add_columns(d, s)
 
 
 def levels(side: str, price: float, atr_value: float, s: dict) -> tuple[float, float]:
