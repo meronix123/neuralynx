@@ -17,11 +17,10 @@ symbols:
   - GOLD
   - SILVER
 
-# Einstellung nach dem Jahrestest (python run.py optimize --days 365, Stand 30.09.2026):
-# 4h, Trend + Ausbruch, Limit-Einstieg, kein Teilverkauf, Filter inkl. Zeitebenen, ohne ML.
-# Bester Einzelwert im Test: PF 1,31 / +6 % bei 38 Trades. Noch KEIN Beweis -> erst Paper-Modus!
-timeframe: 4h          # Einstiegs-Zeiteinheit
-trend_timeframe: 1d    # Trendfilter
+# Auf Wunsch 1h-Einstieg (Trend 4h, Orientierung bis 1 Woche). Achtung: Im Jahrestest lag 1h
+# im Schnitt leicht im Minus, 4h im Plus. Deshalb erst im Paper-Modus beobachten!
+timeframe: 1h          # Einstiegs-Zeiteinheit (4h war im Jahrestest besser - bei Bedarf zurueck: 4h / 1d / 20 / 50)
+trend_timeframe: 4h    # Trendfilter
 leverage: 10
 margin_mode: isolated  # isolated = maximaler Verlust pro Position begrenzt
 
@@ -39,8 +38,8 @@ risk:
 strategy:
   ema_fast: 21
   ema_slow: 50
-  trend_ema_fast: 20
-  trend_ema_slow: 50
+  trend_ema_fast: 50
+  trend_ema_slow: 200
   rsi_period: 14
   rsi_long_trigger: 40     # Ausloeser Long: RSI kreuzt nach Ruecksetzer ueber 40
   rsi_short_trigger: 60    # Ausloeser Short: RSI kreuzt nach Anstieg unter 60
