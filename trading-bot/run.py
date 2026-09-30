@@ -1,5 +1,6 @@
 """Start:
     python run.py backtest --days 60   # Strategie an alten Daten pruefen
+    python run.py optimize --days 180  # viele Einstellungen testen (dauert)
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
 """
@@ -34,15 +35,19 @@ def make_exchange(cfg):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "check", "bot"])
-    ap.add_argument("--days", type=int, default=60)
+    ap.add_argument("command", choices=["backtest", "optimize", "check", "bot"])
+    ap.add_argument("--days", type=int, default=None)
     args = ap.parse_args()
     cfg = load_config()
     setup_logging()
 
     if args.command == "backtest":
         from bot.backtest import backtest_cli
-        backtest_cli(cfg, args.days)
+        backtest_cli(cfg, args.days or 60)
+        return
+    if args.command == "optimize":
+        from bot.optimize import optimize_cli
+        optimize_cli(cfg, args.days or 180)
         return
 
     ex = make_exchange(cfg)

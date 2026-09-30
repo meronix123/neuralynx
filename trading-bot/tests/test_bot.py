@@ -262,3 +262,62 @@ def test_dashboard_serves_status():
     js = urllib.request.urlopen(f"http://127.0.0.1:{port}/lightweight-charts.js").read()
     assert b"Lightweight Charts" in js
     srv.shutdown()
+
+
+def test_partial_take_profit_and_pyramiding_accounting():
+    """Kontrollierter Ablauf: Einstieg 100, Teilverkauf bei +1R, Aufstocken, Stop auf Einstand."""
+    from bot.backtest import simulate
+
+    cfg = copy.deepcopy(CFG)
+    cfg["fees"].update(slippage=0.0, entry_order="market")
+    cfg["strategy"].update(sl_atr=1.0, tp_atr=5.0, breakeven_at_r=1e9, partial_tp_r=1.0, partial_tp_frac=0.5,
+                           pyramid_at_r=1.0, pyramid_max_adds=1, pyramid_size_frac=0.5)
+    #          Signal    Einstieg   +1R erreicht   Ruecksetzer
+    bars = [(100, 100.3, 99.9, 100), (100, 100.5, 99.8, 100.2), (100.2, 101.5, 100.1, 101.4),
+            (101.4, 101.5, 100.0, 100.5), (100.5, 100.6, 100.4, 100.5)]
+    prep = {"AAA/USDT:USDT": {
+        "ts": [1_700_000_000_000 + i * 900_000 for i in range(len(bars))],
+        "open": [b[0] for b in bars], "high": [b[1] for b in bars], "low": [b[2] for b in bars],
+        "close": [b[3] for b in bars], "atr": [1.0] * len(bars), "signal": [1, 0, 0, 0, 0],
+    }}
+    res = simulate(cfg, prep, {"AAA/USDT:USDT": (0, 0)})
+    t = res["table"].iloc[0]
+    assert res["trades"] == 1 and t.partial and t.adds == 1 and t.why == "stop"
+    assert t.pnl > 0                        # Teilgewinn gesichert, Rest auf Einstand ausgestoppt
+    assert res["end"] == pytest.approx(res["start"] + t.pnl)
+
+
+def test_never_adds_to_losing_position():
+    from bot.backtest import simulate
+
+    cfg = copy.deepcopy(CFG)
+    cfg["fees"].update(slippage=0.0)
+    cfg["strategy"].update(sl_atr=1.0, tp_atr=3.0, pyramid_at_r=1.0, pyramid_max_adds=2, pyramid_size_frac=0.5)
+    bars = [(100, 100.2, 99.9, 100), (100, 100.1, 99.5, 99.6), (99.6, 99.7, 98.5, 98.8)]
+    prep = {"AAA/USDT:USDT": {
+        "ts": [1_700_000_000_000 + i * 900_000 for i in range(len(bars))],
+        "open": [b[0] for b in bars], "high": [b[1] for b in bars], "low": [b[2] for b in bars],
+        "close": [b[3] for b in bars], "atr": [1.0] * len(bars), "signal": [1, 0, 0],
+    }}
+    res = simulate(cfg, prep, {"AAA/USDT:USDT": (0, 0)})
+    t = res["table"].iloc[0]
+    assert t.adds == 0 and t.why == "stop" and t.pnl < 0
+    # Verlust nicht groesser als das geplante Risiko (1 % vom Konto)
+    assert -t.pnl <= res["start"] * cfg["risk"]["risk_per_trade_pct"] / 100 + 1e-9
+
+
+def test_optimizer_small_grid(monkeypatch):
+    from bot import optimize
+
+    monkeypatch.setattr(optimize, "TIMEFRAMES", [("15m", "1h", 50, 200)])
+    monkeypatch.setattr(optimize, "MIN_SCORES", [4])
+    monkeypatch.setattr(optimize, "SL_ATR", [1.5])
+    monkeypatch.setattr(optimize, "RR", [2.0])
+    data = {}
+    for k in range(2):
+        df = synthetic(8000, k + 1)
+        df["ts"] = 1_700_000_000_000 + df.index * 900_000
+        data[f"S{k}/USDT:USDT"] = df
+    res = optimize.optimize(CFG, data, {k: (0.0001, 0.0001) for k in data})
+    assert len(res) == 2 * 2 * len(optimize.MANAGE)
+    assert {"train_pf", "test_pf", "fuehrung", "einstieg"} <= set(res.columns)

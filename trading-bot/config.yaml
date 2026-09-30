@@ -69,6 +69,8 @@ context:
   fng_extreme_high: 85     # ... ueber 85 -> Risiko pro Trade halbieren
 
 fees:
+  entry_order: market  # market = sofort (Taker) | limit = Limit-Order zum Signalkurs (Maker, guenstiger)
+  maker: 0.0002    # Bitget Futures Maker-Gebuehr (Limit-Orders)
   taker: 0.0006    # Bitget Futures Taker-Gebuehr
   slippage: 0.0003 # geschaetzter Kursverlust bei Market-Orders
 

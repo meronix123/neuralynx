@@ -76,6 +76,25 @@ Testet die Strategie an den letzten 60 Tagen echter Bitget-Kurse.
 Wichtig ist der **Profit-Faktor**: unter 1,0 verliert die Strategie Geld,
 ab ca. 1,3 ist sie brauchbar. Ist er schlecht, **nicht live gehen**.
 
+## Schritt 1b: Strategie-Tester (beste Einstellungen finden)
+
+```
+python run.py optimize --days 180
+```
+
+Rechnet ca. 1300 Varianten durch: Zeiteinheit (15m/1h/4h), Punkte-Schwelle,
+Stop-Abstand, Chance/Risiko, Trailing an/aus, Market- oder Limit-Einstieg und
+Positionsfuehrung (normal / Teilverkauf bei +1R / Aufstocken im Gewinn / beides).
+
+Ehrlicher Test: Ausgewaehlt wird auf den ersten 2/3 der Daten, bewertet auf dem
+letzten 1/3, das die Auswahl nie gesehen hat. Nur Varianten, die in **beiden**
+Zeitraeumen profitabel sind, kommen in Frage. Alle Ergebnisse stehen danach in
+`data\optimierung.csv` (mit Excel oeffnen).
+
+Nachkaufen im Verlust ist bewusst NICHT eingebaut - mit Hebel der schnellste Weg
+zum Totalverlust. Aufgestockt wird nur, wenn der Trade im Gewinn ist, und der
+Stop wird danach mindestens auf den neuen Einstand gezogen.
+
 ## Schritt 2: Paper-Modus (echte Kurse, Spielgeld)
 
 In `config.yaml` steht `mode: paper`. Starten:
