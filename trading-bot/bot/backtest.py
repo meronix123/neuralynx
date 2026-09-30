@@ -128,6 +128,7 @@ def run_backtest(cfg: dict, data: dict[str, pd.DataFrame], rules: dict[str, tupl
 
     for sym in list(pos):  # offene Positionen am Ende zum letzten Kurs schliessen
         close(sym, sig[sym]["close"].iloc[-1], timeline[-1], "ende")
+    curve.append(equity)
 
     return summarize(trades, curve, float(cfg["paper"]["start_equity"]))
 

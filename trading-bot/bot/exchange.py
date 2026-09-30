@@ -37,6 +37,20 @@ def resolve_symbols(client: ccxt.Exchange, wanted: list[str]) -> list[str]:
     return out
 
 
+METALS = {"XAU", "XAUT", "PAXG", "XAG"}
+
+
+def is_metal(symbol: str) -> bool:
+    return symbol.split("/")[0] in METALS
+
+
+def spread_from_ticker(t: dict) -> float | None:
+    bid, ask = t.get("bid"), t.get("ask")
+    if not bid or not ask:
+        return None
+    return (ask - bid) / ((ask + bid) / 2) * 100
+
+
 def to_df(rows: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
 
@@ -62,6 +76,9 @@ class BitgetExchange:
 
     def last_price(self, symbol: str) -> float:
         return float(self.c.fetch_ticker(symbol)["last"])
+
+    def spread_pct(self, symbol: str) -> float | None:
+        return spread_from_ticker(self.c.fetch_ticker(symbol))
 
     def equity(self) -> float:
         bal = self.c.fetch_balance({"type": "swap"})
@@ -181,6 +198,9 @@ class PaperExchange:
 
     def last_price(self, symbol):
         return float(self.c.fetch_ticker(symbol)["last"])
+
+    def spread_pct(self, symbol):
+        return spread_from_ticker(self.c.fetch_ticker(symbol))
 
     def amount_rules(self, symbol):
         m = self.c.market(symbol)

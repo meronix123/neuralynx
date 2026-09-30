@@ -41,12 +41,15 @@ class RiskGuard:
         self.s.setdefault("consec_losses", 0)
         self.s.setdefault("pause_until", 0.0)
 
-    def update_day(self, equity: float, now: datetime) -> None:
+    def update_day(self, equity: float, now: datetime) -> bool:
+        """Neuer Tag (UTC)? Dann Zaehler zuruecksetzen und True liefern."""
         day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
-        if self.s["day"] != day:
-            self.s["day"] = day
-            self.s["day_start_equity"] = equity
-            self.s["trades_today"] = 0
+        if self.s["day"] == day:
+            return False
+        self.s["day"] = day
+        self.s["day_start_equity"] = equity
+        self.s["trades_today"] = 0
+        return True
 
     def can_open(self, equity: float, open_positions: int, now: datetime) -> tuple[bool, str]:
         c = self.cfg

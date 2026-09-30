@@ -58,8 +58,13 @@ def main() -> None:
             sys.exit("Abgebrochen.")
 
     from bot.engine import Bot
+    bot = Bot(cfg, ex)
+    if cfg["dashboard"]["enabled"]:
+        from bot.dashboard import start_dashboard
+        start_dashboard(bot, cfg["dashboard"]["port"])
+        print(f"Oberflaeche im Browser oeffnen: http://localhost:{cfg['dashboard']['port']}")
     try:
-        Bot(cfg, ex).run()
+        bot.run()
     except KeyboardInterrupt:
         print("\nBot gestoppt. Offene Positionen behalten ihren Stop-Loss/Take-Profit auf Bitget.")
 

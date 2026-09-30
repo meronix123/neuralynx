@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading-Bot</title>
+<script src="/lightweight-charts.js"></script>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#e6e8ee; --dim:#8a93a6;
+          --green:#22c55e; --red:#ef4444; --blue:#3b82f6; --amber:#f59e0b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); align-items:center; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
+  .kpi b { display:block; font-size:16px; }
+  .kpi span { color:var(--dim); font-size:12px; }
+  .badge { padding:2px 8px; border-radius:99px; font-weight:600; font-size:12px; }
+  .paper { background:#334155; } .demo { background:#1e3a8a; } .live { background:#7f1d1d; }
+  main { display:grid; grid-template-columns: 260px 1fr 340px; gap:12px; padding:12px 16px; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .sym { padding:8px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; margin-bottom:6px; }
+  .sym:hover { background:#1d212b; } .sym.active { border-color:var(--blue); background:#1a2233; }
+  .sym .top { display:flex; justify-content:space-between; font-weight:600; }
+  .sym .sub { color:var(--dim); font-size:12px; }
+  #chart { height:520px; }
+  h3 { margin:0 0 8px; font-size:14px; color:var(--dim); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .row { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px dashed var(--line); }
+  .up { color:var(--green); } .down { color:var(--red); } .warn { color:var(--amber); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  td, th { padding:4px 6px; border-bottom:1px solid var(--line); text-align:right; }
+  td:first-child, th:first-child { text-align:left; }
+  .think { background:#11141a; border-radius:8px; padding:10px; margin-bottom:10px; }
+  .legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--dim); font-size:12px; margin-top:6px; }
+  .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
+</style>
+</head>
+<body>
+<header id="head">Lade ...</header>
+<main>
+  <section class="panel"><h3>Maerkte</h3><div id="list"></div></section>
+  <section class="panel">
+    <h3 id="title">Chart</h3>
+    <div id="chart"></div>
+    <div class="legend">
+      <span><i style="background:#f59e0b"></i>EMA 21</span>
+      <span><i style="background:#a855f7"></i>EMA 50</span>
+      <span><i style="background:#64748b"></i>VWAP</span>
+      <span><i style="background:#3b82f6"></i>Einstieg</span>
+      <span><i style="background:#ef4444"></i>Stop-Loss</span>
+      <span><i style="background:#22c55e"></i>Take-Profit</span>
+      <span>gestrichelt = Plan, falls jetzt eingestiegen wuerde</span>
+    </div>
+  </section>
+  <section class="panel">
+    <h3>Was der Bot denkt</h3>
+    <div id="think" class="think"></div>
+    <h3>Indikatoren</h3>
+    <div id="ind"></div>
+    <h3 style="margin-top:12px">Wirtschaftstermine</h3>
+    <div id="events"></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
+    <h3>Letzte Trades</h3>
+    <table id="hist"></table>
+  </section>
+</main>
+<script>
+let selected = null, data = null, lines = [];
+const TZ = -new Date().getTimezoneOffset() * 60; // Chart in Ortszeit
+const fmt = (v, d = 2) => v == null ? "-" : Number(v).toLocaleString("de-DE", {maximumFractionDigits: d, minimumFractionDigits: d});
+const px = v => v == null ? "-" : Number(v).toPrecision(6);
+const time = s => new Date(s).toLocaleString("de-DE", {weekday:"short", hour:"2-digit", minute:"2-digit"});
+
+const chart = LightweightCharts.createChart(document.getElementById("chart"), {
+  layout: { background: { color: "#171a21" }, textColor: "#8a93a6" },
+  grid: { vertLines: { color: "#1f2430" }, horzLines: { color: "#1f2430" } },
+  timeScale: { timeVisible: true, secondsVisible: false },
+  crosshair: { mode: 0 },
+});
+const candles = chart.addCandlestickSeries({ upColor:"#22c55e", downColor:"#ef4444", wickUpColor:"#22c55e", wickDownColor:"#ef4444", borderVisible:false });
+const emaF = chart.addLineSeries({ color:"#f59e0b", lineWidth:1, priceLineVisible:false, lastValueVisible:false });
+const emaS = chart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisible:false, lastValueVisible:false });
+const vwap = chart.addLineSeries({ color:"#64748b", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false });
+new ResizeObserver(() => chart.applyOptions({ width: document.getElementById("chart").clientWidth })).observe(document.getElementById("chart"));
+
+function line(price, color, title, dashed) {
+  lines.push(candles.createPriceLine({ price, color, title, lineWidth: 2, lineStyle: dashed ? 2 : 0, axisLabelVisible: true }));
+}
+
+function thinking(s) {
+  const v = s.snapshot, p = s.position;
+  const out = [];
+  if (p) {
+    const dir = p.side === "long" ? "steigt" : "faellt";
+    out.push(`<b>Position ${p.side.toUpperCase()}</b> seit ${time(p.opened_ms)}. Der Bot erwartet, dass der Kurs ${dir} bis zum Ziel <b class="up">${px(p.tp)}</b>.`);
+    out.push(`Schutz: Stop-Loss bei <b class="down">${px(p.sl)}</b>` + (p.sl !== p.sl_init ? ` (nachgezogen von ${px(p.sl_init)})` : "") + ".");
+  } else if (v.bias) {
+    out.push(`1h-Trend <b>${v.trend_1h}</b> &rarr; der Bot sucht nur <b>${v.bias.toUpperCase()}</b>-Einstiege.`);
+    if (v.plan) {
+      const rr = Math.abs(v.plan.tp - v.plan.entry) / Math.abs(v.plan.entry - v.plan.sl);
+      out.push(`Wuerde er jetzt einsteigen: Einstieg ${px(v.plan.entry)}, SL <span class="down">${px(v.plan.sl)}</span>, TP <span class="up">${px(v.plan.tp)}</span> (Chance/Risiko 1 : ${fmt(rr, 1)}).`);
+    }
+  } else {
+    out.push(`1h-Trend <b>seitwaerts</b> &rarr; kein klarer Trend, der Bot wartet.`);
+  }
+  out.push(`<span class="${s.reason === "Position eroeffnet" ? "up" : "warn"}">Status: ${s.reason || "-"}</span>`);
+  return out.map(t => `<div style="margin-bottom:6px">${t}</div>`).join("");
+}
+
+function render() {
+  if (!data) return;
+  const dayPnl = data.equity - data.day_start_equity;
+  const fg = data.fear_greed;
+  document.getElementById("head").innerHTML = `
+    <span class="badge ${data.mode}">${data.mode.toUpperCase()}</span>
+    <div class="kpi"><span>Konto</span><b>${fmt(data.equity)} USDT</b></div>
+    <div class="kpi"><span>Heute</span><b class="${dayPnl >= 0 ? "up" : "down"}">${dayPnl >= 0 ? "+" : ""}${fmt(dayPnl)} USDT</b></div>
+    <div class="kpi"><span>Trades heute</span><b>${data.trades_today} / ${data.max_trades_per_day}</b></div>
+    <div class="kpi"><span>Hebel</span><b>${data.leverage}x</b></div>
+    <div class="kpi"><span>Fear &amp; Greed</span><b>${fg ? fg.value + " " + fg.label : "-"}</b></div>
+    <div class="kpi"><span>Neue Trades</span><b class="${data.block ? "warn" : "up"}">${data.block || "erlaubt"}</b></div>
+    <div class="kpi"><span>Aktualisiert</span><b>${time(data.updated)}</b></div>`;
+
+  const syms = Object.keys(data.symbols);
+  if (!selected || !data.symbols[selected]) selected = syms[0];
+  document.getElementById("list").innerHTML = syms.map(sym => {
+    const s = data.symbols[sym], v = s.snapshot, pos = s.position;
+    const tag = pos ? `<span class="${pos.side === "long" ? "up" : "down"}">${pos.side.toUpperCase()}</span>` : `<span class="sub">${v.trend_1h}</span>`;
+    return `<div class="sym ${sym === selected ? "active" : ""}" onclick="selected='${sym}';render()">
+      <div class="top"><span>${sym.split(":")[0]}</span>${tag}</div>
+      <div class="sub">${px(v.close)} &middot; RSI ${v.rsi} &middot; ${s.reason}</div></div>`;
+  }).join("");
+
+  const s = data.symbols[selected];
+  document.getElementById("title").textContent = `${selected} - 5 Minuten`;
+  const bars = s.candles.map(c => ({ ...c, time: c.time + TZ }));
+  candles.setData(bars);
+  const series = arr => bars.map((c, i) => arr[i] == null ? null : { time: c.time, value: arr[i] }).filter(Boolean);
+  emaF.setData(series(s.ema_fast)); emaS.setData(series(s.ema_slow)); vwap.setData(series(s.vwap));
+
+  lines.forEach(l => candles.removePriceLine(l)); lines = [];
+  const p = s.position, plan = s.snapshot.plan;
+  if (p) {
+    line(p.entry, "#3b82f6", "Einstieg"); line(p.sl, "#ef4444", "SL"); line(p.tp, "#22c55e", "TP");
+  } else if (plan) {
+    line(plan.sl, "#ef4444", "Plan SL", true); line(plan.tp, "#22c55e", "Plan TP", true);
+  }
+  const markers = data.history.filter(t => t.symbol === selected).flatMap(t => [
+    { time: Math.floor(t.opened_ms / 300000) * 300 + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
+      color: "#3b82f6", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: t.side },
+    { time: Math.floor(t.closed_ms / 300000) * 300 + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
+      shape: "circle", text: (t.pnl >= 0 ? "+" : "") + fmt(t.pnl) },
+  ]).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
+  candles.setMarkers(markers);
+
+  document.getElementById("think").innerHTML = thinking(s);
+  const v = s.snapshot;
+  document.getElementById("ind").innerHTML = [
+    ["Kurs", px(v.close)], ["1h-Trend", v.trend_1h],
+    ["RSI (14)", `<span class="${v.rsi > 70 ? "down" : v.rsi < 30 ? "up" : ""}">${v.rsi}</span>`],
+    ["MACD-Histogramm", `<span class="${v.macd_hist >= 0 ? "up" : "down"}">${px(v.macd_hist)}</span>`],
+    ["ADX (Trendstaerke)", `${v.adx} ${v.adx >= 20 ? "(Trend)" : "(schwach)"}`],
+    ["Volatilitaet (ATR)", fmt(v.atr_pct, 3) + " %"], ["VWAP", px(v.vwap)],
+  ].map(([k, val]) => `<div class="row"><span>${k}</span><b>${val}</b></div>`).join("");
+
+  document.getElementById("events").innerHTML = (data.next_events.length ? data.next_events.map(e =>
+    `<div class="row"><span>${e.country} ${e.title}</span><b>${time(e.time)}</b></div>`).join("")
+    : `<div class="sub">${data.calendar_ok ? "Keine wichtigen Termine" : "Kalender nicht abrufbar"}</div>`);
+
+  const h = data.history.slice().reverse();
+  document.getElementById("hist").innerHTML = `<tr><th>Symbol</th><th>Richtung</th><th>Einstieg</th><th>Ausstieg (ca.)</th><th>SL</th><th>TP</th><th>Punkte</th><th>Ergebnis</th><th>Geschlossen</th></tr>` +
+    (h.length ? h.map(t => `<tr><td>${t.symbol.split(":")[0]}</td><td>${t.side}</td><td>${px(t.entry)}</td><td>${px(t.exit)}</td>
+      <td>${px(t.sl)}</td><td>${px(t.tp)}</td><td>${t.score ?? "-"}/6</td>
+      <td class="${t.pnl >= 0 ? "up" : "down"}">${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}</td><td>${time(t.closed_ms)}</td></tr>`).join("")
+      : `<tr><td colspan="9" class="sub">Noch keine Trades</td></tr>`);
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/status");
+    const d = await r.json();
+    if (d.symbols && Object.keys(d.symbols).length) { data = d; render(); }
+    else document.getElementById("head").textContent = "Bot startet, erste Daten werden geladen ...";
+  } catch (e) {
+    document.getElementById("head").innerHTML = `<span class="down">Keine Verbindung zum Bot</span>`;
+  }
+}
+poll(); setInterval(poll, 5000);
+</script>
+</body>
+</html>

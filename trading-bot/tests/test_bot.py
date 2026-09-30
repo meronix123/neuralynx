@@ -74,20 +74,23 @@ def test_levels():
 
 
 def test_risk_guard_limits():
-    g = RiskGuard(CFG["risk"], {})
+    r = CFG["risk"]
+    g = RiskGuard(r, {})
     now = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
-    g.update_day(100, now)
+    assert g.update_day(100, now)
+    assert not g.update_day(100, now)
     assert g.can_open(100, 0, now)[0]
-    assert not g.can_open(93.9, 0, now)[0]           # Tagesverlust > 6 %
-    assert not g.can_open(100, 2, now)[0]            # max. Positionen
-    for _ in range(3):
+    assert not g.can_open(100 * (1 - r["daily_loss_limit_pct"] / 100) - 0.01, 0, now)[0]
+    assert not g.can_open(100, r["max_open_positions"], now)[0]
+    for _ in range(r["max_consecutive_losses"]):
         g.on_close(-1, now)
     assert not g.can_open(100, 0, now)[0]            # Pause
-    assert g.can_open(100, 0, now + timedelta(minutes=121))[0]
-    for _ in range(10):
+    later = now + timedelta(minutes=r["pause_after_losses_minutes"] + 1)
+    assert g.can_open(100, 0, later)[0]
+    for _ in range(r["max_trades_per_day"]):
         g.on_open()
-    assert not g.can_open(100, 0, now + timedelta(minutes=121))[0]  # 10 Trades
-    g.update_day(100, now + timedelta(days=1))
+    assert not g.can_open(100, 0, later)[0]           # Trades pro Tag
+    assert g.update_day(100, now + timedelta(days=1))
     assert g.can_open(100, 0, now + timedelta(days=1))[0]
 
 
@@ -157,6 +160,20 @@ class FakeClient:
         return {"fundingRate": 0.0001}
 
 
+class FakeContext:
+    fng = {"value": 50, "label": "Neutral"}
+    cal_ok = True
+
+    def __init__(self, block=""):
+        self.block = block
+
+    def check(self, now):
+        return (not self.block, self.block, 1.0)
+
+    def next_events(self, now):
+        return []
+
+
 def test_paper_bot_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
@@ -166,7 +183,7 @@ def test_paper_bot_end_to_end(tmp_path, monkeypatch):
     cfg["symbols"] = ["AAA/USDT:USDT"]
     client = FakeClient(synthetic(6000, 3))
     ex = PaperExchange(cfg, client)
-    bot = engine.Bot(cfg, ex)
+    bot = engine.Bot(cfg, ex, FakeContext())
     opened = 0
     for i in range(400, 6000):
         client.i = i
@@ -177,3 +194,71 @@ def test_paper_bot_end_to_end(tmp_path, monkeypatch):
         assert set(bot.state["meta"]) == set(ex.positions())
     assert opened > 0
     assert ex.equity() > 0
+    # Oberflaechen-Status ist befuellt und JSON-faehig
+    import json
+    st = json.loads(json.dumps(bot.status, default=str))
+    sym = st["symbols"]["AAA/USDT:USDT"]
+    assert len(sym["candles"]) == engine.CHART_BARS and sym["reason"]
+    assert len(st["history"]) > 0
+
+
+def test_news_block_prevents_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    client = FakeClient(synthetic(6000, 3))
+    bot = engine.Bot(cfg, PaperExchange(cfg, client), FakeContext("Wirtschaftstermin: USD CPI"))
+    for i in range(400, 6000, 3):
+        client.i = i
+        bot.step()
+    assert bot.state["meta"] == {} and bot.state["history"] == []
+    assert bot.status["symbols"]["AAA/USDT:USDT"]["reason"].startswith("Wirtschaftstermin")
+
+
+def test_calendar_parsing_and_window():
+    from bot.context import MarketContext, parse_calendar
+
+    rows = [
+        {"title": "CPI m/m", "country": "USD", "date": "2026-01-14T08:30:00-05:00", "impact": "High"},
+        {"title": "Retail", "country": "USD", "date": "2026-01-14T10:00:00-05:00", "impact": "Medium"},
+        {"title": "ECB", "country": "EUR", "date": "2026-01-14T09:00:00-05:00", "impact": "High"},
+    ]
+    ev = parse_calendar(rows, ["USD"], ["High"])
+    assert [e["title"] for e in ev] == ["CPI m/m"]
+    assert ev[0]["time"] == datetime(2026, 1, 14, 13, 30, tzinfo=timezone.utc)
+
+    class Http:
+        def get(self, url, timeout):
+            class R:
+                def json(self_inner):
+                    return rows if "faireconomy" in url else {"data": [{"value": "90", "value_classification": "Extreme Greed"}]}
+            return R()
+
+    ctx = MarketContext(CFG["context"], http=Http())
+    ok, why, _ = ctx.check(datetime(2026, 1, 14, 13, 10, tzinfo=timezone.utc))
+    assert not ok and "CPI" in why
+    ok, _, factor = ctx.check(datetime(2026, 1, 14, 15, 0, tzinfo=timezone.utc))
+    assert ok and factor == 0.5   # extreme Gier -> halbes Risiko
+
+
+def test_dashboard_serves_status():
+    import json
+    import urllib.request
+
+    from bot.dashboard import start_dashboard
+
+    class B:
+        status = {"symbols": {}, "equity": 35.0}
+
+    srv = start_dashboard(B(), 0)
+    port = srv.server_address[1]
+    body = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status").read()
+    assert json.loads(body)["equity"] == 35.0
+    html = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
+    assert "lightweight-charts" in html
+    js = urllib.request.urlopen(f"http://127.0.0.1:{port}/lightweight-charts.js").read()
+    assert b"Lightweight Charts" in js
+    srv.shutdown()

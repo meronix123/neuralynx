@@ -23,13 +23,15 @@ leverage: 10
 margin_mode: isolated  # isolated = maximaler Verlust pro Position begrenzt
 
 risk:
-  risk_per_trade_pct: 2.0        # max. Verlust pro Trade in % vom Konto (bei Stop-Loss)
-  max_margin_per_trade_pct: 45   # max. Anteil vom Konto als Margin pro Position
-  max_open_positions: 2
-  max_trades_per_day: 10
-  daily_loss_limit_pct: 6.0      # Tagesverlust erreicht -> keine neuen Trades bis morgen
-  max_consecutive_losses: 3      # nach 3 Verlusten in Folge ...
-  pause_after_losses_minutes: 120 # ... 2 Stunden Pause
+  risk_per_trade_pct: 1.0        # max. Verlust pro Trade in % vom Konto (bei Stop-Loss, inkl. Gebuehren)
+  max_margin_per_trade_pct: 30   # max. Anteil vom Konto als Margin pro Position
+  max_open_positions: 3
+  max_same_direction: 2          # max. Positionen gleicher Richtung (Krypto laeuft oft gleich)
+  max_trades_per_day: 30
+  daily_loss_limit_pct: 6.0      # Tagesverlust erreicht -> keine neuen Trades bis morgen (UTC)
+  max_total_drawdown_pct: 30.0   # Konto 30 % unter Hoechststand -> Bot eroeffnet nichts mehr
+  max_consecutive_losses: 4      # nach 4 Verlusten in Folge ...
+  pause_after_losses_minutes: 60 # ... 1 Stunde Pause
 
 strategy:
   ema_fast: 21
@@ -37,17 +39,34 @@ strategy:
   trend_ema_fast: 50
   trend_ema_slow: 200
   rsi_period: 14
-  rsi_long_trigger: 40     # Long: RSI kreuzt nach Ruecksetzer ueber 40
-  rsi_short_trigger: 60    # Short: RSI kreuzt nach Anstieg unter 60
+  rsi_long_trigger: 40     # Ausloeser Long: RSI kreuzt nach Ruecksetzer ueber 40
+  rsi_short_trigger: 60    # Ausloeser Short: RSI kreuzt nach Anstieg unter 60
+  rsi_overbought: 70
+  rsi_oversold: 30
+  adx_min: 20              # Trendstaerke
+  min_score: 4             # Punkte (von 6) fuer einen Einstieg. 3 = mehr Trades, 5 = weniger
   atr_period: 14
   sl_atr: 1.2              # Stop-Loss = 1.2 x ATR
   tp_atr: 1.8              # Take-Profit = 1.8 x ATR
   breakeven_at_r: 1.0      # ab +1R: Stop auf Einstand
   trail_atr: 1.0           # danach Stop im Abstand 1 x ATR nachziehen
-  min_atr_pct: 0.08        # zu ruhiger Markt -> kein Trade
+  min_atr_pct: 0.08        # zu ruhiger Markt -> Gebuehren fressen den Gewinn -> kein Trade
   max_atr_pct: 1.5         # zu wilder Markt -> kein Trade
   volume_factor: 1.0       # Volumen muss >= Durchschnitt sein
   max_funding_rate: 0.0005 # extreme Funding-Rate -> nicht mit der Masse handeln
+
+filters:
+  max_spread_pct: 0.05     # Geld/Brief-Spanne zu gross -> kein Trade
+  metals_trade_weekend: false  # Gold/Silber am Wochenende nicht handeln (duenner Markt)
+
+context:
+  currencies: [USD]        # Termine dieser Waehrungen beachten (z. B. [USD, EUR, CNY])
+  impacts: [High]          # nur Termine mit hoher Wirkung
+  minutes_before: 30       # so lange vor dem Termin keine neuen Trades
+  minutes_after: 30        # und so lange danach
+  block_if_calendar_unavailable: false
+  fng_extreme_low: 15      # Fear & Greed unter 15 oder ...
+  fng_extreme_high: 85     # ... ueber 85 -> Risiko pro Trade halbieren
 
 fees:
   taker: 0.0006    # Bitget Futures Taker-Gebuehr
@@ -55,5 +74,9 @@ fees:
 
 paper:
   start_equity: 35  # Startkapital in USDT fuer die Simulation
+
+dashboard:
+  enabled: true
+  port: 8050        # im Browser: http://localhost:8050
 
 loop_seconds: 20
