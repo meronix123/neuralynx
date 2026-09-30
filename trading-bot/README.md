@@ -34,6 +34,15 @@ passende Strategie. Vor dem Einstieg prueft er zusaetzlich Orderbuch und Handels
 Alle Messwerte werden bei jedem Trade gespeichert, damit man spaeter auswerten kann,
 welche Daten wirklich helfen.
 
+**Zusatz-Filter** (im Backtest und live gleich, einzeln abschaltbar in `config.yaml`):
+
+| Filter | Wirkung |
+|---|---|
+| BTC als Leitwaehrung | BTC im Abwaertstrend -> keine Longs bei ETH/SOL/XRP (und umgekehrt) |
+| Strategie-Gesundheit | laeuft eine Strategie gerade schlecht (letzte 10 Trades PF < 0,6), wird sie pausiert; nach 10 ausgelassenen Signalen gibt es einen Probe-Trade |
+| Zeit-Stop | Trade nach 12 Bars nicht bei +0,5R und kein Teilverkauf -> schliessen |
+| ML-Filter (selbstlernend) | lernt aus abgeschlossenen Trades, welche Muster gewinnen, und verwirft Signale mit geschaetzter Gewinnchance unter 45 %. Lernt nur aus der Vergangenheit. Einschalten mit `ml_filter: true`, nachdem `python run.py backtest --days 365` Lernbeispiele gespeichert hat. |
+
 **Absicherung:**
 
 | Teil | Regel |
@@ -100,9 +109,10 @@ ab ca. 1,3 ist sie brauchbar. Ist er schlecht, **nicht live gehen**.
 python run.py optimize --days 365
 ```
 
-Rechnet ca. 200 Varianten durch: Zeiteinheit (1h/4h), welche Strategien erlaubt sind
+Rechnet ca. 580 Varianten durch: Zeiteinheit (1h/4h), welche Strategien erlaubt sind
 (nur Trend / nur Seitwaerts / nur Ausbruch / alle je nach Marktlage), Punkte-Schwelle,
-Stop-Abstand, Chance/Risiko, Market- oder Limit-Einstieg, Teilverkauf ja/nein.
+Stop-Abstand, Chance/Risiko, Market- oder Limit-Einstieg, Teilverkauf ja/nein und
+Zusatz-Filter (ohne / BTC+Gesundheit+Zeit-Stop / zusaetzlich ML-Filter).
 Zeigt fuer die beste Variante auch, wie jede Strategie einzeln abgeschnitten hat.
 
 Ehrlicher Test: Ausgewaehlt wird auf den ersten 2/3 der Daten, bewertet auf dem

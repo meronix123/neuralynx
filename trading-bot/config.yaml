@@ -64,6 +64,15 @@ strategy:
   mr_sl_atr: 1.0           # Seitwaerts: Stop 1 x ATR, Ziel = mittleres Bollinger-Band
   mr_min_rr: 1.0           # Seitwaerts: Ziel muss mind. so weit weg sein wie der Stop
   chaos_atr_rank: 0.97     # Volatilitaet in den obersten 3 % = Chaos -> nicht handeln
+  leader_filter: true      # BTC im Abwaertstrend -> keine Altcoin-Longs (und umgekehrt)
+  health_window: 10        # letzte 10 Trades je Strategie beobachten ...
+  health_min_pf: 0.6       # ... Profit-Faktor darunter -> Strategie pausiert
+  health_pause_signals: 10 # nach 10 ausgelassenen Signalen ein Probe-Trade (sonst bliebe sie ewig aus)
+  max_hold_bars: 12        # nach 12 Bars ohne +0,5R und ohne Teilverkauf schliessen (0 = aus)
+  ml_filter: false         # selbstlernender Filter; erst einschalten, wenn "python run.py backtest"
+                           # Lernbeispiele gespeichert hat (data/ml_examples.json)
+  ml_threshold: 0.45       # Signale mit geschaetzter Gewinnchance darunter werden verworfen
+  ml_min_trades: 40        # so viele Lernbeispiele braucht das Modell mindestens
   sl_atr: 1.0              # Stop-Loss = 1 x ATR
   tp_atr: 2.0              # Take-Profit = 2 x ATR
   partial_tp_r: 1.0        # bei +1R die Haelfte verkaufen und Stop auf Einstand (0 = aus)

@@ -33,17 +33,23 @@ MANAGE = [
     ("normal", 0, 0),
     ("teilverkauf", 1.0, 0),          # 50 % bei +1R verkaufen, Stop auf Einstand
 ]
+# Zusatz-Filter: BTC-Leitwaehrung, Strategie-Gesundheit, Zeit-Stop, selbstlernender ML-Filter
+FILTERS = {
+    "ohne": dict(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False),
+    "filter": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False),
+    "filter+ml": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=True),
+}
 MIN_TRAIN_TRADES = 20
 
 
 def variants():
     """Signal-relevante Einstellungen (teuer, einmal rechnen) -> guenstige Varianten."""
     for tf_row, score, (sl, rr), sset in itertools.product(TIMEFRAMES, MIN_SCORES, SL_RR, STRATEGY_SETS):
-        yield (*tf_row, score, sl, rr, sset), list(itertools.product(ENTRY, MANAGE))
+        yield (*tf_row, score, sl, rr, sset), list(itertools.product(ENTRY, MANAGE, FILTERS))
 
 
 def make_cfg(base: dict, tf, ttf, tf_fast, tf_slow, score, sl, rr, sset,
-             entry="market", manage=("normal", 0, 0)) -> dict:
+             entry="market", manage=("normal", 0, 0), filt="ohne") -> dict:
     cfg = copy.deepcopy(base)
     cfg["timeframe"], cfg["trend_timeframe"] = tf, ttf
     st = cfg["strategy"]
@@ -53,6 +59,7 @@ def make_cfg(base: dict, tf, ttf, tf_fast, tf_slow, score, sl, rr, sset,
     _, part_r, pyr_r = manage
     st.update(partial_tp_r=part_r, partial_tp_frac=0.5,
               pyramid_at_r=pyr_r, pyramid_max_adds=2 if pyr_r else 0, pyramid_size_frac=0.5)
+    st.update(FILTERS[filt])
     return cfg
 
 
@@ -64,14 +71,15 @@ def optimize(base: dict, data: dict, rules: dict, base_tf: str = "1h") -> pd.Dat
     done, t0 = 0, time.time()
     for key, combos in variants():
         prep = prepare(make_cfg(base, *key), data, base_tf)  # Signale nur einmal je Einstellung
-        for entry, manage in combos:
-            cfg = make_cfg(base, *key, entry, manage)
+        for entry, manage, filt in combos:
+            cfg = make_cfg(base, *key, entry, manage, filt)
             train = simulate(cfg, prep, rules, end_ts=split)
-            test = simulate(cfg, prep, rules, start_ts=split)
+            # ML-Filter startet im Test mit dem Wissen aus dem Training (nur Vergangenheit)
+            test = simulate(cfg, prep, rules, start_ts=split, seed_examples=train.get("examples"))
             per = test.get("per_strategy")
             rows.append({
                 "zeit": key[0], "strategien": key[7], "punkte": key[4], "sl_atr": key[5], "rr": key[6],
-                "einstieg": entry, "fuehrung": manage[0],
+                "einstieg": entry, "fuehrung": manage[0], "filter": filt,
                 "train_trades": train["trades"], "train_pf": round(train.get("profit_factor", 0), 2),
                 "train_rendite_%": round(train.get("return_pct", 0), 1),
                 "test_trades": test["trades"], "test_pf": round(test.get("profit_factor", 0), 2),

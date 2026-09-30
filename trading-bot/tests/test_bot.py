@@ -328,7 +328,8 @@ def test_optimizer_small_grid(monkeypatch):
         df["ts"] = 1_700_000_000_000 + df.index * 900_000
         data[f"S{k}/USDT:USDT"] = df
     res = optimize.optimize(CFG, data, {k: (0.0001, 0.0001) for k in data}, base_tf="15m")
-    assert len(res) == 2 * len(optimize.ENTRY) * len(optimize.MANAGE)
+    assert len(res) == 2 * len(optimize.ENTRY) * len(optimize.MANAGE) * len(optimize.FILTERS)
+    assert set(res["filter"]) == set(optimize.FILTERS)
     assert {"train_pf", "test_pf", "fuehrung", "einstieg", "strategien"} <= set(res.columns)
 
 
@@ -460,3 +461,65 @@ def test_paper_account_survives_restart(tmp_path, monkeypatch):
     engine.Bot(cfg, ex2, FakeContext())       # Neustart
     assert ex2.cash == pytest.approx(ex.cash)
     assert "AAA/USDT:USDT" in ex2.positions()
+
+
+def test_ml_model_learns_and_roundtrips():
+    from bot.ml import SignalModel, features, train_from_examples
+
+    rng = np.random.default_rng(0)
+    examples = []
+    for _ in range(300):
+        adx_v = rng.uniform(5, 50)
+        row = {"rsi": 50, "adx": adx_v, "bb_width": 0.05, "atr_pct": 0.5, "vol_ratio": 1.0,
+               "macd_n": 0.1, "trend": 1, "regime": "trend_up", "strategy": "trend"}
+        examples.append({"x": features(row, "long"), "win": int(adx_v > 25)})   # starker Trend gewinnt
+    m = train_from_examples(examples)
+    strong = features({"adx": 45, "regime": "trend_up", "strategy": "trend", "trend": 1}, "long")
+    weak = features({"adx": 8, "regime": "trend_up", "strategy": "trend", "trend": 1}, "long")
+    assert m.proba(strong) > 0.7 > 0.3 > m.proba(weak)
+    m2 = SignalModel.from_json(m.to_json())
+    assert m2.proba(strong) == pytest.approx(m.proba(strong))
+
+
+def test_leader_health_and_time_stop_rules():
+    from bot.filters import leader_blocks, strategy_healthy, time_stop_due
+
+    assert leader_blocks("long", "trend_down") and leader_blocks("short", "trend_up")
+    assert not leader_blocks("long", "trend_up") and not leader_blocks("long", None)
+    s = {"health_window": 5, "health_min_pf": 0.6}
+    assert strategy_healthy([-1, -1, -1], s)                 # zu wenig Daten -> weiter
+    assert not strategy_healthy([1, -1, -1, -1, -1], s)      # PF 0,25 -> Pause
+    assert strategy_healthy([2, -1, 2, -1, -1], s)           # PF 1,33 -> ok
+    t = {"max_hold_bars": 12}
+    assert time_stop_due(12, 0.2, False, t) and not time_stop_due(11, 0.2, False, t)
+    assert not time_stop_due(20, 0.8, False, t) and not time_stop_due(20, 0.0, True, t)
+
+
+def test_filters_and_ml_run_in_simulation():
+    from bot.backtest import prepare, simulate
+
+    cfg = copy.deepcopy(CFG)
+    data = {"BTC/USDT:USDT": synthetic(12000, 5), "ETH/USDT:USDT": synthetic(12000, 6, start=50)}
+    rules = {k: (0.0001, 0.0001) for k in data}
+    cfg["strategy"].update(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False)
+    prep = prepare(cfg, data, "5m")
+    assert "leader_regime" in prep["ETH/USDT:USDT"]
+    base = simulate(cfg, prep, rules)
+    cfg["strategy"].update(leader_filter=True, health_window=10, max_hold_bars=3,
+                           ml_filter=True, ml_min_trades=30)
+    filt = simulate(cfg, prep, rules)
+    sk = filt["skipped"]
+    assert sk["leader"] > 0 and sk["leader"] + sk["health"] + sk["ml"] > 0
+    assert base["skipped"] == {"leader": 0, "health": 0, "ml": 0}
+    assert filt["end"] == pytest.approx(filt["start"] + filt["table"].pnl.sum())
+    assert (filt["table"].why == "zeit").any()
+
+
+def test_paused_strategy_gets_probe_trade():
+    from bot.filters import health_gate
+
+    s = {"health_window": 5, "health_min_pf": 0.6, "health_pause_signals": 3}
+    bad = [-1, -1, -1, -1, -1]
+    skips = {}
+    decisions = [health_gate("range", bad, s, skips) for _ in range(8)]
+    assert decisions == [False, False, False, True, False, False, False, True]

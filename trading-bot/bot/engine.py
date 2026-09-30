@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from .config import ROOT
 from .context import MarketContext
 from .exchange import is_metal
+from .filters import health_gate, is_leader, leader_blocks, time_stop_due
 from .flow import FlowMonitor, flow_score, flow_verdict
+from .ml import features, train_from_examples
 from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
 from .strategy import STRATEGY_NAMES, TF_MS, compute_signals, last_closed_signal, snapshot, trail_stop
@@ -55,6 +57,35 @@ class Bot:
         self.flow = FlowMonitor(self.flow_cfg)
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
+        self.views: dict = {}
+        self.model = None
+        self._model_trained_on = -1
+        self._train_model()
+
+    # ------------------------------------------------------------------
+    def _ml_examples(self) -> list[dict]:
+        """Lernbeispiele: Backtest (data/ml_examples.json) + eigene abgeschlossene Trades."""
+        ex = []
+        f = ROOT / "data" / "ml_examples.json"
+        if f.exists():
+            try:
+                ex = json.loads(f.read_text(encoding="utf-8"))
+            except ValueError:
+                log.warning("ml_examples.json unlesbar - wird ignoriert")
+        ex += [{"x": t["x"], "win": int(t["pnl"] > 0)} for t in self.state["history"] if t.get("x")]
+        return ex
+
+    def _train_model(self) -> None:
+        if not self.s.get("ml_filter"):
+            return
+        live = sum(1 for t in self.state["history"] if t.get("x"))
+        if live == self._model_trained_on:
+            return
+        examples = self._ml_examples()
+        if len(examples) >= self.s.get("ml_min_trades", 40):
+            self.model = train_from_examples(examples)
+            log.info("ML-Filter trainiert mit %d Beispielen", len(examples))
+        self._model_trained_on = live
 
     def run(self) -> None:
         syms = ", ".join(self.ex.symbols)
@@ -90,7 +121,9 @@ class Bot:
         views = {}
         for sym in self.ex.symbols:
             views[sym] = self._analyze(sym)
-        self._manage_open(positions, views)
+        self.views = views
+        self._manage_open(positions, views, now)
+        self._train_model()
 
         block, risk_factor = self._global_block(equity, now)
         reasons = {}
@@ -181,17 +214,21 @@ class Bot:
                 "amount": m["amount"], "sl": m["sl_init"], "tp": m["tp"], "pnl": pnl,
                 "score": m.get("score"), "opened_ms": m["opened_ms"], "closed_ms": int(now.timestamp() * 1000),
                 "strategy": m.get("strategy"), "regime": m.get("regime"), "flow": m.get("flow"),
+                "x": m.get("x"), "ml_prob": m.get("ml_prob"),
             })
             self.state["history"] = self.state["history"][-300:]
             self.notify.send(f"{'GEWINN' if pnl >= 0 else 'VERLUST'} {sym} {m['side']} geschlossen: {pnl:+.2f} USDT")
 
-    def _manage_open(self, positions: dict, views: dict) -> None:
-        for sym, p in positions.items():
+    def _manage_open(self, positions: dict, views: dict, now: datetime | None = None) -> None:
+        now = now or datetime.now(timezone.utc)
+        for sym, p in list(positions.items()):
             m = self.state["meta"].get(sym)
             if not m or sym not in views:
                 continue
             sig_df = views[sym]["sig_df"]
             price = self.ex.last_price(sym)
+            if self._time_stop(sym, p, m, price, now):
+                continue
             if self._partial_take_profit(sym, p, m, price):
                 continue
             atr_now = float(sig_df["atr"].iloc[-1])
@@ -204,6 +241,18 @@ class Bot:
                 m["sl"] = new_sl
             except Exception as e:  # noqa: BLE001
                 log.warning("%s Stop nachziehen fehlgeschlagen: %s", sym, e)
+
+    def _time_stop(self, sym: str, p: dict, m: dict, price: float, now: datetime) -> bool:
+        """Trade kommt nicht vom Fleck -> schliessen (wie im Backtest)."""
+        bars = int((now.timestamp() * 1000 - m["opened_ms"]) // TF_MS[self.cfg["timeframe"]])
+        sign = 1 if p["side"] == "long" else -1
+        r0 = m.get("r0") or abs(m["entry"] - m["sl_init"])
+        progress = sign * (price - m["entry"]) / r0 if r0 > 0 else 0.0
+        if not time_stop_due(bars, progress, m.get("partial_done", False), self.s):
+            return False
+        self.ex.close(sym, p["side"], p["amount"])
+        self.notify.send(f"ZEIT-STOP {sym}: nach {bars} Bars ohne Fortschritt geschlossen ({progress:+.2f}R)")
+        return True
 
     def _partial_take_profit(self, sym: str, p: dict, m: dict, price: float) -> bool:
         """Bei +partial_tp_r R einen Teil verkaufen und den Stop auf Einstand ziehen."""
@@ -252,6 +301,22 @@ class Bot:
         spread = self.ex.spread_pct(sym)
         if spread is not None and spread > self.cfg["filters"]["max_spread_pct"]:
             return f"Spread zu hoch ({spread:.3f} %)"
+        if self.s.get("leader_filter") and not is_leader(sym) and not is_metal(sym):
+            leader = next((k for k in self.views if is_leader(k)), None)
+            lr = str(self.views[leader]["sig_df"].iloc[-2]["regime"]) if leader else None
+            if leader_blocks(sig.side, lr):
+                return f"BTC im {'Abwaerts' if lr == 'trend_down' else 'Aufwaerts'}trend - kein {sig.side}"
+        pnls = [t["pnl"] for t in self.state["history"] if t.get("strategy") == sig.strategy]
+        if not health_gate(sig.strategy, pnls, self.s, self.state.setdefault("health_skips", {})):
+            self.state["last_sig"][sym] = sig.ts
+            return f"Strategie '{STRATEGY_NAMES.get(sig.strategy, sig.strategy)}' pausiert (laeuft gerade schlecht)"
+        row = view["sig_df"].iloc[-2]
+        x = features({k: row[k] for k in ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n",
+                                          "trend", "regime", "strategy") if k in row}, sig.side)
+        prob = self.model.proba(x) if (self.s.get("ml_filter") and self.model) else None
+        if prob is not None and prob < self.s.get("ml_threshold", 0.45):
+            self.state["last_sig"][sym] = sig.ts
+            return f"ML-Filter: Gewinnchance nur {prob * 100:.0f} %"
 
         # ab hier gilt das Signal als bearbeitet (kein zweiter Versuch fuer denselben Bar)
         self.state["last_sig"][sym] = sig.ts
@@ -261,7 +326,7 @@ class Bot:
         if not ok:
             return flow_why
         risk_factor *= flow_factor
-        info = {"strategy": sig.strategy, "regime": sig.regime,
+        info = {"strategy": sig.strategy, "regime": sig.regime, "x": x, "ml_prob": prob,
                 "flow": {**flow, "score": round(flow_score(sig.side, flow), 3)}}
         lev = self.cfg["leverage"]
         if not stop_is_safe(sig.price, sig.sl, lev):

@@ -7,13 +7,16 @@ Annahmen (bewusst vorsichtig):
 - Taker-Gebuehr beim Ausstieg, beim Einstieg Taker (Market) bzw. Maker (Limit)
 - Funding-Kosten und Funding-Filter werden NICHT simuliert
 """
+import json
 import time
 from datetime import datetime, timezone
 
 import pandas as pd
 
 from .config import ROOT
-from .exchange import make_client, resolve_symbols, to_df
+from .exchange import is_metal, make_client, resolve_symbols, to_df
+from .filters import health_gate, is_leader, leader_blocks, time_stop_due
+from .ml import SignalModel, features
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
 from .strategy import TF_MS, compute_signals, levels_from, trail_stop
 
@@ -53,6 +56,11 @@ def resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     return r.reset_index(drop=True)[["ts", "open", "high", "low", "close", "volume"]]
 
 
+PREP_COLS = ("ts", "open", "high", "low", "close", "atr", "signal", "sl_dist", "tp_dist", "strategy", "regime",
+             "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend")
+FEATURE_COLS = ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "regime", "strategy")
+
+
 def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str) -> dict:
     """Signale einmal berechnen (teuer). data: Symbol -> Kerzen in base_tf."""
     s, tf, ttf = cfg["strategy"], cfg["timeframe"], cfg["trend_timeframe"]
@@ -60,13 +68,19 @@ def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str) -> dict:
     for sym, raw in data.items():
         df = raw if tf == base_tf else resample(raw, tf)
         d = compute_signals(df, resample(raw, ttf), s, tf, ttf)
-        out[sym] = {c: d[c].tolist() for c in ("ts", "open", "high", "low", "close", "atr", "signal",
-                                               "sl_dist", "tp_dist", "strategy", "regime")}
+        out[sym] = {c: d[c].tolist() for c in PREP_COLS}
+    # Leitwaehrung: Marktlage von BTC je Zeitpunkt fuer die anderen Krypto-Maerkte
+    leader = next((k for k in out if is_leader(k)), None)
+    if leader:
+        lr = dict(zip(out[leader]["ts"], out[leader]["regime"]))
+        for sym, p in out.items():
+            p["leader_regime"] = [None if is_leader(sym) or is_metal(sym) else lr.get(t) for t in p["ts"]]
     return out
 
 
 def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
-             start_ts: int | None = None, end_ts: int | None = None) -> dict:
+             start_ts: int | None = None, end_ts: int | None = None,
+             seed_examples: list[dict] | None = None) -> dict:
     """Handelt die vorbereiteten Signale im Zeitfenster [start_ts, end_ts).
 
     Positionsfuehrung (strategy):
@@ -80,6 +94,13 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     entry_fee = f.get("maker", taker) if limit_entry else taker
     part_r, part_frac = s.get("partial_tp_r", 0), s.get("partial_tp_frac", 0.5)
     pyr_r, pyr_max, pyr_frac = s.get("pyramid_at_r", 0), s.get("pyramid_max_adds", 0), s.get("pyramid_size_frac", 0.5)
+    use_leader = s.get("leader_filter", False)
+    use_ml, ml_thr = s.get("ml_filter", False), s.get("ml_threshold", 0.45)
+    ml_min, ml_every = s.get("ml_min_trades", 40), 10
+    model, examples, trained_at = SignalModel(), list(seed_examples or []), 0
+    strat_pnls: dict[str, list[float]] = {}
+    health_skips: dict[str, int] = {}
+    skipped = {"leader": 0, "health": 0, "ml": 0}
 
     index = {sym: {t: i for i, t in enumerate(p["ts"])} for sym, p in prep.items()}
     timeline = sorted(t for t in set().union(*[set(p["ts"]) for p in prep.values()])
@@ -110,6 +131,8 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
         trades.append({"symbol": sym, "side": p["side"], "entry": p["entry0"], "exit": fill,
                        "pnl": pnl, "why": why, "opened": p["ts"], "closed": ts,
                        "partial": p["partial_done"], "adds": p["adds"], "strategy": p["strategy"]})
+        strat_pnls.setdefault(p["strategy"], []).append(pnl)
+        examples.append({"x": p["x"], "win": int(pnl > 0)})
 
     for ts in timeline:
         now = datetime.fromtimestamp(ts / 1000, timezone.utc)
@@ -123,7 +146,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
 
             # 1) ausstehenden Einstieg ausfuehren
             if sym in pending:
-                side, sig_atr, ref, sl_dist, tp_dist, strat = pending.pop(sym)
+                side, sig_atr, ref, sl_dist, tp_dist, strat, x = pending.pop(sym)
                 if limit_entry:
                     filled = lo <= ref if side == "long" else h >= ref
                     entry = min(ref, o) if side == "long" else max(ref, o)
@@ -142,7 +165,8 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                             pos[sym] = {"side": side, "entry": entry, "entry0": entry, "amount": amt,
                                         "amount0": amt, "fees": entry * amt * entry_fee, "realized": 0.0,
                                         "sl_init": sl, "sl": sl, "tp": tp, "r0": abs(entry - sl), "ts": ts,
-                                        "partial_done": False, "adds": 0, "strategy": strat}
+                                        "partial_done": False, "adds": 0, "strategy": strat, "x": x,
+                                        "bars": 0}
                             guard.on_open()
 
             # 2) Stop / Teilverkauf / Ziel im Bar (Reihenfolge vorsichtig: Stop zuerst)
@@ -167,11 +191,15 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                     if hit_tp:
                         close(sym, max(p["tp"], o) if sign == 1 else min(p["tp"], o), ts, "ziel")
 
-            # 3) zum Bar-Schluss: aufstocken (nur im Gewinn) und Stop nachziehen
+            # 3) zum Bar-Schluss: Zeit-Stop, aufstocken (nur im Gewinn), Stop nachziehen
             if sym in pos:
                 p = pos[sym]
                 sign = 1 if p["side"] == "long" else -1
                 progress = sign * (c - p["entry0"]) / p["r0"]
+                p["bars"] += 1
+                if time_stop_due(p["bars"], progress, p["partial_done"], s):
+                    close(sym, c, ts, "zeit")
+                    continue
                 if pyr_r and p["adds"] < pyr_max and progress >= pyr_r * (p["adds"] + 1):
                     qty = round_amount(p["amount0"] * pyr_frac, step, min_amt)
                     cap = equity * r["max_margin_per_trade_pct"] / 100 * lev
@@ -187,10 +215,26 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 new_sl = trail_stop(p["side"], p["entry0"], p["sl_init"], p["sl"], c, a, s, taker)
                 if new_sl is not None:
                     raise_stop(p, new_sl)
-            # 4) neues Signal -> Einstieg im naechsten Bar
+            # 4) neues Signal -> Filter -> Einstieg im naechsten Bar
             elif sig != 0:
-                pending[sym] = ("long" if sig == 1 else "short", a, c, d["sl_dist"][i], d["tp_dist"][i],
-                                d["strategy"][i])
+                side = "long" if sig == 1 else "short"
+                strat = d["strategy"][i]
+                if use_leader and "leader_regime" in d and leader_blocks(side, d["leader_regime"][i]):
+                    skipped["leader"] += 1
+                    continue
+                if not health_gate(strat, strat_pnls.get(strat, []), s, health_skips):
+                    skipped["health"] += 1
+                    continue
+                x = features({k: d[k][i] for k in FEATURE_COLS if k in d}, side)
+                if use_ml:
+                    if len(examples) >= ml_min and len(examples) - trained_at >= ml_every:
+                        model.fit([e["x"] for e in examples], [e["win"] for e in examples])
+                        trained_at = len(examples)
+                    prob = model.proba(x)
+                    if prob is not None and prob < ml_thr:
+                        skipped["ml"] += 1
+                        continue
+                pending[sym] = (side, a, c, d["sl_dist"][i], d["tp_dist"][i], strat, x)
         curve.append(equity)
 
     for sym in list(pos):  # offene Positionen am Ende zum letzten Kurs schliessen
@@ -199,6 +243,8 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     curve.append(equity)
 
     res = summarize(trades, curve, start_equity)
+    res["skipped"] = skipped
+    res["examples"] = examples
     days = (timeline[-1] - timeline[0]) / 86_400_000 if len(timeline) > 1 else 0
     res["trades_per_day"] = res["trades"] / days if days else 0.0
     return res
@@ -255,6 +301,18 @@ def backtest_cli(cfg: dict, days: int) -> None:
         rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
     res = run_backtest(cfg, data, rules)
     print_report(res, days)
+    save_ml_examples(res.get("examples", []))
+
+
+ML_FILE = DATA / "ml_examples.json"
+
+
+def save_ml_examples(examples: list[dict]) -> None:
+    """Trainingsbeispiele fuer den Live-Filter (lernt aus Backtest-Trades)."""
+    if examples:
+        DATA.mkdir(exist_ok=True)
+        ML_FILE.write_text(json.dumps(examples), encoding="utf-8")
+        print(f"{len(examples)} Lernbeispiele fuer den ML-Filter gespeichert.")
 
 
 def print_report(res: dict, days: int) -> None:
@@ -273,5 +331,9 @@ def print_report(res: dict, days: int) -> None:
         if res.get("per_strategy") is not None:
             print("\nJe Strategie:")
             print(res["per_strategy"].to_string())
+        sk = res.get("skipped") or {}
+        if any(sk.values()):
+            print(f"\nAussortierte Signale: BTC-Filter {sk.get('leader', 0)}, "
+                  f"Strategie pausiert {sk.get('health', 0)}, ML-Filter {sk.get('ml', 0)}")
     print("==============================")
     print("Hinweis: Vergangene Ergebnisse garantieren keine zukuenftigen Gewinne.")

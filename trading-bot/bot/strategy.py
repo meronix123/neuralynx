@@ -108,6 +108,7 @@ def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
     d["atr"] = atr(d, s["atr_period"])
     d["atr_pct"] = d["atr"] / c * 100
     d["vol_ma"] = d["volume"].rolling(20).mean()
+    d["vol_ratio"] = d["volume"] / d["vol_ma"]
     n_don = s.get("donchian", 20)
     d["don_hi"] = d["high"].rolling(n_don).max().shift()
     d["don_lo"] = d["low"].rolling(n_don).min().shift()
@@ -195,6 +196,7 @@ def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
         default=np.nan,
     )
     d["score"] = np.select(conds, [6, 6, long_score, short_score, 6, 6], default=0)
+    d["macd_n"] = d["macd_h"] / d["atr"]
     warm = max(s["ema_slow"] * 2, 120)
     d.loc[d.index[:warm], "signal"] = 0
     return d

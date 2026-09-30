@@ -63,6 +63,12 @@ class FlowMonitor:
         except Exception as e:  # noqa: BLE001
             log.debug("Trades %s: %s", symbol, e)
         m["oi_change_pct"] = self._oi_change(client, symbol)
+        try:  # Verhaeltnis Long- zu Short-Konten der Trader (nur Info / Auswertung)
+            hist = client.fetch_long_short_ratio_history(symbol, "5m", None, 1)
+            m["long_short_ratio"] = float(hist[-1]["longShortRatio"]) if hist else None
+        except Exception as e:  # noqa: BLE001
+            m["long_short_ratio"] = None
+            log.debug("Long/Short %s: %s", symbol, e)
         return m
 
 
