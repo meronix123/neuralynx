@@ -17,8 +17,9 @@ symbols:
   - GOLD
   - SILVER
 
-# Startwerte aus dem ersten Strategie-Test (4h, Limit-Einstieg, Teilverkauf bei +1R).
-# Nach "python run.py optimize" ggf. anpassen. Noch KEIN Beweis -> erst Paper-Modus!
+# Einstellung nach dem Jahrestest (python run.py optimize --days 365, Stand 30.09.2026):
+# 4h, Trend + Ausbruch, Limit-Einstieg, kein Teilverkauf, Filter inkl. Zeitebenen, ohne ML.
+# Bester Einzelwert im Test: PF 1,31 / +6 % bei 38 Trades. Noch KEIN Beweis -> erst Paper-Modus!
 timeframe: 4h          # Einstiegs-Zeiteinheit
 trend_timeframe: 1d    # Trendfilter
 leverage: 10
@@ -77,7 +78,7 @@ strategy:
   ml_min_trades: 40        # so viele Lernbeispiele braucht das Modell mindestens
   sl_atr: 1.0              # Stop-Loss = 1 x ATR
   tp_atr: 2.0              # Take-Profit = 2 x ATR
-  partial_tp_r: 1.0        # bei +1R die Haelfte verkaufen und Stop auf Einstand (0 = aus)
+  partial_tp_r: 0          # Teilverkauf aus (Jahrestest: ohne besser). 1.0 = bei +1R Haelfte verkaufen
   partial_tp_frac: 0.5
   breakeven_at_r: 1000000000  # Trailing-Stop aus (sehr grosser Wert). 1.0 = ab +1R nachziehen
   trail_atr: 1.0           # Abstand des Trailing-Stops, falls aktiv
