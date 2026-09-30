@@ -10,16 +10,21 @@ Wirtschaftskalender-Filter und Oberflaeche im Browser.
 
 ## Was der Bot macht
 
+**Aktuelle Einstellung** (beste Variante aus dem Strategie-Tester, noch nicht bewiesen):
+4h-Chart mit Tagestrend, Einstieg nur bei 5 von 6 Punkten, Limit-Order zum Signalkurs,
+Stop-Loss 1x ATR, Take-Profit 2x ATR, bei +1R Haelfte verkaufen und Stop auf Einstand.
+Erwartung: wenige Trades (ca. 1-2 pro Woche), dafuer mit Gebuehrenvorteil.
+
 **Vor jedem Trade prueft er:**
 
 | Bereich | Was geprueft wird |
 |---|---|
-| Trend | 1h-Chart: EMA 50 ueber/unter EMA 200 - gehandelt wird nur in Trendrichtung |
+| Trend | Tageschart: EMA 20 ueber/unter EMA 50 - gehandelt wird nur in Trendrichtung |
 | Ausloeser | RSI dreht (ueber 40 / unter 60), MACD-Histogramm kreuzt 0, oder Kurs erobert EMA 21 zurueck |
-| Punkte (min. 4 von 6) | Struktur (EMA 21/50), MACD, ADX-Trendstaerke, Volumen, nicht ueberkauft/-verkauft (RSI + Bollinger), Kurs ueber/unter VWAP |
-| Volatilitaet | ATR darf nicht zu klein (Gebuehren fressen alles) und nicht zu gross sein |
+| Punkte (min. 5 von 6) | Struktur (EMA 21/50), MACD, ADX-Trendstaerke, Volumen, nicht ueberkauft/-verkauft (RSI + Bollinger), Kurs ueber/unter VWAP |
+| Volatilitaet | ATR darf nicht zu klein und nicht zu gross sein |
 | Funding-Rate | extrem einseitig gehebelter Markt -> kein Trade in dieselbe Richtung |
-| Wirtschaftsdaten | holt selbst den Wirtschaftskalender: 30 Min vor bis 30 Min nach wichtigen US-Terminen (Zinsentscheid, Inflation, Arbeitsmarkt ...) keine neuen Trades |
+| Wirtschaftsdaten | holt selbst den Wirtschaftskalender: 30 Min vor bis 30 Min nach wichtigen US-Terminen keine neuen Trades |
 | Stimmung | Crypto Fear & Greed Index: bei extremer Angst/Gier halbes Risiko |
 | Spread | zu grosse Geld/Brief-Spanne -> kein Trade |
 | Gold/Silber | am Wochenende pausiert (duenner Markt) |
@@ -28,17 +33,25 @@ Wirtschaftskalender-Filter und Oberflaeche im Browser.
 
 | Teil | Regel |
 |---|---|
-| Stop-Loss | 1,2 x ATR, liegt **auf Bitget** - greift auch, wenn dein PC aus ist |
-| Take-Profit | 1,8 x ATR, ebenfalls auf Bitget |
-| Gewinne sichern | ab +1R Stop auf Einstand, danach Trailing-Stop (1 x ATR) |
+| Einstieg | Limit-Order (Maker-Gebuehr 0,02 %), wird nach einem Bar ohne Ausfuehrung storniert |
+| Stop-Loss | 1 x ATR, liegt **auf Bitget** - greift auch, wenn dein PC aus ist |
+| Take-Profit | 2 x ATR, ebenfalls auf Bitget |
+| Teilverkauf | bei +1R die Haelfte verkaufen, Stop auf Einstand -> Rest ist risikofrei |
 | Risiko je Trade | max. 1 % vom Konto (inkl. Gebuehren) |
 | Tageslimit | -6 % am Tag -> keine neuen Trades bis morgen |
 | Notbremse | Konto 30 % unter Hoechststand -> Bot eroeffnet gar nichts mehr |
-| Limits | max. 30 Trades/Tag, max. 3 Positionen, max. 2 in dieselbe Richtung |
+| Limits | max. 3 Positionen, max. 2 in dieselbe Richtung |
 | Verlustserie | 4 Verluste in Folge -> 1 Stunde Pause |
 | Liquidation | Trades, deren Stop zu nah an der Liquidation laege, werden verworfen |
+| Nachkaufen im Verlust | gibt es bewusst NICHT |
 
-Alle Werte stehen in `config.yaml`. Mehr Trades: `min_score: 3`, weniger: `min_score: 5`.
+Alle Werte stehen in `config.yaml`.
+
+## Wann Echtgeld?
+
+`python run.py report` wertet alle bisherigen Trades aus. Erst wenn im Paper-/Demo-Modus
+**mindestens 30 Trades** mit **Profit-Faktor >= 1,3** zusammengekommen sind, sagt er "JA".
+Bei 1-2 Trades pro Woche dauert das einige Monate - Abkuerzungen kosten hier meist Geld.
 
 ## Oberflaeche
 

@@ -9,7 +9,7 @@ from .context import MarketContext
 from .exchange import is_metal
 from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
-from .strategy import compute_signals, last_closed_signal, snapshot, trail_stop
+from .strategy import TF_MS, compute_signals, last_closed_signal, snapshot, trail_stop
 
 log = logging.getLogger("bot")
 STATE_FILE = ROOT / "state.json"
@@ -44,6 +44,7 @@ class Bot:
         self.state.setdefault("last_sig", {})   # zuletzt gehandelter Bar je Symbol
         self.state.setdefault("history", [])    # abgeschlossene Trades
         self.state.setdefault("peak_equity", 0.0)
+        self.state.setdefault("pending", {})    # offene Limit-Orders fuer den Einstieg
         self.guard = RiskGuard(self.r, self.state["guard"])
         self.ctx = context or MarketContext(cfg["context"])
         self.notify = Notifier(cfg["telegram"]["token"], cfg["telegram"]["chat_id"])
@@ -75,6 +76,7 @@ class Bot:
         self.state["peak_equity"] = max(self.state["peak_equity"], equity)
 
         positions = self.ex.positions()
+        self._check_pending(positions, now)
         self._handle_closed(positions, now)
 
         views = {}
@@ -87,6 +89,9 @@ class Bot:
         for sym in self.ex.symbols:
             if sym in positions:
                 reasons[sym] = "Position offen"
+                continue
+            if sym in self.state["pending"]:
+                reasons[sym] = "Limit-Order wartet auf Ausfuehrung"
                 continue
             if block:
                 reasons[sym] = block
@@ -111,6 +116,39 @@ class Bot:
         return "", factor
 
     # ------------------------------------------------------------------
+    def _check_pending(self, positions: dict, now: datetime) -> None:
+        """Limit-Einstiege: ausgefuehrt -> Position uebernehmen, abgelaufen -> stornieren."""
+        now_ms = int(now.timestamp() * 1000)
+        for sym, o in list(self.state["pending"].items()):
+            if sym not in positions and now_ms >= o["expires_ms"]:
+                try:
+                    self.ex.cancel(sym, o["order_id"])
+                except Exception as e:  # noqa: BLE001 - evtl. gerade ausgefuehrt
+                    log.info("%s Storno: %s", sym, e)
+                p = self.ex.positions().get(sym)  # zwischen Abfrage und Storno ausgefuehrt?
+                if p:
+                    positions[sym] = p
+                else:
+                    del self.state["pending"][sym]
+                    log.info("%s Limit-Order nicht ausgefuehrt - storniert", sym)
+                    continue
+            if sym in positions:
+                del self.state["pending"][sym]
+                self._register_open(sym, o["side"], positions[sym]["entry"], positions[sym]["amount"],
+                                    o["sl"], o["tp"], o["score"])
+
+    def _register_open(self, sym, side, entry, amount, sl, tp, score) -> None:
+        self.guard.on_open()
+        self.state["meta"][sym] = {
+            "side": side, "entry": entry, "amount": amount, "sl_init": sl, "sl": sl, "tp": tp,
+            "r0": abs(entry - sl), "score": score, "partial_done": False,
+            "opened_ms": int(time.time() * 1000),
+        }
+        self.notify.send(
+            f"NEU {sym} {side.upper()} {amount:g} @ {entry:.6g} | SL {sl:.6g} | TP {tp:.6g} "
+            f"| {self.cfg['leverage']}x | Punkte {score}/6"
+        )
+
     def _analyze(self, sym: str) -> dict:
         df = self.ex.candles(sym, self.cfg["timeframe"], 300)
         tdf = self.ex.candles(sym, self.cfg["trend_timeframe"], 300)
@@ -143,6 +181,8 @@ class Bot:
                 continue
             sig_df = views[sym]["sig_df"]
             price = self.ex.last_price(sym)
+            if self._partial_take_profit(sym, p, m, price):
+                continue
             atr_now = float(sig_df["atr"].iloc[-1])
             new_sl = trail_stop(p["side"], m["entry"], m["sl_init"], m["sl"], price, atr_now, self.s, self.fee)
             if new_sl is None:
@@ -154,6 +194,32 @@ class Bot:
             except Exception as e:  # noqa: BLE001
                 log.warning("%s Stop nachziehen fehlgeschlagen: %s", sym, e)
 
+    def _partial_take_profit(self, sym: str, p: dict, m: dict, price: float) -> bool:
+        """Bei +partial_tp_r R einen Teil verkaufen und den Stop auf Einstand ziehen."""
+        part_r = self.s.get("partial_tp_r", 0)
+        if not part_r or m.get("partial_done"):
+            return False
+        sign = 1 if p["side"] == "long" else -1
+        r0 = m.get("r0") or abs(m["entry"] - m["sl_init"])
+        if r0 <= 0 or sign * (price - m["entry"]) / r0 < part_r:
+            return False
+        step, min_amt = self.ex.amount_rules(sym)
+        qty = round_amount(p["amount"] * self.s.get("partial_tp_frac", 0.5), step, min_amt)
+        m["partial_done"] = True
+        if not 0 < qty < p["amount"]:
+            log.info("%s Teilverkauf uebersprungen (Menge zu klein)", sym)
+            return False
+        self.ex.close(sym, p["side"], qty)
+        be = m["entry"] * (1 + sign * 2 * self.fee)
+        try:
+            self.ex.set_stop(sym, p["side"], be, m["tp"])
+            m["sl"] = be
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s Stop auf Einstand fehlgeschlagen: %s", sym, e)
+        m["amount"] = p["amount"] - qty
+        self.notify.send(f"TEILGEWINN {sym}: {qty:g} verkauft @ ~{price:.6g}, Stop auf Einstand {be:.6g}")
+        return True
+
     def _try_enter(self, sym: str, equity: float, positions: dict, view: dict,
                    risk_factor: float, now: datetime) -> str:
         """Versucht einen Einstieg. Rueckgabe: Begruendung fuer die Oberflaeche."""
@@ -163,7 +229,7 @@ class Bot:
         if self.state["last_sig"].get(sym) == sig.ts:
             return "Signal bereits bearbeitet"
 
-        ok, why = self.guard.can_open(equity, len(positions), now)
+        ok, why = self.guard.can_open(equity, len(positions) + len(self.state["pending"]), now)
         if not ok:
             return why
         same_dir = sum(1 for p in positions.values() if p["side"] == sig.side)
@@ -187,18 +253,20 @@ class Bot:
         if amount <= 0:
             return "Konto zu klein fuer Mindestmenge"
 
+        if self.cfg["fees"].get("entry_order", "market") == "limit":
+            order_id = self.ex.place_limit(sym, sig.side, amount, sig.price, sig.sl, sig.tp)
+            self.state["pending"][sym] = {
+                "order_id": order_id, "side": sig.side, "price": sig.price, "amount": amount,
+                "sl": sig.sl, "tp": sig.tp, "score": sig.score,
+                # gueltig bis zum Ende des Bars nach dem Signal-Bar (wie im Backtest)
+                "expires_ms": sig.ts + 2 * TF_MS[self.cfg["timeframe"]],
+            }
+            positions_pending = f"Limit-Order {sig.side} @ {sig.price:.6g}"
+            log.info("%s %s", sym, positions_pending)
+            return positions_pending
         entry = self.ex.open(sym, sig.side, amount, sig.sl, sig.tp)
-        self.guard.on_open()
         positions[sym] = {"side": sig.side, "amount": amount, "entry": entry}
-        self.state["meta"][sym] = {
-            "side": sig.side, "entry": entry, "amount": amount,
-            "sl_init": sig.sl, "sl": sig.sl, "tp": sig.tp, "score": sig.score,
-            "opened_ms": int(time.time() * 1000),
-        }
-        self.notify.send(
-            f"NEU {sym} {sig.side.upper()} {amount:g} @ {entry:.6g} | SL {sig.sl:.6g} | TP {sig.tp:.6g} "
-            f"| {lev}x | Punkte {sig.score}/6"
-        )
+        self._register_open(sym, sig.side, entry, amount, sig.sl, sig.tp, sig.score)
         return "Position eroeffnet"
 
     # ------------------------------------------------------------------
@@ -219,6 +287,7 @@ class Bot:
                 "snapshot": v["snapshot"],
                 "reason": reasons.get(sym, ""),
                 "position": {**positions[sym], **(m or {})} if sym in positions else None,
+                "pending": self.state["pending"].get(sym),
                 "candles": [
                     {"time": int(r.ts // 1000), "open": r.open, "high": r.high, "low": r.low, "close": r.close}
                     for r in df.tail(CHART_BARS).itertuples()
@@ -231,6 +300,8 @@ class Bot:
         self.status = {
             "mode": self.cfg["mode"],
             "leverage": self.cfg["leverage"],
+            "timeframe": self.cfg["timeframe"],
+            "tf_seconds": TF_MS[self.cfg["timeframe"]] // 1000,
             "updated": now.isoformat(),
             "equity": equity,
             "day_start_equity": self.guard.s["day_start_equity"],

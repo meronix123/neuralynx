@@ -17,8 +17,11 @@ symbols:
   - GOLD
   - SILVER
 
-timeframe: 5m          # Einstiegs-Zeiteinheit
-trend_timeframe: 1h    # Trendfilter
+# Beste Variante aus "python run.py optimize --days 180" (Stand 30.09.2026):
+# 4h, 5 Punkte, SL 1x ATR, TP 2x ATR, Limit-Einstieg, Teilverkauf bei +1R.
+# Im Test: Profit-Faktor ~1,4, aber nur 16 Trades -> noch KEIN Beweis. Erst Paper-Modus!
+timeframe: 4h          # Einstiegs-Zeiteinheit
+trend_timeframe: 1d    # Trendfilter
 leverage: 10
 margin_mode: isolated  # isolated = maximaler Verlust pro Position begrenzt
 
@@ -36,20 +39,22 @@ risk:
 strategy:
   ema_fast: 21
   ema_slow: 50
-  trend_ema_fast: 50
-  trend_ema_slow: 200
+  trend_ema_fast: 20
+  trend_ema_slow: 50
   rsi_period: 14
   rsi_long_trigger: 40     # Ausloeser Long: RSI kreuzt nach Ruecksetzer ueber 40
   rsi_short_trigger: 60    # Ausloeser Short: RSI kreuzt nach Anstieg unter 60
   rsi_overbought: 70
   rsi_oversold: 30
   adx_min: 20              # Trendstaerke
-  min_score: 4             # Punkte (von 6) fuer einen Einstieg. 3 = mehr Trades, 5 = weniger
+  min_score: 5             # Punkte (von 6) fuer einen Einstieg. 3 = mehr Trades, 5 = weniger
   atr_period: 14
-  sl_atr: 1.2              # Stop-Loss = 1.2 x ATR
-  tp_atr: 1.8              # Take-Profit = 1.8 x ATR
-  breakeven_at_r: 1.0      # ab +1R: Stop auf Einstand
-  trail_atr: 1.0           # danach Stop im Abstand 1 x ATR nachziehen
+  sl_atr: 1.0              # Stop-Loss = 1 x ATR
+  tp_atr: 2.0              # Take-Profit = 2 x ATR
+  partial_tp_r: 1.0        # bei +1R die Haelfte verkaufen und Stop auf Einstand (0 = aus)
+  partial_tp_frac: 0.5
+  breakeven_at_r: 1000000000  # Trailing-Stop aus (sehr grosser Wert). 1.0 = ab +1R nachziehen
+  trail_atr: 1.0           # Abstand des Trailing-Stops, falls aktiv
   min_atr_pct: 0.08        # zu ruhiger Markt -> Gebuehren fressen den Gewinn -> kein Trade
   max_atr_pct: 1.5         # zu wilder Markt -> kein Trade
   volume_factor: 1.0       # Volumen muss >= Durchschnitt sein
@@ -69,7 +74,7 @@ context:
   fng_extreme_high: 85     # ... ueber 85 -> Risiko pro Trade halbieren
 
 fees:
-  entry_order: market  # market = sofort (Taker) | limit = Limit-Order zum Signalkurs (Maker, guenstiger)
+  entry_order: limit   # market = sofort (Taker) | limit = Limit-Order zum Signalkurs (Maker, guenstiger)
   maker: 0.0002    # Bitget Futures Maker-Gebuehr (Limit-Orders)
   taker: 0.0006    # Bitget Futures Taker-Gebuehr
   slippage: 0.0003 # geschaetzter Kursverlust bei Market-Orders

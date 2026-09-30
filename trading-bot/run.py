@@ -1,6 +1,7 @@
 """Start:
     python run.py backtest --days 60   # Strategie an alten Daten pruefen
     python run.py optimize --days 180  # viele Einstellungen testen (dauert)
+    python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
 """
@@ -33,9 +34,36 @@ def make_exchange(cfg):
     return BitgetExchange(cfg)
 
 
+def report() -> None:
+    """Ist der Bot reif fuer Echtgeld? Auswertung aus state.json."""
+    from bot.engine import load_state
+
+    hist = load_state().get("history", [])
+    if not hist:
+        print("Noch keine abgeschlossenen Trades.")
+        return
+    pnl = [t["pnl"] for t in hist]
+    wins = [p for p in pnl if p > 0]
+    losses = [-p for p in pnl if p <= 0]
+    pf = sum(wins) / sum(losses) if losses and sum(losses) > 0 else float("inf")
+    eq, peak, mdd = 0.0, 0.0, 0.0
+    for p in pnl:
+        eq += p
+        peak = max(peak, eq)
+        mdd = max(mdd, peak - eq)
+    print(f"Trades:         {len(pnl)}")
+    print(f"Trefferquote:   {100 * len(wins) / len(pnl):.1f} %")
+    print(f"Profit-Faktor:  {pf:.2f}")
+    print(f"Summe:          {sum(pnl):+.2f} USDT")
+    print(f"Max. Rueckgang: {mdd:.2f} USDT")
+    ready = len(pnl) >= 30 and pf >= 1.3
+    print("\nBereit fuer Echtgeld:", "JA (Kriterien erfuellt)" if ready else
+          "NEIN - noetig: mind. 30 Trades und Profit-Faktor >= 1,3")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "optimize", "check", "bot"])
+    ap.add_argument("command", choices=["backtest", "optimize", "report", "check", "bot"])
     ap.add_argument("--days", type=int, default=None)
     args = ap.parse_args()
     cfg = load_config()
@@ -48,6 +76,10 @@ def main() -> None:
     if args.command == "optimize":
         from bot.optimize import optimize_cli
         optimize_cli(cfg, args.days or 180)
+        return
+
+    if args.command == "report":
+        report()
         return
 
     ex = make_exchange(cfg)

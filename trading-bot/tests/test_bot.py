@@ -12,6 +12,11 @@ from bot.risk import RiskGuard, position_size, round_amount, stop_is_safe
 from bot.strategy import compute_signals, last_closed_signal, levels, trail_stop
 
 CFG = load_config()
+# Tests laufen auf 5m-Testdaten -> kurze Zeiteinheiten, unabhaengig von der aktuellen config.yaml
+CFG["timeframe"], CFG["trend_timeframe"] = "5m", "1h"
+CFG["strategy"].update(trend_ema_fast=50, trend_ema_slow=200, min_score=4, partial_tp_r=0,
+                       breakeven_at_r=1.0)
+CFG["fees"]["entry_order"] = "market"
 
 
 def synthetic(n=6000, seed=1, drift=0.00004, start=100.0):
@@ -321,3 +326,78 @@ def test_optimizer_small_grid(monkeypatch):
     res = optimize.optimize(CFG, data, {k: (0.0001, 0.0001) for k in data})
     assert len(res) == 2 * 2 * len(optimize.MANAGE)
     assert {"train_pf", "test_pf", "fuehrung", "einstieg"} <= set(res.columns)
+
+
+def test_paper_bot_limit_entry_and_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["fees"]["entry_order"] = "limit"
+    cfg["strategy"].update(partial_tp_r=1.0, partial_tp_frac=0.5, breakeven_at_r=1e9)
+    client = FakeClient(synthetic(6000, 3))
+    ex = PaperExchange(cfg, client)
+    bot = engine.Bot(cfg, ex, FakeContext())
+    placed = partial = 0
+    for i in range(400, 6000):
+        client.i = i
+        before = len(bot.state["pending"])
+        bot.step()
+        placed += len(bot.state["pending"]) > before
+        partial += sum(1 for m in bot.state["meta"].values() if m.get("partial_done"))
+        # jede Position ist verwaltet oder stammt aus einer gerade ausgefuehrten Limit-Order
+        assert set(ex.positions()) <= set(bot.state["meta"]) | set(bot.state["pending"])
+        assert not (set(bot.state["pending"]) & set(bot.state["meta"]))
+    assert placed > 0
+    assert len(bot.state["history"]) > 0
+    assert ex.equity() > 0
+
+
+def test_partial_take_profit_in_live_engine(tmp_path, monkeypatch):
+    """Kurs erreicht +1R -> Haelfte wird verkauft, Stop auf Einstand, Rest laeuft weiter."""
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    class PriceClient(FakeClient):
+        price = 100.0
+
+        def fetch_ticker(self, sym):
+            return {"last": self.price}
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["strategy"].update(partial_tp_r=1.0, partial_tp_frac=0.5, breakeven_at_r=1e9)
+    client = PriceClient(synthetic(1000, 1))
+    ex = PaperExchange(cfg, client)
+    bot = engine.Bot(cfg, ex, FakeContext())
+    sym = "AAA/USDT:USDT"
+    entry = ex.open(sym, "long", 1.0, 99.0, 104.0)
+    bot._register_open(sym, "long", entry, 1.0, 99.0, 104.0, 5)
+    cash_before = ex.cash
+
+    client.price = entry + 0.5          # noch nicht +1R
+    bot._manage_open(ex.positions(), {sym: {"sig_df": pd.DataFrame({"atr": [1.0]})}})
+    assert not bot.state["meta"][sym]["partial_done"]
+
+    client.price = entry + 1.1          # +1,1R
+    bot._manage_open(ex.positions(), {sym: {"sig_df": pd.DataFrame({"atr": [1.0]})}})
+    m = bot.state["meta"][sym]
+    assert m["partial_done"] and m["amount"] == pytest.approx(0.5)
+    assert ex.pos[sym]["amount"] == pytest.approx(0.5)
+    assert m["sl"] > entry and ex.pos[sym]["sl"] == pytest.approx(m["sl"])   # Stop auf Einstand
+    assert ex.cash > cash_before                                              # Teilgewinn gebucht
+
+    client.price = entry                 # zurueck -> Rest wird auf Einstand ausgestoppt
+    bot._handle_closed(ex.positions(), datetime.now(timezone.utc))
+    assert bot.state["history"][-1]["pnl"] > 0
+
+
+def test_real_config_is_consistent():
+    cfg = load_config()
+    from bot.strategy import TF_MS
+    assert cfg["timeframe"] in TF_MS and cfg["trend_timeframe"] in TF_MS
+    assert cfg["fees"]["entry_order"] in ("market", "limit")
+    assert stop_is_safe(100, 100 - cfg["strategy"]["sl_atr"] * 1.5, cfg["leverage"])  # ATR 1,5 %

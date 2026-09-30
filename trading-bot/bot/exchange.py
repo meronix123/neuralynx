@@ -123,6 +123,22 @@ class BitgetExchange:
             return pos["entry"]
         return float(order.get("average") or order.get("price") or self.last_price(symbol))
 
+    def place_limit(self, symbol: str, side: str, amount: float, price: float, sl: float, tp: float) -> str:
+        """Post-Only-Limit-Order (Maker-Gebuehr) mit Stop-Loss/Take-Profit."""
+        order = self.c.create_order(
+            symbol, "limit", "buy" if side == "long" else "sell", amount, price,
+            {
+                "marginMode": self.cfg["margin_mode"],
+                "postOnly": True,
+                "stopLoss": {"triggerPrice": sl},
+                "takeProfit": {"triggerPrice": tp},
+            },
+        )
+        return str(order["id"])
+
+    def cancel(self, symbol: str, order_id: str) -> None:
+        self.c.cancel_order(order_id, symbol)
+
     def positions(self) -> dict:
         out = {}
         for p in self.c.fetch_positions(self.symbols):
@@ -183,7 +199,9 @@ class PaperExchange:
         self.symbols = resolve_symbols(self.c, cfg["symbols"])
         self.cash = float(cfg["paper"]["start_equity"])
         self.pos: dict = {}
+        self.orders: dict = {}
         self.closed: dict = {}
+        self.maker = cfg["fees"].get("maker", cfg["fees"]["taker"])
         self.fee = cfg["fees"]["taker"]
         self.slip = cfg["fees"]["slippage"]
 
@@ -221,10 +239,32 @@ class PaperExchange:
         price = self.last_price(symbol)
         entry = price * (1 + self.slip) if side == "long" else price * (1 - self.slip)
         self.cash -= entry * amount * self.fee
-        self.pos[symbol] = {"side": side, "amount": amount, "entry": entry, "sl": sl, "tp": tp}
+        self.pos[symbol] = {"side": side, "amount": amount, "entry": entry, "sl": sl, "tp": tp,
+                            "realized": 0.0, "fee_in": entry * amount * self.fee}
         return entry
 
+    def place_limit(self, symbol, side, amount, price, sl, tp):
+        oid = f"paper-{symbol}-{len(self.closed)}-{price}"
+        self.orders[symbol] = {"id": oid, "side": side, "amount": amount, "price": price, "sl": sl, "tp": tp}
+        return oid
+
+    def cancel(self, symbol, order_id):
+        if self.orders.get(symbol, {}).get("id") == order_id:
+            del self.orders[symbol]
+
+    def _check_orders(self):
+        for sym in list(self.orders):
+            o = self.orders[sym]
+            price = self.last_price(sym)
+            if (price <= o["price"]) if o["side"] == "long" else (price >= o["price"]):
+                del self.orders[sym]
+                self.cash -= o["price"] * o["amount"] * self.maker
+                self.pos[sym] = {"side": o["side"], "amount": o["amount"], "entry": o["price"],
+                                 "sl": o["sl"], "tp": o["tp"], "realized": 0.0,
+                                 "fee_in": o["price"] * o["amount"] * self.maker}
+
     def positions(self):
+        self._check_orders()
         self._check_exits()
         return {s: {k: p[k] for k in ("side", "amount", "entry")} for s, p in self.pos.items()}
 
@@ -233,6 +273,15 @@ class PaperExchange:
             self.pos[symbol].update(sl=sl, tp=tp)
 
     def close(self, symbol, side, amount):
+        p = self.pos.get(symbol)
+        if p and amount < p["amount"] - 1e-12:  # Teilverkauf
+            sign = 1 if p["side"] == "long" else -1
+            fill = self.last_price(symbol) * (1 - sign * self.slip)
+            pnl = sign * (fill - p["entry"]) * amount - fill * amount * self.fee
+            self.cash += pnl
+            p["realized"] += pnl
+            p["amount"] -= amount
+            return
         self._exit(symbol, self.last_price(symbol))
 
     def closed_pnl(self, symbol, since_ms):
@@ -253,5 +302,5 @@ class PaperExchange:
         fill = price * (1 - sign * self.slip)
         pnl = sign * (fill - p["entry"]) * p["amount"] - fill * p["amount"] * self.fee
         self.cash += pnl
-        # Einstiegsgebuehr wurde schon beim Oeffnen abgezogen -> in PnL einrechnen
-        self.closed[sym] = pnl - p["entry"] * p["amount"] * self.fee
+        # Einstiegsgebuehr (schon beim Oeffnen abgezogen) und Teilgewinne mit einrechnen
+        self.closed[sym] = pnl + p["realized"] - p["fee_in"]

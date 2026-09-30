@@ -91,9 +91,13 @@ function line(price, color, title, dashed) {
 function thinking(s) {
   const v = s.snapshot, p = s.position;
   const out = [];
+  if (!p && s.pending) {
+    out.push(`<b>Limit-Order ${s.pending.side.toUpperCase()}</b> bei ${px(s.pending.price)} wartet auf Ausfuehrung (SL ${px(s.pending.sl)}, TP ${px(s.pending.tp)}).`);
+  }
   if (p) {
     const dir = p.side === "long" ? "steigt" : "faellt";
     out.push(`<b>Position ${p.side.toUpperCase()}</b> seit ${time(p.opened_ms)}. Der Bot erwartet, dass der Kurs ${dir} bis zum Ziel <b class="up">${px(p.tp)}</b>.`);
+    if (p.partial_done) out.push(`Haelfte bereits mit Gewinn verkauft, Rest laeuft mit Stop auf Einstand.`);
     out.push(`Schutz: Stop-Loss bei <b class="down">${px(p.sl)}</b>` + (p.sl !== p.sl_init ? ` (nachgezogen von ${px(p.sl_init)})` : "") + ".");
   } else if (v.bias) {
     out.push(`1h-Trend <b>${v.trend_1h}</b> &rarr; der Bot sucht nur <b>${v.bias.toUpperCase()}</b>-Einstiege.`);
@@ -133,7 +137,7 @@ function render() {
   }).join("");
 
   const s = data.symbols[selected];
-  document.getElementById("title").textContent = `${selected} - 5 Minuten`;
+  document.getElementById("title").textContent = `${selected} - ${data.timeframe}`;
   const bars = s.candles.map(c => ({ ...c, time: c.time + TZ }));
   candles.setData(bars);
   const series = arr => bars.map((c, i) => arr[i] == null ? null : { time: c.time, value: arr[i] }).filter(Boolean);
@@ -143,13 +147,15 @@ function render() {
   const p = s.position, plan = s.snapshot.plan;
   if (p) {
     line(p.entry, "#3b82f6", "Einstieg"); line(p.sl, "#ef4444", "SL"); line(p.tp, "#22c55e", "TP");
+  } else if (s.pending) {
+    line(s.pending.price, "#3b82f6", "Limit-Order", true); line(s.pending.sl, "#ef4444", "SL", true); line(s.pending.tp, "#22c55e", "TP", true);
   } else if (plan) {
     line(plan.sl, "#ef4444", "Plan SL", true); line(plan.tp, "#22c55e", "Plan TP", true);
   }
   const markers = data.history.filter(t => t.symbol === selected).flatMap(t => [
-    { time: Math.floor(t.opened_ms / 300000) * 300 + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
+    { time: Math.floor(t.opened_ms / 1000 / data.tf_seconds) * data.tf_seconds + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
       color: "#3b82f6", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: t.side },
-    { time: Math.floor(t.closed_ms / 300000) * 300 + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
+    { time: Math.floor(t.closed_ms / 1000 / data.tf_seconds) * data.tf_seconds + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
       shape: "circle", text: (t.pnl >= 0 ? "+" : "") + fmt(t.pnl) },
   ]).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
   candles.setMarkers(markers);
