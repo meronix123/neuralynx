@@ -1,0 +1,59 @@
+# ------------------------------------------------------------
+#  Bitget Trading-Bot - Einstellungen
+# ------------------------------------------------------------
+
+# paper = Simulation mit echten Kursen, kein echtes Geld (START HIER)
+# demo  = Bitget-Demokonto (Demo-API-Schluessel noetig)
+# live  = ECHTES GELD
+mode: paper
+
+# Handelspaare. GOLD und SILVER sucht der Bot automatisch auf Bitget
+# (XAU/XAUT/PAXG bzw. XAG). Nicht verfuegbare Paare werden uebersprungen.
+symbols:
+  - BTC/USDT:USDT
+  - ETH/USDT:USDT
+  - SOL/USDT:USDT
+  - XRP/USDT:USDT
+  - GOLD
+  - SILVER
+
+timeframe: 5m          # Einstiegs-Zeiteinheit
+trend_timeframe: 1h    # Trendfilter
+leverage: 10
+margin_mode: isolated  # isolated = maximaler Verlust pro Position begrenzt
+
+risk:
+  risk_per_trade_pct: 2.0        # max. Verlust pro Trade in % vom Konto (bei Stop-Loss)
+  max_margin_per_trade_pct: 45   # max. Anteil vom Konto als Margin pro Position
+  max_open_positions: 2
+  max_trades_per_day: 10
+  daily_loss_limit_pct: 6.0      # Tagesverlust erreicht -> keine neuen Trades bis morgen
+  max_consecutive_losses: 3      # nach 3 Verlusten in Folge ...
+  pause_after_losses_minutes: 120 # ... 2 Stunden Pause
+
+strategy:
+  ema_fast: 21
+  ema_slow: 50
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+  rsi_period: 14
+  rsi_long_trigger: 40     # Long: RSI kreuzt nach Ruecksetzer ueber 40
+  rsi_short_trigger: 60    # Short: RSI kreuzt nach Anstieg unter 60
+  atr_period: 14
+  sl_atr: 1.2              # Stop-Loss = 1.2 x ATR
+  tp_atr: 1.8              # Take-Profit = 1.8 x ATR
+  breakeven_at_r: 1.0      # ab +1R: Stop auf Einstand
+  trail_atr: 1.0           # danach Stop im Abstand 1 x ATR nachziehen
+  min_atr_pct: 0.08        # zu ruhiger Markt -> kein Trade
+  max_atr_pct: 1.5         # zu wilder Markt -> kein Trade
+  volume_factor: 1.0       # Volumen muss >= Durchschnitt sein
+  max_funding_rate: 0.0005 # extreme Funding-Rate -> nicht mit der Masse handeln
+
+fees:
+  taker: 0.0006    # Bitget Futures Taker-Gebuehr
+  slippage: 0.0003 # geschaetzter Kursverlust bei Market-Orders
+
+paper:
+  start_equity: 35  # Startkapital in USDT fuer die Simulation
+
+loop_seconds: 20
