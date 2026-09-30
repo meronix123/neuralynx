@@ -10,7 +10,7 @@ import time
 
 import pandas as pd
 
-from .backtest import DATA, fetch_history, prepare, simulate, usable
+from .backtest import DATA, fetch_history, load_funding, prepare, simulate, usable
 from .exchange import make_client, resolve_symbols
 
 # Einstiegs-Zeiteinheit, Trend-Zeiteinheit, Trend-EMAs (schnell, langsam)
@@ -42,7 +42,11 @@ FILTERS = {
     "filter+zeitebenen": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False,
                               mtf_filter=True),
     "filter+ml": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=True, mtf_filter=False),
+    "filter+zeitebenen+funding": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False,
+                                      mtf_filter=True, funding_filter=True),
 }
+for _k in FILTERS:
+    FILTERS[_k].setdefault("funding_filter", False)
 
 # Schnell-Modus: kurze Einstiegs-Zeiteinheiten, hoehere nur zur Orientierung, Gebuehren so niedrig wie moeglich
 FAST = dict(
@@ -50,7 +54,7 @@ FAST = dict(
     STRATEGY_SETS={k: STRATEGY_SETS[k] for k in ("nur_trend", "nur_ausbruch", "trend+ausbruch", "alle_nach_lage")},
     ENTRY=["limit"],
     TP_ORDERS=["market", "limit"],
-    FILTERS={k: FILTERS[k] for k in ("filter", "filter+zeitebenen")},
+    FILTERS={k: FILTERS[k] for k in ("filter", "filter+zeitebenen", "filter+zeitebenen+funding")},
 )
 MIN_TRAIN_TRADES = 20
 
@@ -78,14 +82,15 @@ def make_cfg(base: dict, tf, ttf, tf_fast, tf_slow, score, sl, rr, sset,
     return cfg
 
 
-def optimize(base: dict, data: dict, rules: dict, base_tf: str = "1h") -> pd.DataFrame:
+def optimize(base: dict, data: dict, rules: dict, base_tf: str = "1h",
+             funding: dict | None = None) -> pd.DataFrame:
     all_ts = sorted(set().union(*[set(df["ts"]) for df in data.values()]))
     split = all_ts[int(len(all_ts) * 2 / 3)]
     rows = []
     total = sum(len(c) for _, c in variants())
     done, t0 = 0, time.time()
     for key, combos in variants():
-        prep = prepare(make_cfg(base, *key), data, base_tf)  # Signale nur einmal je Einstellung
+        prep = prepare(make_cfg(base, *key), data, base_tf, funding)  # Signale nur einmal je Einstellung
         for entry, tp_order, manage, filt in combos:
             cfg = make_cfg(base, *key, entry, tp_order, manage, filt)
             train = simulate(cfg, prep, rules, end_ts=split)
@@ -130,7 +135,8 @@ def optimize_cli(base: dict, days: int, fast: bool = False) -> None:
         rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
 
     data = usable(data)
-    res = optimize(base, data, rules, base_tf=base_tf)
+    funding = load_funding(client, list(data), days)
+    res = optimize(base, data, rules, base_tf=base_tf, funding=funding)
     DATA.mkdir(exist_ok=True)
     out = DATA / "optimierung.csv"
     res.to_csv(out, index=False, sep=";", decimal=",")

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .config import ROOT
+from .derivs import fetch_funding_history, funding_blocks, merge_funding
 from .exchange import is_metal, make_client, resolve_symbols, to_df
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .ml import SignalModel, features
@@ -72,11 +73,12 @@ def usable(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
 
 PREP_COLS = ("ts", "open", "high", "low", "close", "atr", "signal", "sl_dist", "tp_dist", "strategy", "regime",
-             "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "mtf_score")
+             "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "mtf_score", "funding_rank")
 FEATURE_COLS = ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "regime", "strategy")
 
 
-def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str) -> dict:
+def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str,
+            funding: dict[str, pd.DataFrame] | None = None) -> dict:
     """Signale einmal berechnen (teuer). data: Symbol -> Kerzen in base_tf."""
     s, tf, ttf = cfg["strategy"], cfg["timeframe"], cfg["trend_timeframe"]
     out = {}
@@ -85,6 +87,7 @@ def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str) -> dict:
         # hoehere Zeitebenen aus den vorhandenen Daten bilden (kleinere als base_tf gibt es rueckwirkend nicht)
         mtf = {h: resample(raw, h) for h in higher_tfs(tf) if TF_MS[h] >= TF_MS[base_tf]}
         d = compute_signals(df, resample(raw, ttf), s, tf, ttf, mtf)
+        d["funding_rank"] = merge_funding(d, (funding or {}).get(sym))
         out[sym] = {c: d[c].tolist() for c in PREP_COLS}
     # Leitwaehrung: Marktlage von BTC je Zeitpunkt fuer die anderen Krypto-Maerkte
     leader = next((k for k in out if is_leader(k)), None)
@@ -119,7 +122,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     model, examples, trained_at = SignalModel(), list(seed_examples or []), 0
     strat_pnls: dict[str, list[float]] = {}
     health_skips: dict[str, int] = {}
-    skipped = {"leader": 0, "mtf": 0, "health": 0, "ml": 0}
+    skipped = {"leader": 0, "mtf": 0, "funding": 0, "health": 0, "ml": 0}
 
     index = {sym: {t: i for i, t in enumerate(p["ts"])} for sym, p in prep.items()}
     timeline = sorted(t for t in set().union(*[set(p["ts"]) for p in prep.values()])
@@ -250,6 +253,9 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 if "mtf_score" in d and mtf_blocks(side, d["mtf_score"][i], s):
                     skipped["mtf"] += 1
                     continue
+                if "funding_rank" in d and funding_blocks(side, d["funding_rank"][i], s):
+                    skipped["funding"] += 1
+                    continue
                 if not health_gate(strat, strat_pnls.get(strat, []), s, health_skips):
                     skipped["health"] += 1
                     continue
@@ -328,9 +334,21 @@ def backtest_cli(cfg: dict, days: int) -> None:
         m = client.market(sym)
         rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
     data = usable(data)
-    res = run_backtest(cfg, data, rules)
+    funding = load_funding(client, list(data), days)
+    res = simulate(cfg, prepare(cfg, data, cfg["timeframe"], funding), rules)
     print_report(res, days)
     save_ml_examples(res.get("examples", []))
+
+
+def load_funding(client, symbols: list[str], days: int) -> dict[str, pd.DataFrame]:
+    out = {}
+    for sym in symbols:
+        try:
+            out[sym] = fetch_funding_history(client, sym, days, DATA)
+            print(f"  Funding-Historie {sym}: {len(out[sym])} Werte")
+        except Exception as e:  # noqa: BLE001 - ohne Funding weiter
+            print(f"  Funding-Historie {sym} nicht verfuegbar: {e}")
+    return out
 
 
 ML_FILE = DATA / "ml_examples.json"
@@ -363,6 +381,7 @@ def print_report(res: dict, days: int) -> None:
         sk = res.get("skipped") or {}
         if any(sk.values()):
             print(f"\nAussortierte Signale: BTC-Filter {sk.get('leader', 0)}, Zeitebenen {sk.get('mtf', 0)}, "
+                  f"Funding {sk.get('funding', 0)}, "
                   f"Strategie pausiert {sk.get('health', 0)}, ML-Filter {sk.get('ml', 0)}")
     print("==============================")
     print("Hinweis: Vergangene Ergebnisse garantieren keine zukuenftigen Gewinne.")

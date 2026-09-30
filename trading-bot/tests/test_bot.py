@@ -515,7 +515,7 @@ def test_filters_and_ml_run_in_simulation():
     filt = simulate(cfg, prep, rules)
     sk = filt["skipped"]
     assert sk["leader"] > 0 and sk["leader"] + sk["health"] + sk["ml"] > 0
-    assert base["skipped"] == {"leader": 0, "mtf": 0, "health": 0, "ml": 0}
+    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "health": 0, "ml": 0}
     assert filt["end"] == pytest.approx(filt["start"] + filt["table"].pnl.sum())
     assert (filt["table"].why == "zeit").any()
 
@@ -649,9 +649,53 @@ def test_fast_profile_grid_runs_end_to_end():
         optimize.STRATEGY_SETS = {"nur_trend": ["trend"]}
         data = {"AAA/USDT:USDT": synthetic(6000, 1)}
         res = optimize.optimize(CFG, data, {"AAA/USDT:USDT": (0.0001, 0.0001)}, base_tf="5m")
-        assert len(res) == 1 * 2 * len(optimize.MANAGE) * 2
-        assert set(res["tp"]) == {"market", "limit"} and set(res["filter"]) == {"filter", "filter+zeitebenen"}
+        assert len(res) == 1 * 2 * len(optimize.MANAGE) * len(optimize.FILTERS)
+        assert set(res["tp"]) == {"market", "limit"}
+        assert set(res["filter"]) == {"filter", "filter+zeitebenen", "filter+zeitebenen+funding"}
     finally:
         for k, v in saved.items():
             setattr(optimize, k, v)
         optimize.MIN_SCORES, optimize.SL_RR = [4, 5], [(1.0, 2.0), (1.5, 2.0), (2.0, 3.0)]
+
+
+def test_funding_crowding_filter():
+    from bot.backtest import prepare, simulate
+    from bot.derivs import fetch_funding_history, funding_blocks, live_rank, merge_funding
+
+    s = {"funding_filter": True, "funding_block_rank": 0.9}
+    assert funding_blocks("long", 0.95, s) and not funding_blocks("short", 0.95, s)
+    assert funding_blocks("short", 0.05, s) and not funding_blocks("long", 0.05, s)
+    assert not funding_blocks("long", float("nan"), s) and not funding_blocks("long", 0.99, {})
+
+    # Seitenweises Laden (neueste zuerst) bis zum Startdatum
+    now = 1_760_000_000_000
+    all_rates = [(now - k * 8 * 3_600_000, 0.0001 * (k % 7)) for k in range(400)]
+
+    class C:
+        def milliseconds(self):
+            return now
+
+        def fetch_funding_rate_history(self, sym, since, limit, params):
+            p = params["pageNo"]
+            chunk = all_rates[(p - 1) * limit: p * limit]
+            return [{"timestamp": t, "fundingRate": r} for t, r in chunk]
+
+    f = fetch_funding_history(C(), "AAA/USDT:USDT", 60)
+    assert f.ts.is_monotonic_increasing and f.ts.min() >= now - 60 * 86_400_000 and len(f) == 60 * 3 + 1
+    assert live_rank(f, 1.0) == 1.0 and live_rank(f, -1.0) == 0.0
+
+    # kein Blick in die Zukunft: ein Bar sieht nur Funding, das vor seinem Schluss feststand
+    bars = pd.DataFrame({"avail": [now - 10 * 3_600_000, now]})
+    fut = pd.DataFrame({"ts": [now - 5 * 3_600_000], "rate": [0.01]})
+    assert merge_funding(bars, fut).isna().iloc[0]
+
+    df = synthetic(6000, 2)
+    fund = pd.DataFrame({"ts": df.ts.iloc[::96].to_numpy(), "rate": np.linspace(-0.001, 0.003, len(df.ts.iloc[::96]))})
+    cfg = copy.deepcopy(CFG)
+    cfg["strategy"].update(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False, mtf_filter=False)
+    prep = prepare(cfg, {"AAA/USDT:USDT": df}, "5m", {"AAA/USDT:USDT": fund})
+    ranks = [r for r in prep["AAA/USDT:USDT"]["funding_rank"] if r == r]
+    assert ranks and max(ranks) <= 1
+    cfg["strategy"]["funding_filter"] = True
+    res = simulate(cfg, prep, {"AAA/USDT:USDT": (0.0001, 0.0001)})
+    assert res["skipped"]["funding"] > 0      # steigendes Funding = ueberfuellte Longs werden aussortiert

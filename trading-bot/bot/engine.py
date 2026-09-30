@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from .config import ROOT
 from .context import MarketContext
+from .derivs import fetch_funding_history, funding_blocks, live_rank
 from .exchange import is_metal
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .flow import FlowMonitor, flow_score, flow_verdict
@@ -225,6 +226,20 @@ class Bot:
             f"| {self.cfg['leverage']}x | {strat}"
         )
 
+    def _funding_rank(self, sym: str, current: float | None) -> float | None:
+        """Wie extrem ist das aktuelle Funding im Vergleich zum letzten Monat? (stuendlich neu geladen)"""
+        if not self.s.get("funding_filter") or current is None:
+            return None
+        cache = self.__dict__.setdefault("_funding_cache", {})
+        at, hist = cache.get(sym, (0, None))
+        if time.time() - at > 3600:
+            try:
+                hist = fetch_funding_history(self.ex.c, sym, 45)
+            except Exception as e:  # noqa: BLE001 - Filter ist optional
+                log.debug("Funding-Historie %s: %s", sym, e)
+            cache[sym] = (time.time(), hist)
+        return live_rank(hist, current)
+
     def _cached_candles(self, sym: str, tf: str, limit: int = 300):
         """Andere Zeitebenen nur so oft neu laden, wie sie sich aendern koennen (max. alle 5 Min)."""
         key, now = (sym, tf), time.time()
@@ -376,6 +391,10 @@ class Bot:
             lr = str(self.views[leader]["sig_df"].iloc[-2]["regime"]) if leader else None
             if leader_blocks(sig.side, lr):
                 return f"BTC im {'Abwaerts' if lr == 'trend_down' else 'Aufwaerts'}trend - kein {sig.side}"
+        frank = self._funding_rank(sym, funding)
+        if funding_blocks(sig.side, frank, self.s):
+            self.state["last_sig"][sym] = sig.ts
+            return f"Markt ueberfuellt (Funding hoeher als {frank * 100:.0f} % des letzten Monats) - kein {sig.side}"
         mscore = view["snapshot"].get("mtf_score")
         if mtf_blocks(sig.side, mscore, self.s):
             self.state["last_sig"][sym] = sig.ts
