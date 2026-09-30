@@ -16,6 +16,7 @@ from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
 from .strategy import (MTF_EMAS, MTF_ORDER, STRATEGY_NAMES, TF_MS, compute_signals, higher_tfs,
                        last_closed_signal, snapshot, tf_direction, trail_stop)
+from .tfselect import active_tfs, adaptive, multi, profit_factor, recent, shadow_results, tf_allowed, tf_cfg
 
 log = logging.getLogger("bot")
 STATE_FILE = ROOT / "state.json"
@@ -62,6 +63,12 @@ class Bot:
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
         self.views: dict = {}
         self._candle_cache: dict = {}
+        # Automatische Zeiteinheit: mehrere Einstiegs-Zeiteinheiten gleichzeitig beobachten
+        self.multi, self.adaptive = multi(cfg), adaptive(cfg)
+        self.tfs = active_tfs(cfg)
+        self.tf_conf = {tf: tf_cfg(cfg, tf) for tf in self.tfs}
+        self.tf_stats: dict = {}
+        self._sig_cache: dict = {}
         self.model = None
         self._model_trained_on = -1
         self._train_model()
@@ -126,6 +133,8 @@ class Bot:
         for sym in self.ex.symbols:
             views[sym] = self._analyze(sym)
         self.views = views
+        if self.multi:
+            self.tf_stats = self._tf_stats(views)
         self._manage_open(positions, views, now)
         self._train_model()
 
@@ -141,7 +150,7 @@ class Bot:
             if block:
                 reasons[sym] = block
                 continue
-            reasons[sym] = self._try_enter(sym, equity, positions, views[sym], risk_factor, now)
+            reasons[sym] = self._enter_any(sym, equity, positions, views[sym], risk_factor, now)
         self._update_status(now, equity, positions, views, reasons, block)
 
     def _global_block(self, equity: float, now: datetime) -> tuple[str, float]:
@@ -255,11 +264,12 @@ class Bot:
         return live_rank(hist, current)
 
     def _cached_candles(self, sym: str, tf: str, limit: int = 300):
-        """Andere Zeitebenen nur so oft neu laden, wie sie sich aendern koennen (max. alle 5 Min)."""
+        """Kerzen erst neu laden, wenn ein Bar abgeschlossen ist (spaetestens alle 5 Min)."""
         key, now = (sym, tf), time.time()
         hit = self._candle_cache.get(key)
-        if hit and now - hit[0] < min(TF_MS[tf] / 4000, 300):
-            return hit[1]
+        if hit and now - hit[0] < 300 and len(hit[1]):
+            if now * 1000 < int(hit[1]["ts"].iloc[-1]) + TF_MS[tf] + 2000:
+                return hit[1]
         df = self.ex.candles(sym, tf, limit)
         self._candle_cache[key] = (now, df)
         return df
@@ -291,7 +301,87 @@ class Bot:
         snap["mtf"] = scan
         snap["macro"] = self._macro_score(sym)
         snap["mtf_score"] = round(float(sig_df["mtf_score"].iloc[-2]), 2) if "mtf_score" in sig_df else None
-        return {"sig_df": sig_df, "snapshot": snap}
+        view = {"sig_df": sig_df, "snapshot": snap}
+        if self.multi:
+            view["tfs"] = {}
+            for t in self.tfs:
+                try:
+                    view["tfs"][t] = self._analyze_tf(sym, t, snap["macro"])
+                except Exception as e:  # noqa: BLE001 - eine Zeiteinheit darf fehlen
+                    log.debug("%s %s: %s", sym, t, e)
+        return view
+
+    def _analyze_tf(self, sym: str, tf: str, macro: float | None) -> dict:
+        """Signale einer weiteren Einstiegs-Zeiteinheit (nur neu rechnen, wenn ein Bar schliesst)."""
+        c = self.tf_conf[tf]
+        df = self._cached_candles(sym, tf)
+        last = int(df["ts"].iloc[-1])
+        hit = self._sig_cache.get((sym, tf))
+        if hit and hit[0] == last:
+            sig_df = hit[1]
+        else:
+            mtf = {}
+            for h in higher_tfs(tf):
+                try:
+                    mtf[h] = self._cached_candles(sym, h)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("%s %s: %s", sym, h, e)
+            sig_df = compute_signals(df, self._cached_candles(sym, c["trend_timeframe"]), c["strategy"],
+                                     tf, c["trend_timeframe"], mtf)
+            self._sig_cache[(sym, tf)] = (last, sig_df)
+        ms = round(float(sig_df["mtf_score"].iloc[-2]), 2) if "mtf_score" in sig_df else None
+        return {"sig_df": sig_df, "snapshot": {"macro": macro, "mtf_score": ms}}
+
+    def _tf_stats(self, views: dict) -> dict:
+        """Schatten-Konto je Zeiteinheit aus den letzten Kerzen aller Maerkte (wie im Backtest)."""
+        leader = next((k for k in views if is_leader(k)), None)
+        out = {}
+        for tf in self.tfs:
+            s = self.tf_conf[tf]["strategy"]
+            lead = None
+            if leader and tf in views[leader].get("tfs", {}):
+                ld = views[leader]["tfs"][tf]["sig_df"]
+                lead = dict(zip(ld["ts"].astype("int64"), ld["regime"].astype(str)))
+            rows = []
+            for sym, v in views.items():
+                if tf not in v.get("tfs", {}):
+                    continue
+                sdf = v["tfs"][tf]["sig_df"].iloc[:-1]  # letzter Bar ist noch offen
+                d = {k: sdf[k].tolist() for k in ("ts", "high", "low", "close", "signal", "sl_dist", "tp_dist")}
+                if "mtf_score" in sdf:
+                    d["mtf_score"] = sdf["mtf_score"].tolist()
+                lr = None
+                if lead is not None and not is_leader(sym) and not is_metal(sym):
+                    lr = [lead.get(int(x)) for x in d["ts"]]
+                rows += shadow_results(d, tf, s, self.fee, lr)
+            rs = [r for _, r in sorted(rows)]
+            pf = profit_factor(recent(rs, s))
+            out[tf] = {"n": len(rs), "pf": None if pf is None else round(pf, 2),
+                       "ok": tf_allowed(rs, s) if self.adaptive else True}
+        return out
+
+    def _enter_any(self, sym: str, equity: float, positions: dict, view: dict,
+                   risk_factor: float, now: datetime) -> str:
+        """Feste Zeiteinheit oder: alle beobachteten Zeiteinheiten pruefen (groesste zuerst)."""
+        if not self.multi:
+            return self._try_enter(sym, equity, positions, view, risk_factor, now)
+        notes = []
+        for tf in self.tfs:
+            v = view.get("tfs", {}).get(tf)
+            if v is None:
+                continue
+            st = self.tf_stats.get(tf, {})
+            if not st.get("ok", True):
+                if int(v["sig_df"]["signal"].iloc[-2]) != 0:
+                    notes.append(f"{tf}: Signal ausgelassen - Zeiteinheit laeuft gerade schlecht "
+                                 f"(Schatten-PF {st.get('pf')})")
+                continue
+            why = self._try_enter(sym, equity, positions, v, risk_factor, now, tf)
+            if sym in positions or sym in self.state["pending"]:
+                return f"{tf}: {why}"
+            if why != "Kein Signal":
+                notes.append(f"{tf}: {why}")
+        return " | ".join(notes) if notes else f"Kein Signal ({', '.join(self.tfs)})"
 
     def _handle_closed(self, positions: dict, now: datetime) -> None:
         for sym in list(self.state["meta"]):
@@ -308,7 +398,7 @@ class Bot:
             self.state["history"].append({
                 "symbol": sym, "side": m["side"], "entry": m["entry"], "exit": price,
                 "amount": m["amount"], "sl": m["sl_init"], "tp": m["tp"], "pnl": pnl,
-                "score": m.get("score"), "opened_ms": m["opened_ms"], "closed_ms": int(now.timestamp() * 1000),
+                "score": m.get("score"), "opened_ms": m["opened_ms"], "tf": m.get("tf"), "closed_ms": int(now.timestamp() * 1000),
                 "strategy": m.get("strategy"), "regime": m.get("regime"), "flow": m.get("flow"),
                 "x": m.get("x"), "ml_prob": m.get("ml_prob"),
             })
@@ -321,7 +411,7 @@ class Bot:
             m = self.state["meta"].get(sym)
             if not m or sym not in views:
                 continue
-            sig_df = views[sym]["sig_df"]
+            sig_df = views[sym].get("tfs", {}).get(m.get("tf"), views[sym])["sig_df"]
             price = self.ex.last_price(sym)
             if self._time_stop(sym, p, m, price, now):
                 continue
@@ -340,7 +430,7 @@ class Bot:
 
     def _time_stop(self, sym: str, p: dict, m: dict, price: float, now: datetime) -> bool:
         """Trade kommt nicht vom Fleck -> schliessen (wie im Backtest)."""
-        bars = int((now.timestamp() * 1000 - m["opened_ms"]) // TF_MS[self.cfg["timeframe"]])
+        bars = int((now.timestamp() * 1000 - m["opened_ms"]) // TF_MS[m.get("tf") or self.cfg["timeframe"]])
         sign = 1 if p["side"] == "long" else -1
         r0 = m.get("r0") or abs(m["entry"] - m["sl_init"])
         progress = sign * (price - m["entry"]) / r0 if r0 > 0 else 0.0
@@ -381,13 +471,18 @@ class Bot:
         return True
 
     def _try_enter(self, sym: str, equity: float, positions: dict, view: dict,
-                   risk_factor: float, now: datetime) -> str:
+                   risk_factor: float, now: datetime, tf: str | None = None) -> str:
         """Versucht einen Einstieg. Rueckgabe: Begruendung fuer die Oberflaeche."""
-        funding = self.ex.funding_rate(sym)
-        sig = last_closed_signal(view["sig_df"], self.s, funding)
-        if sig is None:
+        tf = tf or self.cfg["timeframe"]
+        s = self.tf_conf[tf]["strategy"] if tf in self.tf_conf else self.s
+        sig_key = f"{sym}|{tf}" if self.multi else sym
+        if len(view["sig_df"]) < 2 or int(view["sig_df"]["signal"].iloc[-2]) == 0:
             return "Kein Signal"
-        if self.state["last_sig"].get(sym) == sig.ts:
+        funding = self.ex.funding_rate(sym)
+        sig = last_closed_signal(view["sig_df"], s, funding)
+        if sig is None:
+            return "Signal verworfen (Funding-Rate extrem)"
+        if self.state["last_sig"].get(sig_key) == sig.ts:
             return "Signal bereits bearbeitet"
 
         ok, why = self.guard.can_open(equity, len(positions) + len(self.state["pending"]), now)
@@ -403,43 +498,44 @@ class Bot:
             return f"Spread zu hoch ({spread:.3f} %)"
         if self.s.get("leader_filter") and not is_leader(sym) and not is_metal(sym):
             leader = next((k for k in self.views if is_leader(k)), None)
-            lr = str(self.views[leader]["sig_df"].iloc[-2]["regime"]) if leader else None
+            lv = self.views[leader].get("tfs", {}).get(tf, self.views[leader]) if leader else None
+            lr = str(lv["sig_df"].iloc[-2]["regime"]) if lv else None
             if leader_blocks(sig.side, lr):
                 return f"BTC im {'Abwaerts' if lr == 'trend_down' else 'Aufwaerts'}trend - kein {sig.side}"
         frank = self._funding_rank(sym, funding)
         if funding_blocks(sig.side, frank, self.s):
-            self.state["last_sig"][sym] = sig.ts
+            self.state["last_sig"][sig_key] = sig.ts
             crowd = "zu viele Longs" if sig.side == "long" else "zu viele Shorts"
             return f"Markt ueberfuellt ({crowd}, Funding-Rang {frank * 100:.0f} % im Monatsvergleich)"
         mac = view["snapshot"].get("macro")
         if macro_blocks(sig.side, mac, self.s):
-            self.state["last_sig"][sym] = sig.ts
+            self.state["last_sig"][sig_key] = sig.ts
             return f"Makro-Ampel dagegen ({'Risiko aus' if mac < 0 else 'Risiko an'}, {mac:+.2f})"
         mscore = view["snapshot"].get("mtf_score")
         if mtf_blocks(sig.side, mscore, self.s):
-            self.state["last_sig"][sym] = sig.ts
+            self.state["last_sig"][sig_key] = sig.ts
             return f"Zeitebenen dagegen (Gesamtrichtung {mscore:+.2f})"
         pnls = [t["pnl"] for t in self.state["history"] if t.get("strategy") == sig.strategy]
         if not health_gate(sig.strategy, pnls, self.s, self.state.setdefault("health_skips", {})):
-            self.state["last_sig"][sym] = sig.ts
+            self.state["last_sig"][sig_key] = sig.ts
             return f"Strategie '{STRATEGY_NAMES.get(sig.strategy, sig.strategy)}' pausiert (laeuft gerade schlecht)"
         row = view["sig_df"].iloc[-2]
         x = features({k: row[k] for k in ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n",
                                           "trend", "regime", "strategy") if k in row}, sig.side)
         prob = self.model.proba(x) if (self.s.get("ml_filter") and self.model) else None
         if prob is not None and prob < self.s.get("ml_threshold", 0.45):
-            self.state["last_sig"][sym] = sig.ts
+            self.state["last_sig"][sig_key] = sig.ts
             return f"ML-Filter: Gewinnchance nur {prob * 100:.0f} %"
 
         # ab hier gilt das Signal als bearbeitet (kein zweiter Versuch fuer denselben Bar)
-        self.state["last_sig"][sym] = sig.ts
+        self.state["last_sig"][sig_key] = sig.ts
         flow = self.flow.measure(self.ex.c, sym, funding)
         self.last_flow[sym] = (time.time(), flow)
         ok, flow_why, flow_factor = flow_verdict(sig.side, flow, self.flow_cfg)
         if not ok:
             return flow_why
         risk_factor *= flow_factor
-        info = {"strategy": sig.strategy, "regime": sig.regime, "x": x, "ml_prob": prob,
+        info = {"strategy": sig.strategy, "regime": sig.regime, "x": x, "ml_prob": prob, "tf": tf,
                 "mtf": view["snapshot"].get("mtf"), "mtf_score": view["snapshot"].get("mtf_score"),
                 "macro": view["snapshot"].get("macro"), "funding_rank": frank,
                 "flow": {**flow, "score": round(flow_score(sig.side, flow), 3)}}
@@ -460,9 +556,9 @@ class Bot:
                 "order_id": order_id, "side": sig.side, "price": sig.price, "amount": amount,
                 "sl": sig.sl, "tp": sig.tp, "score": sig.score, "info": info,
                 # gueltig bis zum Ende des Bars nach dem Signal-Bar (wie im Backtest)
-                "expires_ms": sig.ts + 2 * TF_MS[self.cfg["timeframe"]],
+                "expires_ms": sig.ts + 2 * TF_MS[tf],
             }
-            positions_pending = f"Limit-Order {sig.side} @ {sig.price:.6g}"
+            positions_pending = f"Limit-Order {sig.side} @ {sig.price:.6g} ({tf})"
             log.info("%s %s", sym, positions_pending)
             return positions_pending
         entry = self.ex.open(sym, sig.side, amount, sig.sl, None if self.limit_tp else sig.tp)
@@ -513,6 +609,8 @@ class Bot:
             "mode": self.cfg["mode"],
             "leverage": self.cfg["leverage"],
             "timeframe": self.cfg["timeframe"],
+            "tf_select": self.cfg.get("tf_select", "fixed") if self.multi else "fixed",
+            "tf_stats": self.tf_stats,
             "tf_seconds": TF_MS[self.cfg["timeframe"]] // 1000,
             "updated": now.isoformat(),
             "equity": equity,

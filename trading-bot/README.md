@@ -41,6 +41,7 @@ welche Daten wirklich helfen.
 | Zeitebenen (1m bis 1 Woche) | Richtung auf 1m, 5m, 15m, 1h, 2h, 4h, 1 Tag, 1 Woche. Die hoeheren Zeitebenen ergeben eine Gesamtrichtung (-1..+1); Long nur ab +0,25, Short nur ab -0,25. Die kleinen (1m-15m) werden angezeigt und bei jedem Trade gespeichert. |
 | Ueberfuellung (Funding) | Funding-Rate im obersten 10 % des letzten Monats -> zu viele gehebelte Longs -> keine neuen Longs (Short umgekehrt). Rueckwirkend getestet. |
 | Makro-Ampel | S&P 500, Nasdaq, US-Dollar, 10-jaehrige US-Zinsen (FRED), Stablecoin-Menge (DefiLlama), BTC-Volatilitaetsindex DVOL (Deribit). Risiko aus -> keine Longs, Risiko an -> keine Shorts. Gold nutzt nur Dollar und Zinsen. Tageswerte mit 2 Tagen Versatz (kein Blick in die Zukunft). |
+| Auto-Zeiteinheit | Der Bot beobachtet 15m, 30m, 1h, 2h und 4h gleichzeitig. Jede Zeiteinheit fuehrt ein Schatten-Konto (jedes Signal wird auf dem Papier bis Stop/Ziel verfolgt). Gehandelt wird nur auf Zeiteinheiten, deren letzte 20 Schatten-Trades im Plus sind (Profit-Faktor >= 1). Je Markt immer nur eine Position. `tf_select: fixed` = nur die feste Zeiteinheit. |
 | BTC als Leitwaehrung | BTC im Abwaertstrend -> keine Longs bei ETH/SOL/XRP (und umgekehrt) |
 | Strategie-Gesundheit | laeuft eine Strategie gerade schlecht (letzte 10 Trades PF < 0,6), wird sie pausiert; nach 10 ausgelassenen Signalen gibt es einen Probe-Trade |
 | Zeit-Stop | Trade nach 12 Bars nicht bei +0,5R und kein Teilverkauf -> schliessen |
@@ -126,6 +127,16 @@ Zeitraeumen profitabel sind, kommen in Frage. Alle Ergebnisse stehen danach in
 Nachkaufen im Verlust ist bewusst NICHT eingebaut - mit Hebel der schnellste Weg
 zum Totalverlust. Aufgestockt wird nur, wenn der Trade im Gewinn ist, und der
 Stop wird danach mindestens auf den neuen Einstand gezogen.
+
+### Feste Zeiteinheit oder automatische Wahl?
+
+```
+python run.py optimize --zeiten
+```
+
+Vergleicht auf 365 Tagen (15m-Daten): fest 15m / 30m / 1h / 2h / 4h, alle gleichzeitig
+und die automatische Wahl (verschieden streng). Zeigt, wie viele Trades pro Tag jeder
+Modus macht und ob er im Test-Zeitraum Geld verdient. Ergebnisse in `data\zeiteinheiten.csv`.
 
 ## Schritt 2: Paper-Modus (echte Kurse, Spielgeld)
 

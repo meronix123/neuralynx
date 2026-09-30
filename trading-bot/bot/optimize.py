@@ -10,8 +10,9 @@ import time
 
 import pandas as pd
 
-from .backtest import DATA, fetch_history, load_funding, load_macro, prepare, simulate, usable
+from .backtest import DATA, fetch_history, load_funding, load_macro, prepare, simulate, streams, usable
 from .exchange import make_client, resolve_symbols
+from .tfselect import tf_cfg
 
 # Einstiegs-Zeiteinheit, Trend-Zeiteinheit, Trend-EMAs (schnell, langsam)
 TIMEFRAMES = [
@@ -175,3 +176,91 @@ def optimize_cli(base: dict, days: int, fast: bool = False) -> None:
             print(uniq.groupby(["zeit", col])[cols].median().round(2).to_string())
     print(f"\nAlle Ergebnisse: {out}  (mit Excel oeffnen)")
     print("Hinweis: Auch eine gute Variante kann kuenftig verlieren. Erst Paper/Demo, dann Echtgeld.")
+
+
+# ---------------------------------------------------------------------------
+# Zeiteinheiten-Vergleich: feste Zeiteinheit gegen automatische Wahl
+ZEIT_TFS = ["15m", "30m", "1h", "2h", "4h"]
+# Name -> (Zeiteinheiten, tf_select, Fenster, Mindest-Profit-Faktor)
+ZEIT_MODES = {
+    **{f"fest_{tf}": ([tf], "fixed", 20, 1.0) for tf in ZEIT_TFS},
+    "alle_gleichzeitig": (ZEIT_TFS, "all", 20, 1.0),
+    "auto": (ZEIT_TFS, "adaptive", 20, 1.0),
+    "auto_streng": (ZEIT_TFS, "adaptive", 20, 1.2),
+    "auto_lang": (ZEIT_TFS, "adaptive", 40, 1.0),
+    "auto_ab_1h": (["1h", "2h", "4h"], "adaptive", 20, 1.0),
+}
+ZEIT_SETS = ["trend+ausbruch", "nur_trend"]
+ZEIT_FILTERS = ["filter+zeitebenen", "alles"]
+
+
+def compare_timeframes(base: dict, data: dict, rules: dict, base_tf: str = "15m",
+                       funding: dict | None = None, macro: pd.DataFrame | None = None) -> pd.DataFrame:
+    all_ts = sorted(set().union(*[set(df["ts"]) for df in data.values()]))
+    split = all_ts[int(len(all_ts) * 2 / 3)]
+    rows, t0 = [], time.time()
+    total, done = len(ZEIT_SETS) * len(ZEIT_FILTERS) * len(ZEIT_MODES), 0
+    for sset in ZEIT_SETS:
+        base_s = copy.deepcopy(base)
+        base_s["strategy"]["strategies"] = STRATEGY_SETS[sset]
+        base_s["tf_select"], base_s["timeframes"] = "all", ZEIT_TFS
+        # Signale je Zeiteinheit nur einmal berechnen
+        preps = {tf: prepare(tf_cfg(base_s, tf), data, base_tf, funding, macro) for tf in ZEIT_TFS}
+        for filt in ZEIT_FILTERS:
+            for name, (tfs, mode, window, min_pf) in ZEIT_MODES.items():
+                cfg = copy.deepcopy(base_s)
+                cfg["strategy"].update(FILTERS[filt], tf_window=window, tf_min_pf=min_pf)
+                cfg["tf_select"], cfg["timeframes"] = mode, tfs
+                if mode == "fixed":
+                    cfg["timeframe"] = tfs[0]
+                prep = streams({tf: preps[tf] for tf in tfs})
+                train = simulate(cfg, prep, rules, end_ts=split)
+                test = simulate(cfg, prep, rules, start_ts=split)
+                per = test.get("per_tf")
+                rows.append({
+                    "modus": name, "strategien": sset, "filter": filt,
+                    "train_trades": train["trades"], "train_pf": round(train.get("profit_factor", 0), 2),
+                    "train_rendite_%": round(train.get("return_pct", 0), 1),
+                    "test_trades": test["trades"], "test_pf": round(test.get("profit_factor", 0), 2),
+                    "test_rendite_%": round(test.get("return_pct", 0), 1),
+                    "test_max_rueckgang_%": round(test.get("max_drawdown_pct", 0), 1),
+                    "test_trades_pro_tag": round(test.get("trades_per_day", 0), 2),
+                    "test_je_zeiteinheit": "; ".join(f"{k}: {int(r.trades)} Tr. PF {r.profit_faktor}"
+                                                     for k, r in per.iterrows()) if per is not None else "",
+                })
+                done += 1
+                print(f"\r  Variante {done}/{total}  ({time.time() - t0:.0f} s)", end="", flush=True)
+    print()
+    return pd.DataFrame(rows)
+
+
+def compare_cli(base: dict, days: int) -> None:
+    base_tf = "15m"
+    print("Zeiteinheiten-Vergleich: feste Zeiteinheit gegen automatische Wahl (15m bis 4h).")
+    client = make_client()
+    symbols = resolve_symbols(client, base["symbols"])
+    data, rules = {}, {}
+    for sym in symbols:
+        print(f"Lade {days} Tage {sym} ({base_tf}) ...")
+        data[sym] = fetch_history(client, sym, base_tf, days)
+        m = client.market(sym)
+        rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
+    data = usable(data)
+    funding = load_funding(client, list(data), days)
+    macro = load_macro(days)
+    res = compare_timeframes(base, data, rules, base_tf, funding, macro)
+    DATA.mkdir(exist_ok=True)
+    out = DATA / "zeiteinheiten.csv"
+    res.to_csv(out, index=False, sep=";", decimal=",")
+    pd.set_option("display.width", 250)
+    pd.set_option("display.max_columns", 30)
+    show = [c for c in res.columns if c != "test_je_zeiteinheit"]
+    print("\n===== ERGEBNIS (sortiert nach TEST-Profit-Faktor) =====")
+    print(res.sort_values("test_pf", ascending=False)[show].to_string(index=False))
+    print("\nIm Schnitt je Modus (TEST):")
+    print(res.groupby("modus")[["test_trades", "test_trades_pro_tag", "test_pf", "test_rendite_%"]]
+          .median().round(2).sort_values("test_pf", ascending=False).to_string())
+    print("\nAuto-Modus - welche Zeiteinheit hat er im TEST gehandelt:")
+    for _, r in res[res.modus.str.startswith("auto")].iterrows():
+        print(f"  {r['modus']:<12} {r['strategien']:<15} {r['filter']:<18} -> {r['test_je_zeiteinheit']}")
+    print(f"\nAlle Ergebnisse: {out}  (mit Excel oeffnen)")

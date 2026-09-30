@@ -95,6 +95,16 @@ function line(price, color, title, dashed) {
 }
 
 const STRAT = { trend: "Trend-Ruecksetzer", range: "Rueckkehr zur Mitte", breakout: "Ausbruch" };
+function tfRows() {
+  const st = data.tf_stats || {};
+  if (data.tf_select === "fixed" || !Object.keys(st).length) return [];
+  const cell = t => {
+    const x = st[t];
+    const txt = `${t} ${x.pf == null ? "-" : "PF " + fmt(x.pf)} (${x.n})`;
+    return `<span class="${x.ok ? "up" : "down"}">${x.ok ? "&#10003;" : "&#10007;"} ${txt}</span>`;
+  };
+  return [[data.tf_select === "adaptive" ? "Zeiteinheiten (Auto-Wahl)" : "Zeiteinheiten", Object.keys(st).map(cell).join(" &middot; ")]];
+}
 function thinking(s) {
   const v = s.snapshot, p = s.position;
   const out = [`Marktlage: <b>${v.regime_text}</b> &rarr; passende Strategie: ${v.watching}.`];
@@ -103,7 +113,7 @@ function thinking(s) {
   }
   if (p) {
     const dir = p.side === "long" ? "steigt" : "faellt";
-    out.push(`<b>Position ${p.side.toUpperCase()}</b> (${STRAT[p.strategy] || "-"}) seit ${time(p.opened_ms)}. Der Bot erwartet, dass der Kurs ${dir} bis zum Ziel <b class="up">${px(p.tp)}</b>.`);
+    out.push(`<b>Position ${p.side.toUpperCase()}</b> (${STRAT[p.strategy] || "-"}${p.tf ? ", " + p.tf : ""}) seit ${time(p.opened_ms)}. Der Bot erwartet, dass der Kurs ${dir} bis zum Ziel <b class="up">${px(p.tp)}</b>.`);
     if (p.partial_done) out.push(`Haelfte bereits mit Gewinn verkauft, Rest laeuft mit Stop auf Einstand.`);
     out.push(`Schutz: Stop-Loss bei <b class="down">${px(p.sl)}</b>` + (p.sl !== p.sl_init ? ` (nachgezogen von ${px(p.sl_init)})` : "") + ".");
   } else if (v.regime === "range") {
@@ -198,6 +208,7 @@ function render() {
     ["Volatilitaet (ATR)", fmt(v.atr_pct, 3) + " %"], ["Bollinger-Breite", v.bb_width_pct == null ? "-" : fmt(v.bb_width_pct) + " %"],
     ["VWAP", px(v.vwap)],
     ["Makro-Ampel", v.macro == null ? "-" : `<span class="${v.macro > 0.25 ? "up" : v.macro < -0.25 ? "down" : ""}">${v.macro > 0.25 ? "Risiko an" : v.macro < -0.25 ? "Risiko aus" : "neutral"} (${v.macro > 0 ? "+" : ""}${fmt(v.macro)})</span>`],
+    ...tfRows(),
     ...flowRows(s.flow),
   ].map(([k, val]) => `<div class="row"><span>${k}</span><b>${val}</b></div>`).join("");
 

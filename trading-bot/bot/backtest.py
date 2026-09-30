@@ -21,6 +21,7 @@ from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_sto
 from .ml import SignalModel, features
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
 from .strategy import TF_MS, compute_signals, higher_tfs, levels_from, resample, trail_stop
+from .tfselect import ShadowBook, active_tfs, adaptive, shadow_results, tf_cfg
 
 DATA = ROOT / "data"
 
@@ -100,6 +101,22 @@ def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str,
     return out
 
 
+def streams(preps: dict[str, dict]) -> dict:
+    """Vorbereitete Daten je Zeiteinheit -> ein Datenstrom je Markt und Zeiteinheit ("SYM|tf")."""
+    out = {}
+    for tf, prep in preps.items():
+        for sym, d in prep.items():
+            out[f"{sym}|{tf}"] = {**d, "sym": sym, "tf": tf}
+    return out
+
+
+def prepare_multi(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str,
+                  funding: dict | None = None, macro: pd.DataFrame | None = None) -> dict:
+    """Wie prepare(), aber fuer alle beobachteten Zeiteinheiten (tf_select: adaptive/all)."""
+    tfs = [t for t in active_tfs(cfg) if TF_MS[t] >= TF_MS[base_tf]]
+    return streams({tf: prepare(tf_cfg(cfg, tf), data, base_tf, funding, macro) for tf in tfs})
+
+
 def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
              start_ts: int | None = None, end_ts: int | None = None,
              seed_examples: list[dict] | None = None) -> dict:
@@ -124,11 +141,22 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     model, examples, trained_at = SignalModel(), list(seed_examples or []), 0
     strat_pnls: dict[str, list[float]] = {}
     health_skips: dict[str, int] = {}
-    skipped = {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "health": 0, "ml": 0}
+    skipped = {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "zeiteinheit": 0, "health": 0, "ml": 0}
 
-    index = {sym: {t: i for i, t in enumerate(p["ts"])} for sym, p in prep.items()}
-    timeline = sorted(t for t in set().union(*[set(p["ts"]) for p in prep.values()])
-                      if (start_ts is None or t >= start_ts) and (end_ts is None or t < end_ts))
+    # Jeder Datenstrom (Markt oder Markt|Zeiteinheit) wird zum Bar-SCHLUSS verarbeitet
+    meta = {k: (d.get("sym", k), d.get("tf", cfg["timeframe"])) for k, d in prep.items()}
+    index = {k: {t + TF_MS[meta[k][1]]: i for i, t in enumerate(p["ts"])
+                 if (start_ts is None or t >= start_ts) and (end_ts is None or t < end_ts)}
+             for k, p in prep.items()}
+    timeline = sorted(set().union(*[set(ix) for ix in index.values()]))
+    gate_tf = adaptive(cfg) and len({tf for _, tf in meta.values()}) > 1
+    book = None
+    if gate_tf:
+        per_tf: dict[str, list] = {}
+        for k, d in prep.items():
+            per_tf.setdefault(meta[k][1], []).extend(
+                shadow_results(d, meta[k][1], s, taker, d.get("leader_regime")))
+        book = ShadowBook(per_tf)
 
     start_equity = float(cfg["paper"]["start_equity"])
     equity = start_equity
@@ -156,23 +184,26 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
         guard.on_close(pnl, datetime.fromtimestamp(ts / 1000, timezone.utc))
         trades.append({"symbol": sym, "side": p["side"], "entry": p["entry0"], "exit": fill,
                        "pnl": pnl, "why": why, "opened": p["ts"], "closed": ts,
-                       "partial": p["partial_done"], "adds": p["adds"], "strategy": p["strategy"]})
+                       "partial": p["partial_done"], "adds": p["adds"], "strategy": p["strategy"],
+                       "tf": p["tf"]})
         strat_pnls.setdefault(p["strategy"], []).append(pnl)
         examples.append({"x": p["x"], "win": int(pnl > 0)})
 
-    for ts in timeline:
-        now = datetime.fromtimestamp(ts / 1000, timezone.utc)
+    for t_close in timeline:
+        now = datetime.fromtimestamp(t_close / 1000, timezone.utc)
         guard.update_day(equity, now)
-        for sym, d in prep.items():
-            i = index[sym].get(ts)
+        for key, d in prep.items():
+            i = index[key].get(t_close)
             if i is None:
                 continue
+            sym, tf = meta[key]
+            ts = d["ts"][i]
             o, h, lo, c, a, sig = d["open"][i], d["high"][i], d["low"][i], d["close"][i], d["atr"][i], d["signal"][i]
             step, min_amt = rules.get(sym, (0, 0))
 
             # 1) ausstehenden Einstieg ausfuehren
-            if sym in pending:
-                side, sig_atr, ref, sl_dist, tp_dist, strat, x = pending.pop(sym)
+            if sym in pending and pending[sym][0] == key:
+                _, side, sig_atr, ref, sl_dist, tp_dist, strat, x = pending.pop(sym)
                 if limit_entry:
                     filled = lo <= ref if side == "long" else h >= ref
                     entry = min(ref, o) if side == "long" else max(ref, o)
@@ -192,11 +223,11 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                                         "amount0": amt, "fees": entry * amt * entry_fee, "realized": 0.0,
                                         "sl_init": sl, "sl": sl, "tp": tp, "r0": abs(entry - sl), "ts": ts,
                                         "partial_done": False, "adds": 0, "strategy": strat, "x": x,
-                                        "bars": 0}
+                                        "bars": 0, "key": key, "tf": tf}
                             guard.on_open()
 
             # 2) Stop / Teilverkauf / Ziel im Bar (Reihenfolge vorsichtig: Stop zuerst)
-            if sym in pos:
+            if sym in pos and pos[sym]["key"] == key:
                 p = pos[sym]
                 sign = 1 if p["side"] == "long" else -1
                 hit_sl = lo <= p["sl"] if sign == 1 else h >= p["sl"]
@@ -222,7 +253,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                         close(sym, max(p["tp"], o) if sign == 1 else min(p["tp"], o), ts, "ziel")
 
             # 3) zum Bar-Schluss: Zeit-Stop, aufstocken (nur im Gewinn), Stop nachziehen
-            if sym in pos:
+            if sym in pos and pos[sym]["key"] == key:
                 p = pos[sym]
                 sign = 1 if p["side"] == "long" else -1
                 progress = sign * (c - p["entry0"]) / p["r0"]
@@ -246,7 +277,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 if new_sl is not None:
                     raise_stop(p, new_sl)
             # 4) neues Signal -> Filter -> Einstieg im naechsten Bar
-            elif sig != 0:
+            elif sig != 0 and sym not in pos and sym not in pending:
                 side = "long" if sig == 1 else "short"
                 strat = d["strategy"][i]
                 if use_leader and "leader_regime" in d and leader_blocks(side, d["leader_regime"][i]):
@@ -261,6 +292,9 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 if "macro_score" in d and macro_blocks(side, d["macro_score"][i], s):
                     skipped["macro"] += 1
                     continue
+                if book is not None and not book.stats(tf, t_close, s)["ok"]:
+                    skipped["zeiteinheit"] += 1
+                    continue
                 if not health_gate(strat, strat_pnls.get(strat, []), s, health_skips):
                     skipped["health"] += 1
                     continue
@@ -273,12 +307,13 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                     if prob is not None and prob < ml_thr:
                         skipped["ml"] += 1
                         continue
-                pending[sym] = (side, a, c, d["sl_dist"][i], d["tp_dist"][i], strat, x)
+                pending[sym] = (key, side, a, c, d["sl_dist"][i], d["tp_dist"][i], strat, x)
         curve.append(equity)
 
     for sym in list(pos):  # offene Positionen am Ende zum letzten Kurs schliessen
-        i = index[sym][max(t for t in prep[sym]["ts"] if t <= timeline[-1])]
-        close(sym, prep[sym]["close"][i], timeline[-1], "ende")
+        key = pos[sym]["key"]
+        i = index[key][max(t for t in index[key] if t <= timeline[-1])]
+        close(sym, prep[key]["close"][i], timeline[-1], "ende")
     curve.append(equity)
 
     res = summarize(trades, curve, start_equity)
@@ -325,6 +360,7 @@ def summarize(trades: list, curve: list, start: float) -> dict:
         "max_drawdown_pct": 100 * mdd,
         "per_symbol": t.groupby("symbol").pnl.agg(["count", "sum"]).round(2),
         "per_strategy": _per_group(t, "strategy") if "strategy" in t else None,
+        "per_tf": _per_group(t, "tf") if "tf" in t else None,
         "table": t,
     }
 
@@ -332,16 +368,18 @@ def summarize(trades: list, curve: list, start: float) -> dict:
 def backtest_cli(cfg: dict, days: int) -> None:
     client = make_client()
     symbols = resolve_symbols(client, cfg["symbols"])
+    base_tf = min(active_tfs(cfg), key=lambda t: TF_MS[t])
     data, rules = {}, {}
     for sym in symbols:
-        print(f"Lade {days} Tage {sym} ...")
-        data[sym] = fetch_history(client, sym, cfg["timeframe"], days)
+        print(f"Lade {days} Tage {sym} ({base_tf}) ...")
+        data[sym] = fetch_history(client, sym, base_tf, days)
         m = client.market(sym)
         rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
     data = usable(data)
     funding = load_funding(client, list(data), days)
     macro = load_macro(days)
-    res = simulate(cfg, prepare(cfg, data, cfg["timeframe"], funding, macro), rules)
+    prep = prepare_multi(cfg, data, base_tf, funding, macro)
+    res = simulate(cfg, prep, rules)
     print_report(res, days)
     save_ml_examples(res.get("examples", []))
 
@@ -394,10 +432,14 @@ def print_report(res: dict, days: int) -> None:
         if res.get("per_strategy") is not None:
             print("\nJe Strategie:")
             print(res["per_strategy"].to_string())
+        if res.get("per_tf") is not None and len(res["per_tf"]) > 1:
+            print("\nJe Zeiteinheit:")
+            print(res["per_tf"].to_string())
         sk = res.get("skipped") or {}
         if any(sk.values()):
             print(f"\nAussortierte Signale: BTC-Filter {sk.get('leader', 0)}, Zeitebenen {sk.get('mtf', 0)}, "
                   f"Funding {sk.get('funding', 0)}, Makro {sk.get('macro', 0)}, "
+                  f"Zeiteinheit laeuft schlecht {sk.get('zeiteinheit', 0)}, "
                   f"Strategie pausiert {sk.get('health', 0)}, ML-Filter {sk.get('ml', 0)}")
     print("==============================")
     print("Hinweis: Vergangene Ergebnisse garantieren keine zukuenftigen Gewinne.")

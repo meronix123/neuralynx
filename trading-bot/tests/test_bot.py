@@ -21,6 +21,7 @@ CFG["strategy"].update(trend_ema_fast=50, trend_ema_slow=200, min_score=4, parti
                        mtf_filter=False, macro_filter=False)
 CFG["dashboard"]["enabled"] = False  # keine echten Makro-Abrufe im Test
 CFG["fees"]["entry_order"] = "market"
+CFG["tf_select"] = "fixed"  # Auto-Zeiteinheit hat eigene Tests
 
 
 def synthetic(n=6000, seed=1, drift=0.00004, start=100.0):
@@ -516,7 +517,8 @@ def test_filters_and_ml_run_in_simulation():
     filt = simulate(cfg, prep, rules)
     sk = filt["skipped"]
     assert sk["leader"] > 0 and sk["leader"] + sk["health"] + sk["ml"] > 0
-    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "health": 0, "ml": 0}
+    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "zeiteinheit": 0,
+                               "health": 0, "ml": 0}
     assert filt["end"] == pytest.approx(filt["start"] + filt["table"].pnl.sum())
     assert (filt["table"].why == "zeit").any()
 
@@ -759,3 +761,102 @@ def test_macro_traffic_light():
     assert res["skipped"]["macro"] > 0
     if res["trades"]:
         assert (res["table"].side == "short").all()
+
+
+def test_shadow_trades_and_timeframe_gate():
+    from bot.tfselect import ShadowBook, profit_factor, shadow_results, tf_allowed
+
+    s = {"max_hold_bars": 3, "tf_window": 4, "tf_min_pf": 1.0, "tf_warmup": 3}
+    # Long bei 100, Stop 99, Ziel 102 -> Bar 2 erreicht das Ziel; Short bei 100 -> Bar 5 trifft den Stop
+    d = {"ts": [0, 300_000, 600_000, 900_000, 1_200_000, 1_500_000],
+         "high": [100, 100.5, 102.5, 100, 100.2, 101.5], "low": [100, 99.5, 101, 99.8, 99.5, 100],
+         "close": [100, 100, 102, 100, 100, 101], "signal": [1, 0, 0, -1, 0, 0],
+         "sl_dist": [1, 1, 1, 1, 1, 1], "tp_dist": [2, 2, 2, 2, 2, 2]}
+    res = shadow_results(d, "5m", s, fee=0.0)
+    assert res == [(900_000, 2.0), (1_800_000, -1.0)]  # bekannt erst zum Bar-Schluss
+    fee_res = shadow_results(d, "5m", s, fee=0.0006)
+    assert fee_res[0][1] == pytest.approx(2.0 - 2 * 0.0006 * 100)
+    # Zeitebenen-Filter gilt auch fuer Schatten-Trades
+    blocked = shadow_results({**d, "mtf_score": [-1.0] * 6}, "5m", {**s, "mtf_filter": True}, 0.0)
+    assert blocked == [(1_800_000, -1.0)]
+    # Anlaufphase erlaubt alles, danach entscheidet der Profit-Faktor der letzten Trades
+    assert tf_allowed([-1, -1], s)
+    assert not tf_allowed([2, -1, -1, -1, -1], s)
+    assert tf_allowed([-1, -1, 2, 2, -1], s)
+    assert profit_factor([2, -1]) == 2.0
+    book = ShadowBook({"5m": res})
+    assert book.known("5m", 899_999) == [] and book.known("5m", 900_000) == [2.0]
+
+
+def test_multi_timeframe_backtest_one_position_per_market():
+    from bot.backtest import prepare_multi, simulate
+
+    data = {"AAA/USDT:USDT": synthetic(6000, 1), "BBB/USDT:USDT": synthetic(6000, 2, start=50)}
+    rules = {k: (0.0001, 0.0001) for k in data}
+    out = {}
+    for mode in ("all", "adaptive"):
+        cfg = copy.deepcopy(CFG)
+        cfg["tf_select"], cfg["timeframes"] = mode, ["5m", "15m", "30m"]
+        prep = prepare_multi(cfg, data, "5m")
+        assert set(prep) == {f"{s}|{t}" for s in data for t in ("5m", "15m", "30m")}
+        res = simulate(cfg, prep, rules)
+        t = res["table"]
+        assert res["trades"] > 0 and set(t.tf) <= {"5m", "15m", "30m"}
+        assert res["end"] == pytest.approx(res["start"] + t.pnl.sum())
+        for sym, g in t.groupby("symbol"):  # nie zwei Positionen im selben Markt
+            g = g.sort_values("opened")
+            assert (g.opened.to_numpy()[1:] >= g.closed.to_numpy()[:-1]).all()
+        out[mode] = res
+    assert out["all"]["skipped"]["zeiteinheit"] == 0
+    assert out["adaptive"]["skipped"]["zeiteinheit"] > 0
+    assert out["all"]["per_tf"] is not None
+
+
+def test_paper_bot_chooses_timeframe(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["tf_select"], cfg["timeframes"] = "adaptive", ["5m", "15m"]
+    client = FakeClient(synthetic(1800, 3))
+    ex = PaperExchange(cfg, client)
+    bot = engine.Bot(cfg, ex, FakeContext())
+    assert bot.tfs == ["15m", "5m"]
+    tfs_used = set()
+    for i in range(400, 1800):
+        client.i = i
+        bot.step()
+        assert set(bot.state["meta"]) == set(ex.positions())
+        tfs_used |= {m.get("tf") for m in bot.state["meta"].values()}
+    tfs_used |= {h.get("tf") for h in bot.state["history"]}
+    assert tfs_used - {None} <= {"5m", "15m"} and tfs_used - {None}
+    assert set(bot.status["tf_stats"]) == {"5m", "15m"}
+    assert all(t.get("tf") in ("5m", "15m") for t in bot.state["history"])
+    assert any(k.endswith("|5m") or k.endswith("|15m") for k in bot.state["last_sig"])
+
+
+def test_timeframe_comparison_runs():
+    from bot import optimize
+
+    saved = (optimize.ZEIT_TFS, optimize.ZEIT_MODES, optimize.ZEIT_SETS, optimize.ZEIT_FILTERS)
+    try:
+        optimize.ZEIT_TFS = ["5m", "15m"]
+        optimize.ZEIT_MODES = {"fest_15m": (["15m"], "fixed", 20, 1.0),
+                               "auto": (["5m", "15m"], "adaptive", 20, 1.0)}
+        optimize.ZEIT_SETS, optimize.ZEIT_FILTERS = ["nur_trend"], ["filter+zeitebenen"]
+        data = {"AAA/USDT:USDT": synthetic(6000, 1)}
+        res = optimize.compare_timeframes(CFG, data, {"AAA/USDT:USDT": (0.0001, 0.0001)}, base_tf="5m")
+        assert list(res.modus) == ["fest_15m", "auto"]
+        assert all(x.strip().startswith("15m") for x in res.iloc[0]["test_je_zeiteinheit"].split(";") if x)
+    finally:
+        optimize.ZEIT_TFS, optimize.ZEIT_MODES, optimize.ZEIT_SETS, optimize.ZEIT_FILTERS = saved
+
+
+def test_real_config_timeframes_are_supported():
+    from bot.tfselect import TREND_FOR, active_tfs
+
+    cfg = load_config()
+    for tf in active_tfs(cfg):
+        assert tf in TREND_FOR and tf in cfg["strategy"]["atr_limits"]
