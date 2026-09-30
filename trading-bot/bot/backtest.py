@@ -27,13 +27,18 @@ def fetch_history(client, symbol: str, tf: str, days: int) -> pd.DataFrame:
     DATA.mkdir(exist_ok=True)
     cache = DATA / f"{symbol.replace('/', '_').replace(':', '_')}_{tf}_{days}d.csv"
     if cache.exists() and time.time() - cache.stat().st_mtime < 6 * 3600:
-        return pd.read_csv(cache)
+        cached = pd.read_csv(cache)
+        if len(cached) > 1:  # leere Datei von einem frueheren Fehlversuch ignorieren
+            return cached
     since = client.milliseconds() - days * 86_400_000
     rows = []
-    while True:
+    step_ms = 200 * TF_MS[tf]
+    while since < client.milliseconds():
         batch = client.fetch_ohlcv(symbol, tf, since=since, limit=200)
         if not batch:
-            break
+            # Markt gab es zu diesem Zeitpunkt noch nicht -> ein Stueck weiter vorne probieren
+            since += step_ms
+            continue
         rows += batch
         since = batch[-1][0] + TF_MS[tf]
         done = min(100, 100 * (1 - (client.milliseconds() - since) / (days * 86_400_000)))
@@ -42,8 +47,28 @@ def fetch_history(client, symbol: str, tf: str, days: int) -> pd.DataFrame:
             break
     print()
     df = to_df(rows).drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
-    df.to_csv(cache, index=False)
+    if len(df):
+        df = df.astype({"ts": "int64", "open": float, "high": float, "low": float,
+                        "close": float, "volume": float})
+        df.to_csv(cache, index=False)
+        first = pd.to_datetime(df["ts"].iloc[0], unit="ms").date()
+        if (df["ts"].iloc[0] - (client.milliseconds() - days * 86_400_000)) > 7 * 86_400_000:
+            print(f"  Hinweis: {symbol} gibt es auf Bitget erst seit {first} - weniger Daten.")
     return df
+
+
+MIN_BARS = 500
+
+
+def usable(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """Maerkte mit zu wenig Kursdaten weglassen (statt abzustuerzen)."""
+    out = {}
+    for sym, df in data.items():
+        if len(df) >= MIN_BARS:
+            out[sym] = df
+        else:
+            print(f"  {sym}: nur {len(df)} Kerzen - wird im Test uebersprungen.")
+    return out
 
 
 def resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
@@ -299,6 +324,7 @@ def backtest_cli(cfg: dict, days: int) -> None:
         data[sym] = fetch_history(client, sym, cfg["timeframe"], days)
         m = client.market(sym)
         rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
+    data = usable(data)
     res = run_backtest(cfg, data, rules)
     print_report(res, days)
     save_ml_examples(res.get("examples", []))

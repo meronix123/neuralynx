@@ -523,3 +523,25 @@ def test_paused_strategy_gets_probe_trade():
     skips = {}
     decisions = [health_gate("range", bad, s, skips) for _ in range(8)]
     assert decisions == [False, False, False, True, False, False, False, True]
+
+
+def test_fetch_history_skips_time_before_listing(tmp_path, monkeypatch):
+    """Markt erst seit kurzem gelistet: leere Antworten ueberspringen statt abbrechen."""
+    from bot import backtest
+
+    monkeypatch.setattr(backtest, "DATA", tmp_path)
+    now = 1_760_000_000_000
+    listed = now - 20 * 86_400_000
+
+    class ListedLate:
+        def milliseconds(self):
+            return now
+
+        def fetch_ohlcv(self, sym, tf, since=None, limit=200):
+            start = max(since, listed)
+            rows = [[t, 1.0, 1.1, 0.9, 1.0, 5.0] for t in range(start, min(now, start + limit * 3_600_000), 3_600_000)]
+            return [] if since < listed - limit * 3_600_000 else rows
+
+    df = backtest.fetch_history(ListedLate(), "XAU/USDT:USDT", "1h", 365)
+    assert len(df) >= 19 * 24 and df["ts"].dtype == "int64"
+    assert backtest.usable({"XAU/USDT:USDT": df.head(100), "BTC/USDT:USDT": synthetic(600)}).keys() == {"BTC/USDT:USDT"}

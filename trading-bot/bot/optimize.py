@@ -10,7 +10,7 @@ import time
 
 import pandas as pd
 
-from .backtest import DATA, fetch_history, prepare, simulate
+from .backtest import DATA, fetch_history, prepare, simulate, usable
 from .exchange import make_client, resolve_symbols
 
 # Einstiegs-Zeiteinheit, Trend-Zeiteinheit, Trend-EMAs (schnell, langsam)
@@ -106,6 +106,7 @@ def optimize_cli(base: dict, days: int) -> None:
         m = client.market(sym)
         rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
 
+    data = usable(data)
     res = optimize(base, data, rules, base_tf="1h")
     DATA.mkdir(exist_ok=True)
     out = DATA / "optimierung.csv"
