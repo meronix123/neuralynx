@@ -82,9 +82,17 @@ strategy:
   partial_tp_frac: 0.5
   breakeven_at_r: 1000000000  # Trailing-Stop aus (sehr grosser Wert). 1.0 = ab +1R nachziehen
   trail_atr: 1.0           # Abstand des Trailing-Stops, falls aktiv
-  min_atr_pct: 0.3         # (4h) zu ruhiger Markt -> Gebuehren fressen den Gewinn -> kein Trade
-  max_atr_pct: 3.0         # (4h) zu wilder Markt -> kein Trade. Mehr geht bei 10x Hebel nicht:
-                           # der Stop (bis 1,5 x ATR) muss deutlich vor der Liquidation (~10 %) liegen
+  # Volatilitaet (ATR in % vom Kurs) je Einstiegs-Zeiteinheit: [Minimum, Maximum]
+  # zu ruhig -> Gebuehren fressen den Gewinn; zu wild -> Stop laege zu nah an der Liquidation (10x)
+  atr_limits:
+    5m: [0.08, 0.8]
+    15m: [0.12, 1.2]
+    30m: [0.18, 1.6]
+    1h: [0.2, 2.0]
+    2h: [0.25, 2.5]
+    4h: [0.3, 3.0]
+  min_atr_pct: 0.3         # Rueckfall, falls die Zeiteinheit oben nicht steht
+  max_atr_pct: 3.0
   volume_factor: 1.0       # Volumen muss >= Durchschnitt sein
   max_funding_rate: 0.0005 # extreme Funding-Rate -> nicht mit der Masse handeln
 
@@ -107,6 +115,7 @@ context:
   fng_extreme_high: 85     # ... ueber 85 -> Risiko pro Trade halbieren
 
 fees:
+  tp_order: limit      # Take-Profit als liegende Limit-Order (Maker 0,02 %) statt Markt-Order (0,06 %)
   entry_order: limit   # market = sofort (Taker) | limit = Limit-Order zum Signalkurs (Maker, guenstiger)
   maker: 0.0002    # Bitget Futures Maker-Gebuehr (Limit-Orders)
   taker: 0.0006    # Bitget Futures Taker-Gebuehr

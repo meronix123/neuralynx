@@ -180,6 +180,35 @@ class Bot:
                 self._register_open(sym, o["side"], positions[sym]["entry"], positions[sym]["amount"],
                                     o["sl"], o["tp"], o["score"], o.get("info"))
 
+    # --- Take-Profit als liegende Limit-Order (Maker-Gebuehr) ------------------------
+    @property
+    def limit_tp(self) -> bool:
+        return self.cfg["fees"].get("tp_order", "market") == "limit"
+
+    def _exchange_tp(self, m: dict):
+        """TP fuer die Boersen-Absicherung: None, wenn er als eigene Limit-Order liegt."""
+        return None if m.get("tp_order_id") else m["tp"]
+
+    def _place_tp(self, sym: str, side: str, amount: float, m: dict) -> None:
+        try:
+            m["tp_order_id"] = self.ex.place_tp_limit(sym, side, amount, m["tp"])
+        except Exception as e:  # noqa: BLE001 - z. B. Kurs schon ueber dem Ziel -> normaler TP
+            log.warning("%s TP-Limit-Order nicht moeglich (%s) - setze normalen Take-Profit", sym, e)
+            m["tp_order_id"] = None
+            try:
+                self.ex.set_stop(sym, side, m["sl"], m["tp"])
+            except Exception as e2:  # noqa: BLE001
+                log.warning("%s Take-Profit setzen fehlgeschlagen: %s", sym, e2)
+
+    def _cancel_tp(self, sym: str, m: dict) -> None:
+        oid = m.get("tp_order_id")
+        if oid:
+            try:
+                self.ex.cancel(sym, oid)
+            except Exception as e:  # noqa: BLE001 - schon ausgefuehrt/erledigt
+                log.debug("%s TP-Storno: %s", sym, e)
+            m["tp_order_id"] = None
+
     def _register_open(self, sym, side, entry, amount, sl, tp, score, info=None) -> None:
         info = info or {}
         self.guard.on_open()
@@ -188,6 +217,8 @@ class Bot:
             "r0": abs(entry - sl), "score": score, "partial_done": False,
             "opened_ms": int(time.time() * 1000), **info,
         }
+        if self.limit_tp:
+            self._place_tp(sym, side, amount, self.state["meta"][sym])
         strat = STRATEGY_NAMES.get(info.get("strategy", ""), info.get("strategy", ""))
         self.notify.send(
             f"NEU {sym} {side.upper()} {amount:g} @ {entry:.6g} | SL {sl:.6g} | TP {tp:.6g} "
@@ -237,6 +268,7 @@ class Bot:
             if sym in positions:
                 continue
             m = self.state["meta"].pop(sym)
+            self._cancel_tp(sym, m)
             price = self.ex.last_price(sym)
             pnl = self.ex.closed_pnl(sym, m["opened_ms"])
             if pnl is None:  # Schaetzung ueber letzten Kurs
@@ -270,7 +302,7 @@ class Bot:
             if new_sl is None:
                 continue
             try:
-                self.ex.set_stop(sym, p["side"], new_sl, m["tp"])
+                self.ex.set_stop(sym, p["side"], new_sl, self._exchange_tp(m))
                 log.info("%s Stop nachgezogen: %.6g -> %.6g", sym, m["sl"], new_sl)
                 m["sl"] = new_sl
             except Exception as e:  # noqa: BLE001
@@ -284,6 +316,7 @@ class Bot:
         progress = sign * (price - m["entry"]) / r0 if r0 > 0 else 0.0
         if not time_stop_due(bars, progress, m.get("partial_done", False), self.s):
             return False
+        self._cancel_tp(sym, m)
         self.ex.close(sym, p["side"], p["amount"])
         self.notify.send(f"ZEIT-STOP {sym}: nach {bars} Bars ohne Fortschritt geschlossen ({progress:+.2f}R)")
         return True
@@ -304,9 +337,12 @@ class Bot:
             log.info("%s Teilverkauf uebersprungen (Menge zu klein)", sym)
             return False
         self.ex.close(sym, p["side"], qty)
+        if m.get("tp_order_id"):  # liegende TP-Order auf die Restmenge anpassen
+            self._cancel_tp(sym, m)
+            self._place_tp(sym, p["side"], p["amount"] - qty, m)
         be = m["entry"] * (1 + sign * 2 * self.fee)
         try:
-            self.ex.set_stop(sym, p["side"], be, m["tp"])
+            self.ex.set_stop(sym, p["side"], be, self._exchange_tp(m))
             m["sl"] = be
         except Exception as e:  # noqa: BLE001
             log.warning("%s Stop auf Einstand fehlgeschlagen: %s", sym, e)
@@ -378,7 +414,8 @@ class Bot:
             return "Konto zu klein fuer Mindestmenge"
 
         if self.cfg["fees"].get("entry_order", "market") == "limit":
-            order_id = self.ex.place_limit(sym, sig.side, amount, sig.price, sig.sl, sig.tp)
+            order_id = self.ex.place_limit(sym, sig.side, amount, sig.price, sig.sl,
+                                           None if self.limit_tp else sig.tp)
             self.state["pending"][sym] = {
                 "order_id": order_id, "side": sig.side, "price": sig.price, "amount": amount,
                 "sl": sig.sl, "tp": sig.tp, "score": sig.score, "info": info,
@@ -388,7 +425,7 @@ class Bot:
             positions_pending = f"Limit-Order {sig.side} @ {sig.price:.6g}"
             log.info("%s %s", sym, positions_pending)
             return positions_pending
-        entry = self.ex.open(sym, sig.side, amount, sig.sl, sig.tp)
+        entry = self.ex.open(sym, sig.side, amount, sig.sl, None if self.limit_tp else sig.tp)
         positions[sym] = {"side": sig.side, "amount": amount, "entry": entry}
         self._register_open(sym, sig.side, entry, amount, sig.sl, sig.tp, sig.score, info)
         return "Position eroeffnet"

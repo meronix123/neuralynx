@@ -1,6 +1,7 @@
 """Start:
     python run.py backtest --days 60   # Strategie an alten Daten pruefen
     python run.py optimize --days 365  # viele Einstellungen testen (dauert)
+    python run.py optimize --fast      # Schnell-Modus: 5m/15m/30m-Einstiege (120 Tage)
     python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
@@ -65,6 +66,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["backtest", "optimize", "report", "check", "bot"])
     ap.add_argument("--days", type=int, default=None)
+    ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
     args = ap.parse_args()
     cfg = load_config()
     setup_logging()
@@ -75,7 +77,7 @@ def main() -> None:
         return
     if args.command == "optimize":
         from bot.optimize import optimize_cli
-        optimize_cli(cfg, args.days or 365)
+        optimize_cli(cfg, args.days or (120 if args.fast else 365), fast=args.fast)
         return
 
     if args.command == "report":

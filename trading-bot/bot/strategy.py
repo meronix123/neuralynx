@@ -37,7 +37,7 @@ TF_MS = {
     "1w": 604_800_000,
 }
 # Alle Zeitebenen, die der Bot scannt (klein -> gross)
-MTF_ORDER = ["1m", "5m", "15m", "1h", "2h", "4h", "1d", "1w"]
+MTF_ORDER = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"]
 
 
 def resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
@@ -164,7 +164,9 @@ def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
     prev = d.shift()
 
     # ---------------- Marktlage ----------------
-    chaos = (d["atr_pct"] > s["max_atr_pct"]) | (atr_rank > s.get("chaos_atr_rank", 0.97))
+    # Volatilitaets-Grenzen je Zeiteinheit (ein 5m-Bar schwankt viel weniger als ein 4h-Bar)
+    min_atr, max_atr = (s.get("atr_limits") or {}).get(tf, (s["min_atr_pct"], s["max_atr_pct"]))
+    chaos = (d["atr_pct"] > max_atr) | (atr_rank > s.get("chaos_atr_rank", 0.97))
     squeeze = width_rank <= s.get("squeeze_pct", 0.2)
     trending = d["adx"] >= s.get("adx_trend", 22)
     ranging = d["adx"] < s.get("adx_range", 18)
@@ -173,7 +175,7 @@ def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
         ["chaos", "squeeze", "trend_up", "trend_down", "range"],
         default="unclear",
     )
-    tradable = ~chaos & (d["atr_pct"] >= s["min_atr_pct"])
+    tradable = ~chaos & (d["atr_pct"] >= min_atr)
     vol_ok = d["volume"] >= s["volume_factor"] * d["vol_ma"]
     enabled = set(s.get("strategies", ["trend", "range", "breakout"]))
 

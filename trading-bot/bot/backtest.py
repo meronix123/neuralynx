@@ -109,6 +109,8 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     taker, slip, lev = f["taker"], f["slippage"], cfg["leverage"]
     limit_entry = f.get("entry_order", "market") == "limit"
     entry_fee = f.get("maker", taker) if limit_entry else taker
+    maker_fee = f.get("maker", taker)
+    limit_tp = f.get("tp_order", "market") == "limit"
     part_r, part_frac = s.get("partial_tp_r", 0), s.get("partial_tp_frac", 0.5)
     pyr_r, pyr_max, pyr_frac = s.get("pyramid_at_r", 0), s.get("pyramid_max_adds", 0), s.get("pyramid_size_frac", 0.5)
     use_leader = s.get("leader_filter", False)
@@ -137,12 +139,14 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     def raise_stop(p, level):
         p["sl"] = max(p["sl"], level) if p["side"] == "long" else min(p["sl"], level)
 
-    def close(sym, price, ts, why):
+    def close(sym, price, ts, why, maker=False):
+        """maker=True: Ausstieg ueber eine liegende Limit-Order (kein Slippage, Maker-Gebuehr)."""
         nonlocal equity
         p = pos.pop(sym)
         sign = 1 if p["side"] == "long" else -1
-        fill = price * (1 - sign * slip)
-        pnl = p["realized"] + sign * (fill - p["entry"]) * p["amount"] - fill * p["amount"] * taker - p["fees"]
+        fill = price if maker else price * (1 - sign * slip)
+        fee_out = maker_fee if maker else taker
+        pnl = p["realized"] + sign * (fill - p["entry"]) * p["amount"] - fill * p["amount"] * fee_out - p["fees"]
         equity += pnl
         guard.on_close(pnl, datetime.fromtimestamp(ts / 1000, timezone.utc))
         trades.append({"symbol": sym, "side": p["side"], "entry": p["entry0"], "exit": fill,
@@ -199,13 +203,17 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                         if (h >= lvl) if sign == 1 else (lo <= lvl):
                             qty = round_amount(p["amount"] * part_frac, step, min_amt)
                             if 0 < qty < p["amount"]:
-                                fill = lvl * (1 - sign * slip)
-                                p["realized"] += sign * (fill - p["entry"]) * qty - fill * qty * taker
+                                fill = lvl if limit_tp else lvl * (1 - sign * slip)
+                                p["realized"] += sign * (fill - p["entry"]) * qty - fill * qty * (
+                                    maker_fee if limit_tp else taker)
                                 p["amount"] -= qty
                                 p["partial_done"] = True
                                 raise_stop(p, be(p))
-                    hit_tp = h >= p["tp"] if sign == 1 else lo <= p["tp"]
-                    if hit_tp:
+                    if limit_tp:
+                        # liegende Limit-Order: nur ausgefuehrt, wenn der Kurs sie wirklich durchlaeuft
+                        if (h > p["tp"]) if sign == 1 else (lo < p["tp"]):
+                            close(sym, p["tp"], ts, "ziel", maker=True)
+                    elif (h >= p["tp"]) if sign == 1 else (lo <= p["tp"]):
                         close(sym, max(p["tp"], o) if sign == 1 else min(p["tp"], o), ts, "ziel")
 
             # 3) zum Bar-Schluss: Zeit-Stop, aufstocken (nur im Gewinn), Stop nachziehen

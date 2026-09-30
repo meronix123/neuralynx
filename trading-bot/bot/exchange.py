@@ -103,19 +103,17 @@ class BitgetExchange:
                 log.debug("%s %s: %s", symbol, desc, e)
 
     # --- Handel ------------------------------------------------------
-    def open(self, symbol: str, side: str, amount: float, sl: float, tp: float) -> float:
-        """Market-Order mit Stop-Loss und Take-Profit direkt auf der Boerse."""
+    def _protect(self, sl: float, tp: float | None) -> dict:
+        """Stop-Loss immer; Take-Profit nur, wenn er nicht als eigene Limit-Order liegt (tp=None)."""
+        p = {"marginMode": self.cfg["margin_mode"], "stopLoss": {"triggerPrice": sl}}
+        if tp is not None:
+            p["takeProfit"] = {"triggerPrice": tp}
+        return p
+
+    def open(self, symbol: str, side: str, amount: float, sl: float, tp: float | None) -> float:
+        """Market-Order mit Stop-Loss (und ggf. Take-Profit) direkt auf der Boerse."""
         order = self.c.create_order(
-            symbol,
-            "market",
-            "buy" if side == "long" else "sell",
-            amount,
-            None,
-            {
-                "marginMode": self.cfg["margin_mode"],
-                "stopLoss": {"triggerPrice": sl},
-                "takeProfit": {"triggerPrice": tp},
-            },
+            symbol, "market", "buy" if side == "long" else "sell", amount, None, self._protect(sl, tp),
         )
         time.sleep(1)
         pos = self.positions().get(symbol)
@@ -123,16 +121,20 @@ class BitgetExchange:
             return pos["entry"]
         return float(order.get("average") or order.get("price") or self.last_price(symbol))
 
-    def place_limit(self, symbol: str, side: str, amount: float, price: float, sl: float, tp: float) -> str:
-        """Post-Only-Limit-Order (Maker-Gebuehr) mit Stop-Loss/Take-Profit."""
+    def place_limit(self, symbol: str, side: str, amount: float, price: float, sl: float,
+                    tp: float | None) -> str:
+        """Post-Only-Limit-Order (Maker-Gebuehr) mit Stop-Loss (und ggf. Take-Profit)."""
         order = self.c.create_order(
             symbol, "limit", "buy" if side == "long" else "sell", amount, price,
-            {
-                "marginMode": self.cfg["margin_mode"],
-                "postOnly": True,
-                "stopLoss": {"triggerPrice": sl},
-                "takeProfit": {"triggerPrice": tp},
-            },
+            {**self._protect(sl, tp), "postOnly": True},
+        )
+        return str(order["id"])
+
+    def place_tp_limit(self, symbol: str, side: str, amount: float, price: float) -> str:
+        """Take-Profit als liegende Limit-Order (nur reduzierend, Maker-Gebuehr)."""
+        order = self.c.create_order(
+            symbol, "limit", "sell" if side == "long" else "buy", amount, price,
+            {"reduceOnly": True, "postOnly": True, "marginMode": self.cfg["margin_mode"]},
         )
         return str(order["id"])
 
@@ -150,7 +152,7 @@ class BitgetExchange:
                 }
         return out
 
-    def set_stop(self, symbol: str, side: str, sl: float, tp: float) -> None:
+    def set_stop(self, symbol: str, side: str, sl: float, tp: float | None) -> None:
         """Stop-Loss/Take-Profit der ganzen Position neu setzen (Bitget place-pos-tpsl)."""
         market = self.c.market(symbol)
         product_type, _ = self.c.handle_product_type_and_params(market, {})
@@ -160,9 +162,10 @@ class BitgetExchange:
             "marginCoin": "USDT",
             "stopLossTriggerPrice": self.c.price_to_precision(symbol, sl),
             "stopLossTriggerType": "mark_price",
-            "stopSurplusTriggerPrice": self.c.price_to_precision(symbol, tp),
-            "stopSurplusTriggerType": "fill_price",
         }
+        if tp is not None:
+            base.update(stopSurplusTriggerPrice=self.c.price_to_precision(symbol, tp),
+                        stopSurplusTriggerType="fill_price")
         # One-Way-Modus erwartet je nach Konto "buy"/"sell" oder "long"/"short"
         hold = ["buy", "long"] if side == "long" else ["sell", "short"]
         last_err = None
@@ -253,6 +256,11 @@ class PaperExchange:
         self.orders = d.get("orders", {})
         self.closed = d.get("closed", {})
 
+    def place_tp_limit(self, symbol, side, amount, price):
+        if symbol in self.pos:
+            self.pos[symbol].update(tp=price, tp_maker=True)
+        return f"paper-tp-{symbol}-{price}"
+
     def place_limit(self, symbol, side, amount, price, sl, tp):
         oid = f"paper-{symbol}-{len(self.closed)}-{price}"
         self.orders[symbol] = {"id": oid, "side": side, "amount": amount, "price": price, "sl": sl, "tp": tp}
@@ -261,6 +269,8 @@ class PaperExchange:
     def cancel(self, symbol, order_id):
         if self.orders.get(symbol, {}).get("id") == order_id:
             del self.orders[symbol]
+        elif str(order_id).startswith("paper-tp-") and symbol in self.pos:
+            self.pos[symbol].update(tp=None, tp_maker=False)
 
     def _check_orders(self):
         for sym in list(self.orders):
@@ -280,7 +290,9 @@ class PaperExchange:
 
     def set_stop(self, symbol, side, sl, tp):
         if symbol in self.pos:
-            self.pos[symbol].update(sl=sl, tp=tp)
+            self.pos[symbol]["sl"] = sl
+            if tp is not None:
+                self.pos[symbol]["tp"] = tp
 
     def close(self, symbol, side, amount):
         p = self.pos.get(symbol)
@@ -302,15 +314,16 @@ class PaperExchange:
             p = self.pos[sym]
             price = self.last_price(sym)
             hit_sl = price <= p["sl"] if p["side"] == "long" else price >= p["sl"]
-            hit_tp = price >= p["tp"] if p["side"] == "long" else price <= p["tp"]
+            tp = p.get("tp")
+            hit_tp = tp is not None and (price >= tp if p["side"] == "long" else price <= tp)
             if hit_sl or hit_tp:
-                self._exit(sym, p["sl"] if hit_sl else p["tp"])
+                self._exit(sym, p["sl"] if hit_sl else tp, maker=hit_tp and not hit_sl and p.get("tp_maker", False))
 
-    def _exit(self, sym, price):
+    def _exit(self, sym, price, maker=False):
         p = self.pos.pop(sym)
         sign = 1 if p["side"] == "long" else -1
-        fill = price * (1 - sign * self.slip)
-        pnl = sign * (fill - p["entry"]) * p["amount"] - fill * p["amount"] * self.fee
+        fill = price if maker else price * (1 - sign * self.slip)
+        pnl = sign * (fill - p["entry"]) * p["amount"] - fill * p["amount"] * (self.maker if maker else self.fee)
         self.cash += pnl
         # Einstiegsgebuehr (schon beim Oeffnen abgezogen) und Teilgewinne mit einrechnen
         self.closed[sym] = pnl + p["realized"] - p["fee_in"]

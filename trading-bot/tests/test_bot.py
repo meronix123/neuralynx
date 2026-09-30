@@ -578,3 +578,71 @@ def test_multi_timeframe_scan_and_filter():
     cfg["strategy"]["mtf_filter"] = True
     gated = simulate(cfg, prep, {"AAA/USDT:USDT": (0.0001, 0.0001)})
     assert gated["skipped"]["mtf"] > 0 and free["skipped"]["mtf"] == 0
+
+
+def test_limit_take_profit_is_cheaper_and_needs_trade_through():
+    from bot.backtest import simulate
+
+    def run(tp_order, high_on_target):
+        cfg = copy.deepcopy(CFG)
+        cfg["fees"].update(slippage=0.0003, entry_order="market", tp_order=tp_order)
+        cfg["strategy"].update(partial_tp_r=0, breakeven_at_r=1e9, max_hold_bars=0, health_window=0,
+                               leader_filter=False, ml_filter=False)
+        bars = [(100, 100.2, 99.9, 100), (100, 100.5, 99.8, 100.2), (100.2, high_on_target, 100.1, 101.5),
+                (101.5, 101.52, 101.4, 101.5)]
+        prep = {"AAA/USDT:USDT": {
+            "ts": [1_700_000_000_000 + i * 300_000 for i in range(len(bars))],
+            "open": [b[0] for b in bars], "high": [b[1] for b in bars], "low": [b[2] for b in bars],
+            "close": [b[3] for b in bars], "atr": [1.0] * len(bars), "signal": [1, 0, 0, 0],
+            "sl_dist": [1.0] * 4, "tp_dist": [1.5] * 4, "strategy": ["trend"] * 4, "regime": ["trend_up"] * 4,
+        }}
+        return simulate(cfg, prep, {"AAA/USDT:USDT": (0, 0)})
+
+    market = run("market", 102.0)
+    limit = run("limit", 102.0)
+    assert market["table"].iloc[0].why == limit["table"].iloc[0].why == "ziel"
+    assert limit["table"].iloc[0].pnl > market["table"].iloc[0].pnl        # Maker-Gebuehr, kein Slippage
+    # Kurs beruehrt das Ziel nur genau -> liegende Limit-Order wird (vorsichtig) NICHT gefuellt
+    exact = run("limit", 100.0 * (1 + 0.0003) + 1.5)
+    assert exact["table"].iloc[0].why != "ziel"
+
+
+def test_paper_engine_places_limit_take_profit(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    class PriceClient(FakeClient):
+        price = 100.0
+
+        def fetch_ticker(self, sym):
+            return {"last": self.price}
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["fees"]["tp_order"] = "limit"
+    client = PriceClient(synthetic(1000, 1))
+    ex = PaperExchange(cfg, client)
+    bot = engine.Bot(cfg, ex, FakeContext())
+    sym = "AAA/USDT:USDT"
+    entry = ex.open(sym, "long", 1.0, 99.0, None)
+    bot._register_open(sym, "long", entry, 1.0, 99.0, 101.0, 5)
+    assert bot.state["meta"][sym]["tp_order_id"] and ex.pos[sym]["tp_maker"]
+    cash = ex.cash
+    client.price = 101.2
+    assert sym not in ex.positions()                      # Ziel erreicht, Limit-Order gefuellt
+    gain = ex.cash - cash
+    assert gain == pytest.approx((101.0 - entry) * 1.0 - 101.0 * cfg["fees"]["maker"])
+
+
+def test_fast_profile_grid():
+    from bot import optimize
+
+    saved = {k: getattr(optimize, k) for k in optimize.FAST}
+    try:
+        optimize.use_fast_profile()
+        assert [t[0] for t in optimize.TIMEFRAMES] == ["5m", "15m", "30m"]
+        assert optimize.TP_ORDERS == ["market", "limit"] and optimize.ENTRY == ["limit"]
+    finally:
+        for k, v in saved.items():
+            setattr(optimize, k, v)
