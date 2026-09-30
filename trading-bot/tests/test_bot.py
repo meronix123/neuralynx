@@ -635,7 +635,7 @@ def test_paper_engine_places_limit_take_profit(tmp_path, monkeypatch):
     assert gain == pytest.approx((101.0 - entry) * 1.0 - 101.0 * cfg["fees"]["maker"])
 
 
-def test_fast_profile_grid():
+def test_fast_profile_grid_runs_end_to_end():
     from bot import optimize
 
     saved = {k: getattr(optimize, k) for k in optimize.FAST}
@@ -643,6 +643,15 @@ def test_fast_profile_grid():
         optimize.use_fast_profile()
         assert [t[0] for t in optimize.TIMEFRAMES] == ["5m", "15m", "30m"]
         assert optimize.TP_ORDERS == ["market", "limit"] and optimize.ENTRY == ["limit"]
+        # wirklich durchrechnen (klein), wie auf dem PC mit --fast
+        optimize.TIMEFRAMES = [("5m", "1h", 50, 200)]
+        optimize.MIN_SCORES, optimize.SL_RR = [4], [(1.5, 2.0)]
+        optimize.STRATEGY_SETS = {"nur_trend": ["trend"]}
+        data = {"AAA/USDT:USDT": synthetic(6000, 1)}
+        res = optimize.optimize(CFG, data, {"AAA/USDT:USDT": (0.0001, 0.0001)}, base_tf="5m")
+        assert len(res) == 1 * 2 * len(optimize.MANAGE) * 2
+        assert set(res["tp"]) == {"market", "limit"} and set(res["filter"]) == {"filter", "filter+zeitebenen"}
     finally:
         for k, v in saved.items():
             setattr(optimize, k, v)
+        optimize.MIN_SCORES, optimize.SL_RR = [4, 5], [(1.0, 2.0), (1.5, 2.0), (2.0, 3.0)]

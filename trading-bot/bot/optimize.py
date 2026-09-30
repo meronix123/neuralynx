@@ -62,7 +62,7 @@ def variants():
 
 
 def make_cfg(base: dict, tf, ttf, tf_fast, tf_slow, score, sl, rr, sset,
-             entry="market", tp_order="market", manage=("normal", 0, 0), filt="ohne") -> dict:
+             entry="market", tp_order="market", manage=("normal", 0, 0), filt=None) -> dict:
     cfg = copy.deepcopy(base)
     cfg["timeframe"], cfg["trend_timeframe"] = tf, ttf
     st = cfg["strategy"]
@@ -73,7 +73,8 @@ def make_cfg(base: dict, tf, ttf, tf_fast, tf_slow, score, sl, rr, sset,
     _, part_r, pyr_r = manage
     st.update(partial_tp_r=part_r, partial_tp_frac=0.5,
               pyramid_at_r=pyr_r, pyramid_max_adds=2 if pyr_r else 0, pyramid_size_frac=0.5)
-    st.update(FILTERS[filt])
+    if filt is not None:  # beim Vorbereiten der Signale spielen die Filter noch keine Rolle
+        st.update(FILTERS[filt])
     return cfg
 
 
