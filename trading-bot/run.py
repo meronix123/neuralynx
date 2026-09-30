@@ -122,7 +122,10 @@ def main() -> None:
     try:
         bot.run()
     except KeyboardInterrupt:
-        print("\nBot gestoppt. Offene Positionen behalten ihren Stop-Loss/Take-Profit auf Bitget.")
+        if cfg["mode"] == "paper":
+            print("\nBot gestoppt. Simulierte Positionen bleiben gespeichert und laufen beim naechsten Start weiter.")
+        else:
+            print("\nBot gestoppt. Offene Positionen behalten ihren Stop-Loss/Take-Profit auf Bitget.")
 
 
 if __name__ == "__main__":

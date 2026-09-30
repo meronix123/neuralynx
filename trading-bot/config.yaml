@@ -80,10 +80,10 @@ strategy:
   funding_block_rank: 0.9  #   -> nicht mit der Masse handeln
   macro_filter: true       # Makro-Ampel (Aktien, Dollar, Zinsen, Stablecoins, DVOL) klar dagegen -> kein Trade
   macro_min: 0.3           #   Long nur, wenn Ampel > -0,3; Short nur, wenn < +0,3
-  ob_filter: "off"         # Order Blocks: off | avoid (Gegen-Zone vor dem Ziel -> kein Trade)
+  ob_filter: avoid         # Order Blocks: off | avoid (Gegen-Zone vor dem Ziel -> kein Trade)
                            #   | confirm (nur nach Antest einer passenden Zone) | both
-                           #   Erst mit "python run.py optimize --orderblocks" pruefen, dann einschalten
-  ob_disp_atr: 1.5         # Zone zaehlt, wenn der Kurs danach mind. 1,5 x ATR weglaeuft
+                           #   Jahrestest: "avoid" mit Staerke 2,0 als einzige Variante in Training UND Test im Plus
+  ob_disp_atr: 2.0         # Zone zaehlt, wenn der Kurs danach mind. 2 x ATR weglaeuft
   ob_look: 3               #   ... innerhalb von 3 Kerzen
   ob_room: 0.6             # avoid: 60 % des Weges zum Ziel muessen frei von Gegen-Zonen sein
   health_window: 10        # letzte 10 Trades je Strategie beobachten ...

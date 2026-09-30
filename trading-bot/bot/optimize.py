@@ -284,7 +284,7 @@ def compare_orderblocks(base: dict, data: dict, rules: dict, base_tf: str = "15m
     all_ts = sorted(set().union(*[set(df["ts"]) for df in data.values()]))
     split = all_ts[int(len(all_ts) * 2 / 3)]
     rows, t0, done = [], time.time(), 0
-    total = len(OB_DISP) * len(OB_MODES)
+    total = len(OB_DISP) * (len(OB_MODES) - ("ohne" in OB_MODES)) + ("ohne" in OB_MODES)
     for disp in OB_DISP:
         cfg0 = copy.deepcopy(base)
         cfg0["strategy"]["ob_disp_atr"] = disp

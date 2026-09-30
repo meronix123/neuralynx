@@ -18,7 +18,7 @@ CFG["strategy"].update(trend_ema_fast=50, trend_ema_slow=200, min_score=4, parti
                        breakeven_at_r=1.0,
                        # im Test vergeht keine echte Zeit -> zwischengespeicherte hoehere Zeitebenen
                        # waeren veraltet; der Zeitebenen-Filter hat einen eigenen Test
-                       mtf_filter=False, macro_filter=False)
+                       mtf_filter=False, macro_filter=False, ob_filter="off")
 CFG["dashboard"]["enabled"] = False  # keine echten Makro-Abrufe im Test
 CFG["fees"]["entry_order"] = "market"
 CFG["tf_select"] = "fixed"  # Auto-Zeiteinheit hat eigene Tests
