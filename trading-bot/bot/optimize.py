@@ -17,6 +17,7 @@ from .exchange import make_client, resolve_symbols
 # (15m/5m sind rausgeflogen: dort fressen die Gebuehren jeden Vorteil auf - siehe fruehere Tests)
 TIMEFRAMES = [
     ("1h", "4h", 50, 200),
+    ("2h", "1d", 20, 50),
     ("4h", "1d", 20, 50),
 ]
 MIN_SCORES = [4, 5]
@@ -36,9 +37,11 @@ MANAGE = [
 ]
 # Zusatz-Filter: BTC-Leitwaehrung, Strategie-Gesundheit, Zeit-Stop, selbstlernender ML-Filter
 FILTERS = {
-    "ohne": dict(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False),
-    "filter": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False),
-    "filter+ml": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=True),
+    "ohne": dict(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False, mtf_filter=False),
+    "filter": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False, mtf_filter=False),
+    "filter+zeitebenen": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False,
+                              mtf_filter=True),
+    "filter+ml": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=True, mtf_filter=False),
 }
 MIN_TRAIN_TRADES = 20
 

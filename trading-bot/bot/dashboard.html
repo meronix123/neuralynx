@@ -31,6 +31,9 @@
   td, th { padding:4px 6px; border-bottom:1px solid var(--line); text-align:right; }
   td:first-child, th:first-child { text-align:left; }
   .think { background:#11141a; border-radius:8px; padding:10px; margin-bottom:10px; }
+  .mtf { display:grid; grid-template-columns: repeat(8, 1fr); gap:4px; margin-bottom:12px; }
+  .mtf div { text-align:center; background:#11141a; border-radius:6px; padding:4px 0; font-size:12px; }
+  .mtf b { display:block; font-size:16px; }
   .legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--dim); font-size:12px; margin-top:6px; }
   .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
 </style>
@@ -55,6 +58,8 @@
   <section class="panel">
     <h3>Was der Bot denkt</h3>
     <div id="think" class="think"></div>
+    <h3>Zeitebenen</h3>
+    <div id="mtf" class="mtf"></div>
     <h3>Indikatoren</h3>
     <div id="ind"></div>
     <h3 style="margin-top:12px">Wirtschaftstermine</h3>
@@ -178,6 +183,11 @@ function render() {
   candles.setMarkers(markers);
 
   document.getElementById("think").innerHTML = thinking(s);
+  const scan = s.snapshot.mtf || {};
+  const arrow = d => d === 1 ? '<b class="up">&uarr;</b>' : d === -1 ? '<b class="down">&darr;</b>' : '<b class="sub">&rarr;</b>';
+  document.getElementById("mtf").innerHTML = ["1m","5m","15m","1h","2h","4h","1d","1w"].map(t =>
+    `<div>${arrow(scan[t])}${t === "1d" ? "1T" : t === "1w" ? "1W" : t}</div>`).join("") +
+    `<div style="grid-column:1/-1">Gesamtrichtung hoehere Zeitebenen: <b style="display:inline" class="${(s.snapshot.mtf_score||0) >= 0 ? "up" : "down"}">${s.snapshot.mtf_score == null ? "-" : (s.snapshot.mtf_score > 0 ? "+" : "") + fmt(s.snapshot.mtf_score)}</b></div>`;
   const v = s.snapshot;
   document.getElementById("ind").innerHTML = [
     ["Kurs", px(v.close)], ["Marktlage", v.regime_text], ["Trend hoehere Zeiteinheit", v.trend_1h],

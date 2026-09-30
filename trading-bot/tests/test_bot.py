@@ -15,7 +15,10 @@ CFG = load_config()
 # Tests laufen auf 5m-Testdaten -> kurze Zeiteinheiten, unabhaengig von der aktuellen config.yaml
 CFG["timeframe"], CFG["trend_timeframe"] = "5m", "1h"
 CFG["strategy"].update(trend_ema_fast=50, trend_ema_slow=200, min_score=4, partial_tp_r=0,
-                       breakeven_at_r=1.0)
+                       breakeven_at_r=1.0,
+                       # im Test vergeht keine echte Zeit -> zwischengespeicherte hoehere Zeitebenen
+                       # waeren veraltet; der Zeitebenen-Filter hat einen eigenen Test
+                       mtf_filter=False)
 CFG["fees"]["entry_order"] = "market"
 
 
@@ -502,7 +505,8 @@ def test_filters_and_ml_run_in_simulation():
     cfg = copy.deepcopy(CFG)
     data = {"BTC/USDT:USDT": synthetic(12000, 5), "ETH/USDT:USDT": synthetic(12000, 6, start=50)}
     rules = {k: (0.0001, 0.0001) for k in data}
-    cfg["strategy"].update(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False)
+    cfg["strategy"].update(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False,
+                           mtf_filter=False)
     prep = prepare(cfg, data, "5m")
     assert "leader_regime" in prep["ETH/USDT:USDT"]
     base = simulate(cfg, prep, rules)
@@ -511,7 +515,7 @@ def test_filters_and_ml_run_in_simulation():
     filt = simulate(cfg, prep, rules)
     sk = filt["skipped"]
     assert sk["leader"] > 0 and sk["leader"] + sk["health"] + sk["ml"] > 0
-    assert base["skipped"] == {"leader": 0, "health": 0, "ml": 0}
+    assert base["skipped"] == {"leader": 0, "mtf": 0, "health": 0, "ml": 0}
     assert filt["end"] == pytest.approx(filt["start"] + filt["table"].pnl.sum())
     assert (filt["table"].why == "zeit").any()
 
@@ -546,3 +550,31 @@ def test_fetch_history_skips_time_before_listing(tmp_path, monkeypatch):
     df = backtest.fetch_history(ListedLate(), "XAU/USDT:USDT", "1h", 365)
     assert len(df) >= 19 * 24 and df["ts"].dtype == "int64"
     assert backtest.usable({"XAU/USDT:USDT": df.head(100), "BTC/USDT:USDT": synthetic(600)}).keys() == {"BTC/USDT:USDT"}
+
+
+def test_multi_timeframe_scan_and_filter():
+    from bot.backtest import prepare, simulate
+    from bot.filters import mtf_blocks
+    from bot.strategy import higher_tfs, resample as rs
+
+    assert higher_tfs("4h") == ["1d", "1w"] and higher_tfs("1h") == ["2h", "4h", "1d", "1w"]
+    s = {"mtf_filter": True, "mtf_min": 0.25}
+    assert mtf_blocks("long", 0.0, s) and not mtf_blocks("long", 0.5, s)
+    assert mtf_blocks("short", 0.0, s) and not mtf_blocks("short", -0.5, s)
+    assert not mtf_blocks("long", -1.0, {"mtf_filter": False})
+    # Wochenkerzen beginnen montags (wie bei Bitget)
+    df = synthetic(6000)
+    w = rs(df, "1w")
+    assert all(pd.to_datetime(t, unit="ms").weekday() == 0 for t in w.ts)
+
+    cfg = copy.deepcopy(CFG)
+    cfg["strategy"].update(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False)
+    data = {"AAA/USDT:USDT": synthetic(12000, 5)}
+    prep = prepare(cfg, data, "5m")
+    scores = [v for v in prep["AAA/USDT:USDT"]["mtf_score"] if v == v]
+    assert min(scores) >= -1 and max(scores) <= 1 and len(set(scores)) > 2
+    cfg["strategy"]["mtf_filter"] = False
+    free = simulate(cfg, prep, {"AAA/USDT:USDT": (0.0001, 0.0001)})
+    cfg["strategy"]["mtf_filter"] = True
+    gated = simulate(cfg, prep, {"AAA/USDT:USDT": (0.0001, 0.0001)})
+    assert gated["skipped"]["mtf"] > 0 and free["skipped"]["mtf"] == 0

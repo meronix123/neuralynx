@@ -16,6 +16,14 @@ def leader_blocks(side: str, leader_regime: str | None) -> bool:
     return False
 
 
+def mtf_blocks(side: str, mtf_score: float | None, s: dict) -> bool:
+    """Gesamtrichtung der hoeheren Zeitebenen (-1..+1) passt nicht zur Trade-Richtung?"""
+    if not s.get("mtf_filter") or mtf_score is None or mtf_score != mtf_score:
+        return False
+    need = s.get("mtf_min", 0.25)
+    return mtf_score < need if side == "long" else mtf_score > -need
+
+
 def strategy_healthy(pnls: list[float], s: dict) -> bool:
     """Letzte `health_window` Trades dieser Strategie: Profit-Faktor unter Grenze -> Pause."""
     n = s.get("health_window", 0)

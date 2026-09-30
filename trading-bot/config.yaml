@@ -65,6 +65,8 @@ strategy:
   mr_min_rr: 1.0           # Seitwaerts: Ziel muss mind. so weit weg sein wie der Stop
   chaos_atr_rank: 0.97     # Volatilitaet in den obersten 3 % = Chaos -> nicht handeln
   leader_filter: true      # BTC im Abwaertstrend -> keine Altcoin-Longs (und umgekehrt)
+  mtf_filter: true         # Gesamtrichtung aller hoeheren Zeitebenen (bis 1 Woche) muss passen
+  mtf_min: 0.25            # Long nur bei Gesamtrichtung >= +0,25, Short nur <= -0,25 (Bereich -1..+1)
   health_window: 10        # letzte 10 Trades je Strategie beobachten ...
   health_min_pf: 0.6       # ... Profit-Faktor darunter -> Strategie pausiert
   health_pause_signals: 10 # nach 10 ausgelassenen Signalen ein Probe-Trade (sonst bliebe sie ewig aus)

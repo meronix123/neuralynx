@@ -7,12 +7,13 @@ from datetime import datetime, timezone
 from .config import ROOT
 from .context import MarketContext
 from .exchange import is_metal
-from .filters import health_gate, is_leader, leader_blocks, time_stop_due
+from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .flow import FlowMonitor, flow_score, flow_verdict
 from .ml import features, train_from_examples
 from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
-from .strategy import STRATEGY_NAMES, TF_MS, compute_signals, last_closed_signal, snapshot, trail_stop
+from .strategy import (MTF_EMAS, MTF_ORDER, STRATEGY_NAMES, TF_MS, compute_signals, higher_tfs,
+                       last_closed_signal, snapshot, tf_direction, trail_stop)
 
 log = logging.getLogger("bot")
 STATE_FILE = ROOT / "state.json"
@@ -58,6 +59,7 @@ class Bot:
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
         self.views: dict = {}
+        self._candle_cache: dict = {}
         self.model = None
         self._model_trained_on = -1
         self._train_model()
@@ -192,11 +194,43 @@ class Bot:
             f"| {self.cfg['leverage']}x | {strat}"
         )
 
+    def _cached_candles(self, sym: str, tf: str, limit: int = 300):
+        """Andere Zeitebenen nur so oft neu laden, wie sie sich aendern koennen (max. alle 5 Min)."""
+        key, now = (sym, tf), time.time()
+        hit = self._candle_cache.get(key)
+        if hit and now - hit[0] < min(TF_MS[tf] / 4000, 300):
+            return hit[1]
+        df = self.ex.candles(sym, tf, limit)
+        self._candle_cache[key] = (now, df)
+        return df
+
     def _analyze(self, sym: str) -> dict:
-        df = self.ex.candles(sym, self.cfg["timeframe"], 300)
-        tdf = self.ex.candles(sym, self.cfg["trend_timeframe"], 300)
-        sig_df = compute_signals(df, tdf, self.s, self.cfg["timeframe"], self.cfg["trend_timeframe"])
-        return {"sig_df": sig_df, "snapshot": snapshot(sig_df, self.s)}
+        tf, ttf = self.cfg["timeframe"], self.cfg["trend_timeframe"]
+        df = self.ex.candles(sym, tf, 300)
+        tdf = self.ex.candles(sym, ttf, 300)
+        mtf = {}
+        for h in higher_tfs(tf):
+            try:
+                mtf[h] = self._cached_candles(sym, h)
+            except Exception as e:  # noqa: BLE001 - eine fehlende Zeitebene soll den Bot nicht stoppen
+                log.debug("%s %s: %s", sym, h, e)
+        sig_df = compute_signals(df, tdf, self.s, tf, ttf, mtf)
+        # Richtung auf ALLEN Zeitebenen (1m ... 1w) - kleine nur als Info/Timing
+        scan = {}
+        for t in MTF_ORDER:
+            try:
+                frame = df if t == tf else mtf.get(t)
+                if frame is None:
+                    frame = self._cached_candles(sym, t)
+                closed = frame.iloc[:-1]  # letzter Bar ist noch offen
+                scan[t] = int(tf_direction(closed, *MTF_EMAS.get(t, (20, 50))).iloc[-1]) if len(closed) else 0
+            except Exception as e:  # noqa: BLE001
+                log.debug("%s Scan %s: %s", sym, t, e)
+                scan[t] = None
+        snap = snapshot(sig_df, self.s)
+        snap["mtf"] = scan
+        snap["mtf_score"] = round(float(sig_df["mtf_score"].iloc[-2]), 2) if "mtf_score" in sig_df else None
+        return {"sig_df": sig_df, "snapshot": snap}
 
     def _handle_closed(self, positions: dict, now: datetime) -> None:
         for sym in list(self.state["meta"]):
@@ -306,6 +340,10 @@ class Bot:
             lr = str(self.views[leader]["sig_df"].iloc[-2]["regime"]) if leader else None
             if leader_blocks(sig.side, lr):
                 return f"BTC im {'Abwaerts' if lr == 'trend_down' else 'Aufwaerts'}trend - kein {sig.side}"
+        mscore = view["snapshot"].get("mtf_score")
+        if mtf_blocks(sig.side, mscore, self.s):
+            self.state["last_sig"][sym] = sig.ts
+            return f"Zeitebenen dagegen (Gesamtrichtung {mscore:+.2f})"
         pnls = [t["pnl"] for t in self.state["history"] if t.get("strategy") == sig.strategy]
         if not health_gate(sig.strategy, pnls, self.s, self.state.setdefault("health_skips", {})):
             self.state["last_sig"][sym] = sig.ts
@@ -327,6 +365,7 @@ class Bot:
             return flow_why
         risk_factor *= flow_factor
         info = {"strategy": sig.strategy, "regime": sig.regime, "x": x, "ml_prob": prob,
+                "mtf": view["snapshot"].get("mtf"), "mtf_score": view["snapshot"].get("mtf_score"),
                 "flow": {**flow, "score": round(flow_score(sig.side, flow), 3)}}
         lev = self.cfg["leverage"]
         if not stop_is_safe(sig.price, sig.sl, lev):

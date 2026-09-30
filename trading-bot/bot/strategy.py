@@ -31,9 +31,56 @@ TF_MS = {
     "15m": 900_000,
     "30m": 1_800_000,
     "1h": 3_600_000,
+    "2h": 7_200_000,
     "4h": 14_400_000,
     "1d": 86_400_000,
+    "1w": 604_800_000,
 }
+# Alle Zeitebenen, die der Bot scannt (klein -> gross)
+MTF_ORDER = ["1m", "5m", "15m", "1h", "2h", "4h", "1d", "1w"]
+
+
+def resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """Kerzen zu groesserer Zeiteinheit zusammenfassen (Wochen beginnen montags wie bei Bitget)."""
+    x = df.set_index(pd.to_datetime(df["ts"], unit="ms"))
+    r = x.resample(pd.Timedelta(milliseconds=TF_MS[tf]), origin=pd.Timestamp("1970-01-05")).agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna()
+    # unabhaengig von der internen Zeitaufloesung (ns/us/ms) in Millisekunden umrechnen
+    r["ts"] = (r.index - pd.Timestamp(0)) // pd.Timedelta(milliseconds=1)
+    return r.reset_index(drop=True)[["ts", "open", "high", "low", "close", "volume"]]
+
+
+def tf_direction(df: pd.DataFrame, fast: int = 20, slow: int = 50) -> pd.Series:
+    """Richtung einer Zeitebene: +1 (Kurs > EMA schnell > EMA langsam), -1 (umgekehrt), 0 (uneinig)."""
+    c = df["close"]
+    f, sl = ema(c, fast), ema(c, slow)
+    d = pd.Series(np.where((c > f) & (f > sl), 1, np.where((c < f) & (f < sl), -1, 0)), index=df.index)
+    d.iloc[: min(len(d), slow)] = 0  # zu wenig Historie
+    return d
+
+
+# Wochenchart: kuerzere EMAs, sonst braeuchte man ueber ein Jahr Vorlauf
+MTF_EMAS = {"1w": (8, 21)}
+
+
+def higher_tfs(tf: str) -> list[str]:
+    """Zeitebenen oberhalb der Einstiegs-Zeiteinheit (fuer den Gesamtrichtungs-Filter)."""
+    return [t for t in MTF_ORDER if TF_MS[t] > TF_MS[tf]]
+
+
+def _merge_mtf(d: pd.DataFrame, mtf: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    cols = []
+    for htf, hdf in mtf.items():
+        if hdf is None or len(hdf) == 0:
+            continue
+        direction = tf_direction(hdf, *MTF_EMAS.get(htf, (20, 50)))
+        h = pd.DataFrame({"avail": hdf["ts"].to_numpy() + TF_MS[htf], f"mtf_{htf}": direction.to_numpy()})
+        d = pd.merge_asof(d.sort_values("avail"), h.sort_values("avail"), on="avail", direction="backward")
+        d[f"mtf_{htf}"] = d[f"mtf_{htf}"].fillna(0)
+        cols.append(f"mtf_{htf}")
+    d["mtf_score"] = d[cols].mean(axis=1) if cols else 0.0
+    return d
 
 
 @dataclass
@@ -80,7 +127,7 @@ def _rolling_rank(x: pd.Series, window: int) -> pd.Series:
 
 
 def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
-                    tf: str, trend_tf: str) -> pd.DataFrame:
+                    tf: str, trend_tf: str, mtf: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
     """Marktlage erkennen und je Lage die passende Strategie pruefen.
 
     Ergebnis-Spalten: regime, signal (+1/-1/0), strategy, sl_dist, tp_dist, score
@@ -199,6 +246,10 @@ def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
     d["macd_n"] = d["macd_h"] / d["atr"]
     warm = max(s["ema_slow"] * 2, 120)
     d.loc[d.index[:warm], "signal"] = 0
+
+    # ---------------- Gesamtrichtung ueber alle hoeheren Zeitebenen ----------------
+    # (der Filter selbst sitzt in filters.mtf_blocks - im Backtest und live gleich)
+    d = _merge_mtf(d, mtf or {})
     return d
 
 
