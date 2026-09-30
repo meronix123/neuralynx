@@ -32,8 +32,11 @@ def fetch_history(client, symbol: str, tf: str, days: int) -> pd.DataFrame:
             break
         rows += batch
         since = batch[-1][0] + TF_MS[tf]
+        done = min(100, 100 * (1 - (client.milliseconds() - since) / (days * 86_400_000)))
+        print(f"\r  {done:5.1f} %", end="", flush=True)
         if since >= client.milliseconds():
             break
+    print()
     df = to_df(rows).drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
     df.to_csv(cache, index=False)
     return df
