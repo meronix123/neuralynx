@@ -16,8 +16,9 @@
   .kpi span { color:var(--dim); font-size:12px; }
   .badge { padding:2px 8px; border-radius:99px; font-weight:600; font-size:12px; }
   .paper { background:#334155; } .demo { background:#1e3a8a; } .live { background:#7f1d1d; }
-  main { display:grid; grid-template-columns: 260px 1fr 340px; gap:12px; padding:12px 16px; }
-  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  main { display:grid; grid-template-columns: 230px minmax(0, 1fr) 320px; gap:12px; padding:12px 16px; }
+  main > section { min-width:0; }
+  @media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
   .sym { padding:8px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; margin-bottom:6px; }
   .sym:hover { background:#1d212b; } .sym.active { border-color:var(--blue); background:#1a2233; }

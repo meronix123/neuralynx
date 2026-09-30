@@ -82,8 +82,9 @@ strategy:
   partial_tp_frac: 0.5
   breakeven_at_r: 1000000000  # Trailing-Stop aus (sehr grosser Wert). 1.0 = ab +1R nachziehen
   trail_atr: 1.0           # Abstand des Trailing-Stops, falls aktiv
-  min_atr_pct: 0.08        # zu ruhiger Markt -> Gebuehren fressen den Gewinn -> kein Trade
-  max_atr_pct: 1.5         # zu wilder Markt -> kein Trade
+  min_atr_pct: 0.3         # (4h) zu ruhiger Markt -> Gebuehren fressen den Gewinn -> kein Trade
+  max_atr_pct: 3.0         # (4h) zu wilder Markt -> kein Trade. Mehr geht bei 10x Hebel nicht:
+                           # der Stop (bis 1,5 x ATR) muss deutlich vor der Liquidation (~10 %) liegen
   volume_factor: 1.0       # Volumen muss >= Durchschnitt sein
   max_funding_rate: 0.0005 # extreme Funding-Rate -> nicht mit der Masse handeln
 

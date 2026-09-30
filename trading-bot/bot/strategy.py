@@ -295,6 +295,10 @@ def snapshot(sig_df: pd.DataFrame, s: dict) -> dict:
         "squeeze": "Ausbruch aus der Ruhephase (mit Volumen)", "chaos": "nichts - Markt zu wild",
         "unclear": "Trend-Ruecksetzer, falls der Tagestrend passt",
     }[regime]
+    needs = {"trend_up": "trend", "trend_down": "trend", "unclear": "trend", "range": "range", "squeeze": "breakout"}
+    enabled = s.get("strategies", ["trend", "range", "breakout"])
+    if regime in needs and needs[regime] not in enabled:
+        watching = f"nichts - die Strategie '{STRATEGY_NAMES[needs[regime]]}' ist abgeschaltet, der Bot wartet"
     bias = "long" if row["trend"] == 1 else "short" if row["trend"] == -1 else None
     view = {
         "ts": int(row["ts"]),
