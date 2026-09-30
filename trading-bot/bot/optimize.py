@@ -10,7 +10,7 @@ import time
 
 import pandas as pd
 
-from .backtest import DATA, fetch_history, load_funding, prepare, simulate, usable
+from .backtest import DATA, fetch_history, load_funding, load_macro, prepare, simulate, usable
 from .exchange import make_client, resolve_symbols
 
 # Einstiegs-Zeiteinheit, Trend-Zeiteinheit, Trend-EMAs (schnell, langsam)
@@ -44,9 +44,14 @@ FILTERS = {
     "filter+ml": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=True, mtf_filter=False),
     "filter+zeitebenen+funding": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False,
                                       mtf_filter=True, funding_filter=True),
+    "filter+zeitebenen+makro": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False,
+                                    mtf_filter=True, macro_filter=True),
+    "alles": dict(leader_filter=True, health_window=10, max_hold_bars=12, ml_filter=False,
+                  mtf_filter=True, funding_filter=True, macro_filter=True),
 }
 for _k in FILTERS:
     FILTERS[_k].setdefault("funding_filter", False)
+    FILTERS[_k].setdefault("macro_filter", False)
 
 # Schnell-Modus: kurze Einstiegs-Zeiteinheiten, hoehere nur zur Orientierung, Gebuehren so niedrig wie moeglich
 FAST = dict(
@@ -83,14 +88,14 @@ def make_cfg(base: dict, tf, ttf, tf_fast, tf_slow, score, sl, rr, sset,
 
 
 def optimize(base: dict, data: dict, rules: dict, base_tf: str = "1h",
-             funding: dict | None = None) -> pd.DataFrame:
+             funding: dict | None = None, macro: pd.DataFrame | None = None) -> pd.DataFrame:
     all_ts = sorted(set().union(*[set(df["ts"]) for df in data.values()]))
     split = all_ts[int(len(all_ts) * 2 / 3)]
     rows = []
     total = sum(len(c) for _, c in variants())
     done, t0 = 0, time.time()
     for key, combos in variants():
-        prep = prepare(make_cfg(base, *key), data, base_tf, funding)  # Signale nur einmal je Einstellung
+        prep = prepare(make_cfg(base, *key), data, base_tf, funding, macro)  # Signale nur einmal je Einstellung
         for entry, tp_order, manage, filt in combos:
             cfg = make_cfg(base, *key, entry, tp_order, manage, filt)
             train = simulate(cfg, prep, rules, end_ts=split)
@@ -136,7 +141,8 @@ def optimize_cli(base: dict, days: int, fast: bool = False) -> None:
 
     data = usable(data)
     funding = load_funding(client, list(data), days)
-    res = optimize(base, data, rules, base_tf=base_tf, funding=funding)
+    macro = load_macro(days)
+    res = optimize(base, data, rules, base_tf=base_tf, funding=funding, macro=macro)
     DATA.mkdir(exist_ok=True)
     out = DATA / "optimierung.csv"
     res.to_csv(out, index=False, sep=";", decimal=",")

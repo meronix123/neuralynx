@@ -8,6 +8,7 @@ from .config import ROOT
 from .context import MarketContext
 from .derivs import fetch_funding_history, funding_blocks, live_rank
 from .exchange import is_metal
+from .macro import fetch_macro, latest as macro_latest, macro_blocks
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .flow import FlowMonitor, flow_score, flow_verdict
 from .ml import features, train_from_examples
@@ -226,6 +227,19 @@ class Bot:
             f"| {self.cfg['leverage']}x | {strat}"
         )
 
+    def _macro_score(self, sym: str) -> float | None:
+        """Makro-Ampel (-1 Risiko aus .. +1 Risiko an), alle 6 Stunden neu geladen."""
+        if not (self.s.get("macro_filter") or self.cfg.get("dashboard", {}).get("enabled")):
+            return None
+        at, scores = self.__dict__.get("_macro_cache", (0, None))
+        if time.time() - at > 6 * 3600:
+            try:
+                scores = fetch_macro(400)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Makro-Daten: %s", e)
+            self._macro_cache = (time.time(), scores)
+        return macro_latest(scores, is_metal(sym), int(time.time() * 1000))
+
     def _funding_rank(self, sym: str, current: float | None) -> float | None:
         """Wie extrem ist das aktuelle Funding im Vergleich zum letzten Monat? (stuendlich neu geladen)"""
         if not self.s.get("funding_filter") or current is None:
@@ -275,6 +289,7 @@ class Bot:
                 scan[t] = None
         snap = snapshot(sig_df, self.s)
         snap["mtf"] = scan
+        snap["macro"] = self._macro_score(sym)
         snap["mtf_score"] = round(float(sig_df["mtf_score"].iloc[-2]), 2) if "mtf_score" in sig_df else None
         return {"sig_df": sig_df, "snapshot": snap}
 
@@ -394,7 +409,12 @@ class Bot:
         frank = self._funding_rank(sym, funding)
         if funding_blocks(sig.side, frank, self.s):
             self.state["last_sig"][sym] = sig.ts
-            return f"Markt ueberfuellt (Funding hoeher als {frank * 100:.0f} % des letzten Monats) - kein {sig.side}"
+            crowd = "zu viele Longs" if sig.side == "long" else "zu viele Shorts"
+            return f"Markt ueberfuellt ({crowd}, Funding-Rang {frank * 100:.0f} % im Monatsvergleich)"
+        mac = view["snapshot"].get("macro")
+        if macro_blocks(sig.side, mac, self.s):
+            self.state["last_sig"][sym] = sig.ts
+            return f"Makro-Ampel dagegen ({'Risiko aus' if mac < 0 else 'Risiko an'}, {mac:+.2f})"
         mscore = view["snapshot"].get("mtf_score")
         if mtf_blocks(sig.side, mscore, self.s):
             self.state["last_sig"][sym] = sig.ts
@@ -421,6 +441,7 @@ class Bot:
         risk_factor *= flow_factor
         info = {"strategy": sig.strategy, "regime": sig.regime, "x": x, "ml_prob": prob,
                 "mtf": view["snapshot"].get("mtf"), "mtf_score": view["snapshot"].get("mtf_score"),
+                "macro": view["snapshot"].get("macro"), "funding_rank": frank,
                 "flow": {**flow, "score": round(flow_score(sig.side, flow), 3)}}
         lev = self.cfg["leverage"]
         if not stop_is_safe(sig.price, sig.sl, lev):

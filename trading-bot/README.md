@@ -39,6 +39,8 @@ welche Daten wirklich helfen.
 | Filter | Wirkung |
 |---|---|
 | Zeitebenen (1m bis 1 Woche) | Richtung auf 1m, 5m, 15m, 1h, 2h, 4h, 1 Tag, 1 Woche. Die hoeheren Zeitebenen ergeben eine Gesamtrichtung (-1..+1); Long nur ab +0,25, Short nur ab -0,25. Die kleinen (1m-15m) werden angezeigt und bei jedem Trade gespeichert. |
+| Ueberfuellung (Funding) | Funding-Rate im obersten 10 % des letzten Monats -> zu viele gehebelte Longs -> keine neuen Longs (Short umgekehrt). Rueckwirkend getestet. |
+| Makro-Ampel | S&P 500, Nasdaq, US-Dollar, 10-jaehrige US-Zinsen (FRED), Stablecoin-Menge (DefiLlama), BTC-Volatilitaetsindex DVOL (Deribit). Risiko aus -> keine Longs, Risiko an -> keine Shorts. Gold nutzt nur Dollar und Zinsen. Tageswerte mit 2 Tagen Versatz (kein Blick in die Zukunft). |
 | BTC als Leitwaehrung | BTC im Abwaertstrend -> keine Longs bei ETH/SOL/XRP (und umgekehrt) |
 | Strategie-Gesundheit | laeuft eine Strategie gerade schlecht (letzte 10 Trades PF < 0,6), wird sie pausiert; nach 10 ausgelassenen Signalen gibt es einen Probe-Trade |
 | Zeit-Stop | Trade nach 12 Bars nicht bei +0,5R und kein Teilverkauf -> schliessen |

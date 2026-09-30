@@ -69,6 +69,8 @@ strategy:
   mtf_min: 0.25            # Long nur bei Gesamtrichtung >= +0,25, Short nur <= -0,25 (Bereich -1..+1)
   funding_filter: true     # Markt ueberfuellt (Funding im obersten/untersten 10 % des letzten Monats)
   funding_block_rank: 0.9  #   -> nicht mit der Masse handeln
+  macro_filter: true       # Makro-Ampel (Aktien, Dollar, Zinsen, Stablecoins, DVOL) klar dagegen -> kein Trade
+  macro_min: 0.3           #   Long nur, wenn Ampel > -0,3; Short nur, wenn < +0,3
   health_window: 10        # letzte 10 Trades je Strategie beobachten ...
   health_min_pf: 0.6       # ... Profit-Faktor darunter -> Strategie pausiert
   health_pause_signals: 10 # nach 10 ausgelassenen Signalen ein Probe-Trade (sonst bliebe sie ewig aus)

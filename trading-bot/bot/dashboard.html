@@ -197,6 +197,7 @@ function render() {
     ["ADX (Trendstaerke)", `${v.adx} ${v.adx >= 20 ? "(Trend)" : "(schwach)"}`],
     ["Volatilitaet (ATR)", fmt(v.atr_pct, 3) + " %"], ["Bollinger-Breite", v.bb_width_pct == null ? "-" : fmt(v.bb_width_pct) + " %"],
     ["VWAP", px(v.vwap)],
+    ["Makro-Ampel", v.macro == null ? "-" : `<span class="${v.macro > 0.25 ? "up" : v.macro < -0.25 ? "down" : ""}">${v.macro > 0.25 ? "Risiko an" : v.macro < -0.25 ? "Risiko aus" : "neutral"} (${v.macro > 0 ? "+" : ""}${fmt(v.macro)})</span>`],
     ...flowRows(s.flow),
   ].map(([k, val]) => `<div class="row"><span>${k}</span><b>${val}</b></div>`).join("");
 

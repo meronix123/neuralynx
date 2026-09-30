@@ -18,7 +18,8 @@ CFG["strategy"].update(trend_ema_fast=50, trend_ema_slow=200, min_score=4, parti
                        breakeven_at_r=1.0,
                        # im Test vergeht keine echte Zeit -> zwischengespeicherte hoehere Zeitebenen
                        # waeren veraltet; der Zeitebenen-Filter hat einen eigenen Test
-                       mtf_filter=False)
+                       mtf_filter=False, macro_filter=False)
+CFG["dashboard"]["enabled"] = False  # keine echten Makro-Abrufe im Test
 CFG["fees"]["entry_order"] = "market"
 
 
@@ -515,7 +516,7 @@ def test_filters_and_ml_run_in_simulation():
     filt = simulate(cfg, prep, rules)
     sk = filt["skipped"]
     assert sk["leader"] > 0 and sk["leader"] + sk["health"] + sk["ml"] > 0
-    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "health": 0, "ml": 0}
+    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "health": 0, "ml": 0}
     assert filt["end"] == pytest.approx(filt["start"] + filt["table"].pnl.sum())
     assert (filt["table"].why == "zeit").any()
 
@@ -699,3 +700,62 @@ def test_funding_crowding_filter():
     cfg["strategy"]["funding_filter"] = True
     res = simulate(cfg, prep, {"AAA/USDT:USDT": (0.0001, 0.0001)})
     assert res["skipped"]["funding"] > 0      # steigendes Funding = ueberfuellte Longs werden aussortiert
+
+
+def test_macro_traffic_light():
+    from bot.backtest import prepare, simulate
+    from bot.macro import compute_scores, fetch_macro, latest, macro_blocks
+
+    days = pd.date_range("2025-01-01", periods=300, freq="D")
+    up = pd.Series(np.linspace(100, 200, 300), index=days)      # Aktien steigen
+    down = pd.Series(np.linspace(120, 100, 300), index=days)    # Dollar faellt
+    sc = compute_scores({"spx": up, "ndx": up, "dxy": down, "us10y": down})
+    assert sc["crypto"].iloc[-1] == pytest.approx(1.0) and sc["gold"].iloc[-1] == pytest.approx(1.0)
+    risk_off = compute_scores({"spx": down, "dxy": up, "us10y": up})
+    assert risk_off["crypto"].iloc[-1] == pytest.approx(-1.0)
+
+    s = {"macro_filter": True, "macro_min": 0.3}
+    assert macro_blocks("long", -0.5, s) and not macro_blocks("short", -0.5, s)
+    assert macro_blocks("short", 0.5, s) and not macro_blocks("long", 0.5, s)
+    assert not macro_blocks("long", -1, {}) and not macro_blocks("long", float("nan"), s)
+
+    # Versatz: ein Tageswert ist erst 2 Tage spaeter nutzbar
+    first_avail = int(sc["avail"].iloc[60])
+    assert latest(sc, False, first_avail - 1) == sc["crypto"].iloc[59]
+
+    class R:
+        def __init__(self, text=None, js=None):
+            self.text, self._js = text, js
+
+        def json(self):
+            return self._js
+
+    class Http:
+        def get(self, url, params=None, timeout=None):
+            if "fred" in url:
+                return R(text="observation_date,X\n" + "\n".join(
+                    f"{d.date()},{v}" for d, v in zip(days, np.linspace(1, 2, 300))))
+            if "llama" in url:
+                return R(js=[{"date": str(int(d.timestamp())), "totalCirculatingUSD": {"peggedUSD": 1e9 + i}}
+                             for i, d in enumerate(days)])
+            return R(js={"result": {"data": [[int(d.timestamp() * 1000), 1, 1, 1, 50.0] for d in days],
+                                    "continuation": None}})
+
+    m = fetch_macro(300, http=Http())
+    assert m is not None and m["crypto"].notna().sum() > 100
+
+    # im Backtest: Risiko-aus-Phase sortiert Longs aus
+    df = synthetic(6000, 2)
+    start = pd.to_datetime(df.ts.iloc[0], unit="ms").normalize() - pd.Timedelta(days=100)
+    d2 = pd.date_range(start, periods=150, freq="D")
+    off = compute_scores({"spx": pd.Series(np.linspace(200, 100, 150), index=d2),
+                          "dxy": pd.Series(np.linspace(100, 200, 150), index=d2)})
+    cfg = copy.deepcopy(CFG)
+    cfg["strategy"].update(leader_filter=False, health_window=0, max_hold_bars=0, ml_filter=False, mtf_filter=False)
+    prep = prepare(cfg, {"AAA/USDT:USDT": df}, "5m", None, off)
+    assert np.nanmax(prep["AAA/USDT:USDT"]["macro_score"]) < 0
+    cfg["strategy"]["macro_filter"] = True
+    res = simulate(cfg, prep, {"AAA/USDT:USDT": (0.0001, 0.0001)})
+    assert res["skipped"]["macro"] > 0
+    if res["trades"]:
+        assert (res["table"].side == "short").all()

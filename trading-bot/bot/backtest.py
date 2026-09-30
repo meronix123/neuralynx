@@ -15,6 +15,7 @@ import pandas as pd
 
 from .config import ROOT
 from .derivs import fetch_funding_history, funding_blocks, merge_funding
+from .macro import fetch_macro, macro_blocks, merge_macro
 from .exchange import is_metal, make_client, resolve_symbols, to_df
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .ml import SignalModel, features
@@ -73,12 +74,12 @@ def usable(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
 
 PREP_COLS = ("ts", "open", "high", "low", "close", "atr", "signal", "sl_dist", "tp_dist", "strategy", "regime",
-             "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "mtf_score", "funding_rank")
+             "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "mtf_score", "funding_rank", "macro_score")
 FEATURE_COLS = ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "regime", "strategy")
 
 
 def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str,
-            funding: dict[str, pd.DataFrame] | None = None) -> dict:
+            funding: dict[str, pd.DataFrame] | None = None, macro: pd.DataFrame | None = None) -> dict:
     """Signale einmal berechnen (teuer). data: Symbol -> Kerzen in base_tf."""
     s, tf, ttf = cfg["strategy"], cfg["timeframe"], cfg["trend_timeframe"]
     out = {}
@@ -88,6 +89,7 @@ def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str,
         mtf = {h: resample(raw, h) for h in higher_tfs(tf) if TF_MS[h] >= TF_MS[base_tf]}
         d = compute_signals(df, resample(raw, ttf), s, tf, ttf, mtf)
         d["funding_rank"] = merge_funding(d, (funding or {}).get(sym))
+        d["macro_score"] = merge_macro(d, macro, gold=is_metal(sym))
         out[sym] = {c: d[c].tolist() for c in PREP_COLS}
     # Leitwaehrung: Marktlage von BTC je Zeitpunkt fuer die anderen Krypto-Maerkte
     leader = next((k for k in out if is_leader(k)), None)
@@ -122,7 +124,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     model, examples, trained_at = SignalModel(), list(seed_examples or []), 0
     strat_pnls: dict[str, list[float]] = {}
     health_skips: dict[str, int] = {}
-    skipped = {"leader": 0, "mtf": 0, "funding": 0, "health": 0, "ml": 0}
+    skipped = {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "health": 0, "ml": 0}
 
     index = {sym: {t: i for i, t in enumerate(p["ts"])} for sym, p in prep.items()}
     timeline = sorted(t for t in set().union(*[set(p["ts"]) for p in prep.values()])
@@ -256,6 +258,9 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 if "funding_rank" in d and funding_blocks(side, d["funding_rank"][i], s):
                     skipped["funding"] += 1
                     continue
+                if "macro_score" in d and macro_blocks(side, d["macro_score"][i], s):
+                    skipped["macro"] += 1
+                    continue
                 if not health_gate(strat, strat_pnls.get(strat, []), s, health_skips):
                     skipped["health"] += 1
                     continue
@@ -335,7 +340,8 @@ def backtest_cli(cfg: dict, days: int) -> None:
         rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
     data = usable(data)
     funding = load_funding(client, list(data), days)
-    res = simulate(cfg, prepare(cfg, data, cfg["timeframe"], funding), rules)
+    macro = load_macro(days)
+    res = simulate(cfg, prepare(cfg, data, cfg["timeframe"], funding, macro), rules)
     print_report(res, days)
     save_ml_examples(res.get("examples", []))
 
@@ -349,6 +355,16 @@ def load_funding(client, symbols: list[str], days: int) -> dict[str, pd.DataFram
         except Exception as e:  # noqa: BLE001 - ohne Funding weiter
             print(f"  Funding-Historie {sym} nicht verfuegbar: {e}")
     return out
+
+
+def load_macro(days: int) -> pd.DataFrame | None:
+    print("  Lade Makro-Daten (Aktien, Dollar, Zinsen, Stablecoins, DVOL) ...")
+    m = fetch_macro(days + 200)  # Vorlauf fuer 50-/180-Tage-Durchschnitte
+    if m is None or len(m) == 0:
+        print("  Makro-Daten nicht verfuegbar - Makro-Filter wirkt im Test nicht.")
+        return None
+    print(f"  Makro-Daten: {len(m)} Tage")
+    return m
 
 
 ML_FILE = DATA / "ml_examples.json"
@@ -381,7 +397,7 @@ def print_report(res: dict, days: int) -> None:
         sk = res.get("skipped") or {}
         if any(sk.values()):
             print(f"\nAussortierte Signale: BTC-Filter {sk.get('leader', 0)}, Zeitebenen {sk.get('mtf', 0)}, "
-                  f"Funding {sk.get('funding', 0)}, "
+                  f"Funding {sk.get('funding', 0)}, Makro {sk.get('macro', 0)}, "
                   f"Strategie pausiert {sk.get('health', 0)}, ML-Filter {sk.get('ml', 0)}")
     print("==============================")
     print("Hinweis: Vergangene Ergebnisse garantieren keine zukuenftigen Gewinne.")
