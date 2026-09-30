@@ -10,24 +10,29 @@ Wirtschaftskalender-Filter und Oberflaeche im Browser.
 
 ## Was der Bot macht
 
-**Aktuelle Einstellung** (beste Variante aus dem Strategie-Tester, noch nicht bewiesen):
-4h-Chart mit Tagestrend, Einstieg nur bei 5 von 6 Punkten, Limit-Order zum Signalkurs,
-Stop-Loss 1x ATR, Take-Profit 2x ATR, bei +1R Haelfte verkaufen und Stop auf Einstand.
-Erwartung: wenige Trades (ca. 1-2 pro Woche), dafuer mit Gebuehrenvorteil.
+**So entscheidet der Bot:** Zuerst erkennt er je Markt die **Lage**, dann waehlt er die dazu
+passende Strategie. Vor dem Einstieg prueft er zusaetzlich Orderbuch und Handelsfluss.
 
-**Vor jedem Trade prueft er:**
+| Marktlage | erkannt an | Strategie |
+|---|---|---|
+| Trend | ADX >= 22, uebergeordneter Trend klar | Trend-Ruecksetzer: Einstieg nach Ruecksetzer in Trendrichtung (RSI/MACD/EMA-Ausloeser + mind. 5 von 6 Punkten) |
+| Seitwaerts | ADX < 18 | Rueckkehr zur Mitte: Kauf am unteren / Verkauf am oberen Bollinger-Band, Ziel = Mitte |
+| Ruhephase | Bollinger-Baender so eng wie selten | Ausbruch ueber das 20-Bar-Hoch/-Tief mit 1,5-fachem Volumen |
+| Chaos | extreme Volatilitaet | nichts tun |
 
-| Bereich | Was geprueft wird |
+**Direkt vor jedem Einstieg** (live, nicht im Backtest moeglich):
+
+| Daten | Wirkung |
 |---|---|
-| Trend | Tageschart: EMA 20 ueber/unter EMA 50 - gehandelt wird nur in Trendrichtung |
-| Ausloeser | RSI dreht (ueber 40 / unter 60), MACD-Histogramm kreuzt 0, oder Kurs erobert EMA 21 zurueck |
-| Punkte (min. 5 von 6) | Struktur (EMA 21/50), MACD, ADX-Trendstaerke, Volumen, nicht ueberkauft/-verkauft (RSI + Bollinger), Kurs ueber/unter VWAP |
-| Volatilitaet | ATR darf nicht zu klein und nicht zu gross sein |
-| Funding-Rate | extrem einseitig gehebelter Markt -> kein Trade in dieselbe Richtung |
-| Wirtschaftsdaten | holt selbst den Wirtschaftskalender: 30 Min vor bis 30 Min nach wichtigen US-Terminen keine neuen Trades |
-| Stimmung | Crypto Fear & Greed Index: bei extremer Angst/Gier halbes Risiko |
-| Spread | zu grosse Geld/Brief-Spanne -> kein Trade |
-| Gold/Silber | am Wochenende pausiert (duenner Markt) |
+| Orderbuch (+-0,5 % um den Kurs) | ueberwiegt Kauf- oder Verkaufsdruck? |
+| Taker-Fluss (letzte 200 Trades) | kaufen oder verkaufen die aggressiven Marktteilnehmer? |
+| beides klar gegen den Trade | kein Einstieg; leicht dagegen -> halbes Risiko |
+| Open Interest, Funding | Funding extrem -> kein Trade mit der Masse; OI wird mitgeloggt |
+| Wirtschaftskalender | 30 Min vor/nach wichtigen US-Terminen keine neuen Trades |
+| Fear & Greed | bei extremer Angst/Gier halbes Risiko |
+
+Alle Messwerte werden bei jedem Trade gespeichert, damit man spaeter auswerten kann,
+welche Daten wirklich helfen.
 
 **Absicherung:**
 
@@ -92,12 +97,13 @@ ab ca. 1,3 ist sie brauchbar. Ist er schlecht, **nicht live gehen**.
 ## Schritt 1b: Strategie-Tester (beste Einstellungen finden)
 
 ```
-python run.py optimize --days 180
+python run.py optimize --days 365
 ```
 
-Rechnet ca. 1300 Varianten durch: Zeiteinheit (15m/1h/4h), Punkte-Schwelle,
-Stop-Abstand, Chance/Risiko, Trailing an/aus, Market- oder Limit-Einstieg und
-Positionsfuehrung (normal / Teilverkauf bei +1R / Aufstocken im Gewinn / beides).
+Rechnet ca. 200 Varianten durch: Zeiteinheit (1h/4h), welche Strategien erlaubt sind
+(nur Trend / nur Seitwaerts / nur Ausbruch / alle je nach Marktlage), Punkte-Schwelle,
+Stop-Abstand, Chance/Risiko, Market- oder Limit-Einstieg, Teilverkauf ja/nein.
+Zeigt fuer die beste Variante auch, wie jede Strategie einzeln abgeschnitten hat.
 
 Ehrlicher Test: Ausgewaehlt wird auf den ersten 2/3 der Daten, bewertet auf dem
 letzten 1/3, das die Auswahl nie gesehen hat. Nur Varianten, die in **beiden**

@@ -1,6 +1,6 @@
 """Start:
     python run.py backtest --days 60   # Strategie an alten Daten pruefen
-    python run.py optimize --days 180  # viele Einstellungen testen (dauert)
+    python run.py optimize --days 365  # viele Einstellungen testen (dauert)
     python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
@@ -75,7 +75,7 @@ def main() -> None:
         return
     if args.command == "optimize":
         from bot.optimize import optimize_cli
-        optimize_cli(cfg, args.days or 180)
+        optimize_cli(cfg, args.days or 365)
         return
 
     if args.command == "report":

@@ -15,7 +15,7 @@ import pandas as pd
 from .config import ROOT
 from .exchange import make_client, resolve_symbols, to_df
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
-from .strategy import TF_MS, compute_signals, levels, trail_stop
+from .strategy import TF_MS, compute_signals, levels_from, trail_stop
 
 DATA = ROOT / "data"
 
@@ -60,7 +60,8 @@ def prepare(cfg: dict, data: dict[str, pd.DataFrame], base_tf: str) -> dict:
     for sym, raw in data.items():
         df = raw if tf == base_tf else resample(raw, tf)
         d = compute_signals(df, resample(raw, ttf), s, tf, ttf)
-        out[sym] = {c: d[c].tolist() for c in ("ts", "open", "high", "low", "close", "atr", "signal")}
+        out[sym] = {c: d[c].tolist() for c in ("ts", "open", "high", "low", "close", "atr", "signal",
+                                               "sl_dist", "tp_dist", "strategy", "regime")}
     return out
 
 
@@ -108,7 +109,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
         guard.on_close(pnl, datetime.fromtimestamp(ts / 1000, timezone.utc))
         trades.append({"symbol": sym, "side": p["side"], "entry": p["entry0"], "exit": fill,
                        "pnl": pnl, "why": why, "opened": p["ts"], "closed": ts,
-                       "partial": p["partial_done"], "adds": p["adds"]})
+                       "partial": p["partial_done"], "adds": p["adds"], "strategy": p["strategy"]})
 
     for ts in timeline:
         now = datetime.fromtimestamp(ts / 1000, timezone.utc)
@@ -122,7 +123,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
 
             # 1) ausstehenden Einstieg ausfuehren
             if sym in pending:
-                side, sig_atr, ref = pending.pop(sym)
+                side, sig_atr, ref, sl_dist, tp_dist, strat = pending.pop(sym)
                 if limit_entry:
                     filled = lo <= ref if side == "long" else h >= ref
                     entry = min(ref, o) if side == "long" else max(ref, o)
@@ -132,7 +133,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 ok, _ = guard.can_open(equity, len(pos), now)
                 same = sum(1 for p in pos.values() if p["side"] == side)
                 if filled and ok and same < r.get("max_same_direction", 99):
-                    sl, tp = levels(side, entry, sig_atr, s)
+                    sl, tp = levels_from(side, entry, sl_dist, tp_dist)
                     if stop_is_safe(entry, sl, lev):
                         amt = position_size(equity, entry, sl, lev, r["risk_per_trade_pct"],
                                             r["max_margin_per_trade_pct"], taker)
@@ -141,7 +142,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                             pos[sym] = {"side": side, "entry": entry, "entry0": entry, "amount": amt,
                                         "amount0": amt, "fees": entry * amt * entry_fee, "realized": 0.0,
                                         "sl_init": sl, "sl": sl, "tp": tp, "r0": abs(entry - sl), "ts": ts,
-                                        "partial_done": False, "adds": 0}
+                                        "partial_done": False, "adds": 0, "strategy": strat}
                             guard.on_open()
 
             # 2) Stop / Teilverkauf / Ziel im Bar (Reihenfolge vorsichtig: Stop zuerst)
@@ -188,7 +189,8 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                     raise_stop(p, new_sl)
             # 4) neues Signal -> Einstieg im naechsten Bar
             elif sig != 0:
-                pending[sym] = ("long" if sig == 1 else "short", a, c)
+                pending[sym] = ("long" if sig == 1 else "short", a, c, d["sl_dist"][i], d["tp_dist"][i],
+                                d["strategy"][i])
         curve.append(equity)
 
     for sym in list(pos):  # offene Positionen am Ende zum letzten Kurs schliessen
@@ -206,6 +208,14 @@ def run_backtest(cfg: dict, data: dict[str, pd.DataFrame], rules: dict[str, tupl
                  base_tf: str | None = None) -> dict:
     """data: Symbol -> Kerzen (base_tf, Standard = cfg['timeframe'])."""
     return simulate(cfg, prepare(cfg, data, base_tf or cfg["timeframe"]), rules)
+
+
+def _per_group(t: pd.DataFrame, col: str) -> pd.DataFrame:
+    def pf(x):
+        loss = -x[x <= 0].sum()
+        return round(x[x > 0].sum() / loss, 2) if loss > 0 else float("inf")
+    g = t.groupby(col).pnl
+    return pd.DataFrame({"trades": g.count(), "summe": g.sum().round(2), "profit_faktor": g.apply(pf)})
 
 
 def summarize(trades: list, curve: list, start: float) -> dict:
@@ -229,6 +239,7 @@ def summarize(trades: list, curve: list, start: float) -> dict:
         "return_pct": 100 * ((curve[-1] if curve else start) / start - 1),
         "max_drawdown_pct": 100 * mdd,
         "per_symbol": t.groupby("symbol").pnl.agg(["count", "sum"]).round(2),
+        "per_strategy": _per_group(t, "strategy") if "strategy" in t else None,
         "table": t,
     }
 
@@ -259,5 +270,8 @@ def print_report(res: dict, days: int) -> None:
         print(f"Max. Rueckgang:  {res['max_drawdown_pct']:.1f} %")
         print("\nJe Symbol (Anzahl, Summe USDT):")
         print(res["per_symbol"].to_string())
+        if res.get("per_strategy") is not None:
+            print("\nJe Strategie:")
+            print(res["per_strategy"].to_string())
     print("==============================")
     print("Hinweis: Vergangene Ergebnisse garantieren keine zukuenftigen Gewinne.")

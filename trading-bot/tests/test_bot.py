@@ -284,6 +284,8 @@ def test_partial_take_profit_and_pyramiding_accounting():
         "ts": [1_700_000_000_000 + i * 900_000 for i in range(len(bars))],
         "open": [b[0] for b in bars], "high": [b[1] for b in bars], "low": [b[2] for b in bars],
         "close": [b[3] for b in bars], "atr": [1.0] * len(bars), "signal": [1, 0, 0, 0, 0],
+        "sl_dist": [1.0] * len(bars), "tp_dist": [5.0] * len(bars), "strategy": ["trend"] * len(bars),
+        "regime": ["trend_up"] * len(bars),
     }}
     res = simulate(cfg, prep, {"AAA/USDT:USDT": (0, 0)})
     t = res["table"].iloc[0]
@@ -303,6 +305,8 @@ def test_never_adds_to_losing_position():
         "ts": [1_700_000_000_000 + i * 900_000 for i in range(len(bars))],
         "open": [b[0] for b in bars], "high": [b[1] for b in bars], "low": [b[2] for b in bars],
         "close": [b[3] for b in bars], "atr": [1.0] * len(bars), "signal": [1, 0, 0],
+        "sl_dist": [1.0] * len(bars), "tp_dist": [3.0] * len(bars), "strategy": ["trend"] * len(bars),
+        "regime": ["trend_up"] * len(bars),
     }}
     res = simulate(cfg, prep, {"AAA/USDT:USDT": (0, 0)})
     t = res["table"].iloc[0]
@@ -316,16 +320,50 @@ def test_optimizer_small_grid(monkeypatch):
 
     monkeypatch.setattr(optimize, "TIMEFRAMES", [("15m", "1h", 50, 200)])
     monkeypatch.setattr(optimize, "MIN_SCORES", [4])
-    monkeypatch.setattr(optimize, "SL_ATR", [1.5])
-    monkeypatch.setattr(optimize, "RR", [2.0])
+    monkeypatch.setattr(optimize, "SL_RR", [(1.5, 2.0)])
+    monkeypatch.setattr(optimize, "STRATEGY_SETS", {"nur_trend": ["trend"], "alle_nach_lage": ["trend", "range", "breakout"]})
     data = {}
     for k in range(2):
         df = synthetic(8000, k + 1)
         df["ts"] = 1_700_000_000_000 + df.index * 900_000
         data[f"S{k}/USDT:USDT"] = df
-    res = optimize.optimize(CFG, data, {k: (0.0001, 0.0001) for k in data})
-    assert len(res) == 2 * 2 * len(optimize.MANAGE)
-    assert {"train_pf", "test_pf", "fuehrung", "einstieg"} <= set(res.columns)
+    res = optimize.optimize(CFG, data, {k: (0.0001, 0.0001) for k in data}, base_tf="15m")
+    assert len(res) == 2 * len(optimize.ENTRY) * len(optimize.MANAGE)
+    assert {"train_pf", "test_pf", "fuehrung", "einstieg", "strategien"} <= set(res.columns)
+
+
+def test_regimes_and_strategies_produce_signals():
+    """Alle drei Strategien feuern auf passenden Daten, und nur in ihrer Marktlage."""
+    df = synthetic(12000, 5)
+    s = copy.deepcopy(CFG["strategy"])
+    d = compute_signals(df, resample(df, "1h"), s, "5m", "1h")
+    assert set(d["regime"].unique()) >= {"trend_up", "range", "squeeze"}
+    fired = d[d.signal != 0]
+    assert set(fired.strategy) == {"trend", "range", "breakout"}
+    assert (fired[fired.strategy == "range"].regime == "range").all()
+    assert (fired[fired.strategy == "trend"].regime.isin(["trend_up", "trend_down", "unclear"])).all()
+    assert (d[d.regime == "chaos"].signal == 0).all()
+    # SL/TP liegen immer auf der richtigen Seite
+    assert (fired.sl_dist > 0).all() and (fired.tp_dist > 0).all()
+    # Strategie abschaltbar
+    s["strategies"] = ["trend"]
+    only = compute_signals(df, resample(df, "1h"), s, "5m", "1h")
+    assert set(only[only.signal != 0].strategy) == {"trend"}
+
+
+def test_flow_scoring():
+    from bot.flow import book_imbalance, flow_verdict, taker_flow
+
+    book = {"bids": [[99.9, 10], [99.8, 10]], "asks": [[100.1, 2], [100.2, 2]]}
+    imb = book_imbalance(book)
+    assert imb == pytest.approx((20 - 4) / 24)
+    tf = taker_flow([{"side": "buy", "amount": 3}, {"side": "sell", "amount": 1}])
+    assert tf == pytest.approx(0.5)
+    m = {"imbalance": imb, "taker_flow": tf}
+    assert flow_verdict("long", m, {})[0]                   # passt zu Long
+    ok, why, _ = flow_verdict("short", m, {"flow_block": 0.35})
+    assert not ok and "dagegen" in why                      # Short gegen starken Kaufdruck -> nein
+    assert flow_verdict("long", {"imbalance": None, "taker_flow": None}, {})[2] == 1.0  # keine Daten -> neutral
 
 
 def test_paper_bot_limit_entry_and_partial(tmp_path, monkeypatch):

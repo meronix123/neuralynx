@@ -17,9 +17,8 @@ symbols:
   - GOLD
   - SILVER
 
-# Beste Variante aus "python run.py optimize --days 180" (Stand 30.09.2026):
-# 4h, 5 Punkte, SL 1x ATR, TP 2x ATR, Limit-Einstieg, Teilverkauf bei +1R.
-# Im Test: Profit-Faktor ~1,4, aber nur 16 Trades -> noch KEIN Beweis. Erst Paper-Modus!
+# Startwerte aus dem ersten Strategie-Test (4h, Limit-Einstieg, Teilverkauf bei +1R).
+# Nach "python run.py optimize" ggf. anpassen. Noch KEIN Beweis -> erst Paper-Modus!
 timeframe: 4h          # Einstiegs-Zeiteinheit
 trend_timeframe: 1d    # Trendfilter
 leverage: 10
@@ -49,6 +48,22 @@ strategy:
   adx_min: 20              # Trendstaerke
   min_score: 5             # Punkte (von 6) fuer einen Einstieg. 3 = mehr Trades, 5 = weniger
   atr_period: 14
+  # Welche Strategien darf der Bot je nach Marktlage einsetzen?
+  #   trend    = Trend-Ruecksetzer (bei klarem Trend)
+  #   range    = Rueckkehr zur Mitte (seitwaerts)
+  #   breakout = Ausbruch nach Ruhephase
+  strategies: [trend, range, breakout]
+  adx_trend: 22            # ADX ab hier = Trend
+  adx_range: 18            # ADX unter hier = seitwaerts
+  squeeze_pct: 0.2         # Bollinger-Breite in den untersten 20 % = Ruhephase
+  squeeze_lookback: 6      # Ruhephase muss in den letzten 6 Bars gewesen sein
+  donchian: 20             # Ausbruch ueber das Hoch/Tief der letzten 20 Bars
+  bo_volume_factor: 1.5    # Ausbruch braucht 1,5-faches Volumen
+  bo_sl_atr: 1.5           # Ausbruch: Stop 1,5 x ATR
+  bo_tp_atr: 3.0           # Ausbruch: Ziel 3 x ATR
+  mr_sl_atr: 1.0           # Seitwaerts: Stop 1 x ATR, Ziel = mittleres Bollinger-Band
+  mr_min_rr: 1.0           # Seitwaerts: Ziel muss mind. so weit weg sein wie der Stop
+  chaos_atr_rank: 0.97     # Volatilitaet in den obersten 3 % = Chaos -> nicht handeln
   sl_atr: 1.0              # Stop-Loss = 1 x ATR
   tp_atr: 2.0              # Take-Profit = 2 x ATR
   partial_tp_r: 1.0        # bei +1R die Haelfte verkaufen und Stop auf Einstand (0 = aus)
@@ -59,6 +74,11 @@ strategy:
   max_atr_pct: 1.5         # zu wilder Markt -> kein Trade
   volume_factor: 1.0       # Volumen muss >= Durchschnitt sein
   max_funding_rate: 0.0005 # extreme Funding-Rate -> nicht mit der Masse handeln
+
+flow:
+  book_depth_pct: 0.5      # Orderbuch im Bereich +-0,5 % um den Kurs auswerten
+  flow_block: 0.35         # Orderbuch + Taker-Fluss klar dagegen (<= -0,35) -> kein Trade
+  display_refresh_s: 120   # wie oft die Oberflaeche Orderbuch-Daten neu holt
 
 filters:
   max_spread_pct: 0.05     # Geld/Brief-Spanne zu gross -> kein Trade

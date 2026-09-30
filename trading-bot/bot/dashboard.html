@@ -88,28 +88,45 @@ function line(price, color, title, dashed) {
   lines.push(candles.createPriceLine({ price, color, title, lineWidth: 2, lineStyle: dashed ? 2 : 0, axisLabelVisible: true }));
 }
 
+const STRAT = { trend: "Trend-Ruecksetzer", range: "Rueckkehr zur Mitte", breakout: "Ausbruch" };
 function thinking(s) {
   const v = s.snapshot, p = s.position;
-  const out = [];
+  const out = [`Marktlage: <b>${v.regime_text}</b> &rarr; passende Strategie: ${v.watching}.`];
   if (!p && s.pending) {
     out.push(`<b>Limit-Order ${s.pending.side.toUpperCase()}</b> bei ${px(s.pending.price)} wartet auf Ausfuehrung (SL ${px(s.pending.sl)}, TP ${px(s.pending.tp)}).`);
   }
   if (p) {
     const dir = p.side === "long" ? "steigt" : "faellt";
-    out.push(`<b>Position ${p.side.toUpperCase()}</b> seit ${time(p.opened_ms)}. Der Bot erwartet, dass der Kurs ${dir} bis zum Ziel <b class="up">${px(p.tp)}</b>.`);
+    out.push(`<b>Position ${p.side.toUpperCase()}</b> (${STRAT[p.strategy] || "-"}) seit ${time(p.opened_ms)}. Der Bot erwartet, dass der Kurs ${dir} bis zum Ziel <b class="up">${px(p.tp)}</b>.`);
     if (p.partial_done) out.push(`Haelfte bereits mit Gewinn verkauft, Rest laeuft mit Stop auf Einstand.`);
     out.push(`Schutz: Stop-Loss bei <b class="down">${px(p.sl)}</b>` + (p.sl !== p.sl_init ? ` (nachgezogen von ${px(p.sl_init)})` : "") + ".");
+  } else if (v.regime === "range") {
+    out.push(`Seitwaerts: Kauf nahe dem unteren, Verkauf nahe dem oberen Bollinger-Band, Ziel jeweils die Mitte.`);
+  } else if (v.regime === "squeeze") {
+    out.push(`Ruhephase: wartet auf einen Ausbruch mit hohem Volumen` + (v.bias ? ` (bevorzugt ${v.bias.toUpperCase()}, passend zum uebergeordneten Trend).` : "."));
+  } else if (v.regime === "chaos") {
+    out.push(`Markt zu wild - keine neuen Trades, bis sich die Volatilitaet beruhigt.`);
   } else if (v.bias) {
-    out.push(`1h-Trend <b>${v.trend_1h}</b> &rarr; der Bot sucht nur <b>${v.bias.toUpperCase()}</b>-Einstiege.`);
+    out.push(`Uebergeordneter Trend <b>${v.trend_1h}</b> &rarr; der Bot sucht nur <b>${v.bias.toUpperCase()}</b>-Einstiege.`);
     if (v.plan) {
       const rr = Math.abs(v.plan.tp - v.plan.entry) / Math.abs(v.plan.entry - v.plan.sl);
       out.push(`Wuerde er jetzt einsteigen: Einstieg ${px(v.plan.entry)}, SL <span class="down">${px(v.plan.sl)}</span>, TP <span class="up">${px(v.plan.tp)}</span> (Chance/Risiko 1 : ${fmt(rr, 1)}).`);
     }
   } else {
-    out.push(`1h-Trend <b>seitwaerts</b> &rarr; kein klarer Trend, der Bot wartet.`);
+    out.push(`Kein klarer uebergeordneter Trend &rarr; der Bot wartet.`);
   }
   out.push(`<span class="${s.reason === "Position eroeffnet" ? "up" : "warn"}">Status: ${s.reason || "-"}</span>`);
   return out.map(t => `<div style="margin-bottom:6px">${t}</div>`).join("");
+}
+
+function flowRows(f) {
+  if (!f) return [["Orderbuch", "-"]];
+  const pct = x => x == null ? "-" : `<span class="${x >= 0 ? "up" : "down"}">${x >= 0 ? "+" : ""}${fmt(x * 100, 0)} %</span>`;
+  return [
+    ["Orderbuch-Druck (Kauf - Verkauf)", pct(f.imbalance)],
+    ["Taker-Fluss (aggressive Kaeufe - Verkaeufe)", pct(f.taker_flow)],
+    ["Open Interest (1 Std.)", f.oi_change_pct == null ? "wird gemessen" : fmt(f.oi_change_pct) + " %"],
+  ];
 }
 
 function render() {
@@ -130,7 +147,7 @@ function render() {
   if (!selected || !data.symbols[selected]) selected = syms[0];
   document.getElementById("list").innerHTML = syms.map(sym => {
     const s = data.symbols[sym], v = s.snapshot, pos = s.position;
-    const tag = pos ? `<span class="${pos.side === "long" ? "up" : "down"}">${pos.side.toUpperCase()}</span>` : `<span class="sub">${v.trend_1h}</span>`;
+    const tag = pos ? `<span class="${pos.side === "long" ? "up" : "down"}">${pos.side.toUpperCase()}</span>` : `<span class="sub">${v.regime_text}</span>`;
     return `<div class="sym ${sym === selected ? "active" : ""}" onclick="selected='${sym}';render()">
       <div class="top"><span>${sym.split(":")[0]}</span>${tag}</div>
       <div class="sub">${px(v.close)} &middot; RSI ${v.rsi} &middot; ${s.reason}</div></div>`;
@@ -163,11 +180,13 @@ function render() {
   document.getElementById("think").innerHTML = thinking(s);
   const v = s.snapshot;
   document.getElementById("ind").innerHTML = [
-    ["Kurs", px(v.close)], ["1h-Trend", v.trend_1h],
+    ["Kurs", px(v.close)], ["Marktlage", v.regime_text], ["Trend hoehere Zeiteinheit", v.trend_1h],
     ["RSI (14)", `<span class="${v.rsi > 70 ? "down" : v.rsi < 30 ? "up" : ""}">${v.rsi}</span>`],
     ["MACD-Histogramm", `<span class="${v.macd_hist >= 0 ? "up" : "down"}">${px(v.macd_hist)}</span>`],
     ["ADX (Trendstaerke)", `${v.adx} ${v.adx >= 20 ? "(Trend)" : "(schwach)"}`],
-    ["Volatilitaet (ATR)", fmt(v.atr_pct, 3) + " %"], ["VWAP", px(v.vwap)],
+    ["Volatilitaet (ATR)", fmt(v.atr_pct, 3) + " %"], ["Bollinger-Breite", v.bb_width_pct == null ? "-" : fmt(v.bb_width_pct) + " %"],
+    ["VWAP", px(v.vwap)],
+    ...flowRows(s.flow),
   ].map(([k, val]) => `<div class="row"><span>${k}</span><b>${val}</b></div>`).join("");
 
   document.getElementById("events").innerHTML = (data.next_events.length ? data.next_events.map(e =>
@@ -175,11 +194,11 @@ function render() {
     : `<div class="sub">${data.calendar_ok ? "Keine wichtigen Termine" : "Kalender nicht abrufbar"}</div>`);
 
   const h = data.history.slice().reverse();
-  document.getElementById("hist").innerHTML = `<tr><th>Symbol</th><th>Richtung</th><th>Einstieg</th><th>Ausstieg (ca.)</th><th>SL</th><th>TP</th><th>Punkte</th><th>Ergebnis</th><th>Geschlossen</th></tr>` +
-    (h.length ? h.map(t => `<tr><td>${t.symbol.split(":")[0]}</td><td>${t.side}</td><td>${px(t.entry)}</td><td>${px(t.exit)}</td>
+  document.getElementById("hist").innerHTML = `<tr><th>Symbol</th><th>Strategie</th><th>Richtung</th><th>Einstieg</th><th>Ausstieg (ca.)</th><th>SL</th><th>TP</th><th>Punkte</th><th>Ergebnis</th><th>Geschlossen</th></tr>` +
+    (h.length ? h.map(t => `<tr><td>${t.symbol.split(":")[0]}</td><td>${STRAT[t.strategy] || "-"}</td><td>${t.side}</td><td>${px(t.entry)}</td><td>${px(t.exit)}</td>
       <td>${px(t.sl)}</td><td>${px(t.tp)}</td><td>${t.score ?? "-"}/6</td>
       <td class="${t.pnl >= 0 ? "up" : "down"}">${t.pnl >= 0 ? "+" : ""}${fmt(t.pnl)}</td><td>${time(t.closed_ms)}</td></tr>`).join("")
-      : `<tr><td colspan="9" class="sub">Noch keine Trades</td></tr>`);
+      : `<tr><td colspan="10" class="sub">Noch keine Trades</td></tr>`);
 }
 
 async function poll() {

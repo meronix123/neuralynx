@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from .config import ROOT
 from .context import MarketContext
 from .exchange import is_metal
+from .flow import FlowMonitor, flow_score, flow_verdict
 from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
-from .strategy import TF_MS, compute_signals, last_closed_signal, snapshot, trail_stop
+from .strategy import STRATEGY_NAMES, TF_MS, compute_signals, last_closed_signal, snapshot, trail_stop
 
 log = logging.getLogger("bot")
 STATE_FILE = ROOT / "state.json"
@@ -50,6 +51,9 @@ class Bot:
             self.ex.restore(self.state["paper"])
         self.ctx = context or MarketContext(cfg["context"])
         self.notify = Notifier(cfg["telegram"]["token"], cfg["telegram"]["chat_id"])
+        self.flow_cfg = cfg.get("flow", {})
+        self.flow = FlowMonitor(self.flow_cfg)
+        self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
 
     def run(self) -> None:
@@ -139,18 +143,20 @@ class Bot:
             if sym in positions:
                 del self.state["pending"][sym]
                 self._register_open(sym, o["side"], positions[sym]["entry"], positions[sym]["amount"],
-                                    o["sl"], o["tp"], o["score"])
+                                    o["sl"], o["tp"], o["score"], o.get("info"))
 
-    def _register_open(self, sym, side, entry, amount, sl, tp, score) -> None:
+    def _register_open(self, sym, side, entry, amount, sl, tp, score, info=None) -> None:
+        info = info or {}
         self.guard.on_open()
         self.state["meta"][sym] = {
             "side": side, "entry": entry, "amount": amount, "sl_init": sl, "sl": sl, "tp": tp,
             "r0": abs(entry - sl), "score": score, "partial_done": False,
-            "opened_ms": int(time.time() * 1000),
+            "opened_ms": int(time.time() * 1000), **info,
         }
+        strat = STRATEGY_NAMES.get(info.get("strategy", ""), info.get("strategy", ""))
         self.notify.send(
             f"NEU {sym} {side.upper()} {amount:g} @ {entry:.6g} | SL {sl:.6g} | TP {tp:.6g} "
-            f"| {self.cfg['leverage']}x | Punkte {score}/6"
+            f"| {self.cfg['leverage']}x | {strat}"
         )
 
     def _analyze(self, sym: str) -> dict:
@@ -174,6 +180,7 @@ class Bot:
                 "symbol": sym, "side": m["side"], "entry": m["entry"], "exit": price,
                 "amount": m["amount"], "sl": m["sl_init"], "tp": m["tp"], "pnl": pnl,
                 "score": m.get("score"), "opened_ms": m["opened_ms"], "closed_ms": int(now.timestamp() * 1000),
+                "strategy": m.get("strategy"), "regime": m.get("regime"), "flow": m.get("flow"),
             })
             self.state["history"] = self.state["history"][-300:]
             self.notify.send(f"{'GEWINN' if pnl >= 0 else 'VERLUST'} {sym} {m['side']} geschlossen: {pnl:+.2f} USDT")
@@ -227,7 +234,8 @@ class Bot:
     def _try_enter(self, sym: str, equity: float, positions: dict, view: dict,
                    risk_factor: float, now: datetime) -> str:
         """Versucht einen Einstieg. Rueckgabe: Begruendung fuer die Oberflaeche."""
-        sig = last_closed_signal(view["sig_df"], self.s, self.ex.funding_rate(sym))
+        funding = self.ex.funding_rate(sym)
+        sig = last_closed_signal(view["sig_df"], self.s, funding)
         if sig is None:
             return "Kein Signal"
         if self.state["last_sig"].get(sym) == sig.ts:
@@ -247,6 +255,14 @@ class Bot:
 
         # ab hier gilt das Signal als bearbeitet (kein zweiter Versuch fuer denselben Bar)
         self.state["last_sig"][sym] = sig.ts
+        flow = self.flow.measure(self.ex.c, sym, funding)
+        self.last_flow[sym] = (time.time(), flow)
+        ok, flow_why, flow_factor = flow_verdict(sig.side, flow, self.flow_cfg)
+        if not ok:
+            return flow_why
+        risk_factor *= flow_factor
+        info = {"strategy": sig.strategy, "regime": sig.regime,
+                "flow": {**flow, "score": round(flow_score(sig.side, flow), 3)}}
         lev = self.cfg["leverage"]
         if not stop_is_safe(sig.price, sig.sl, lev):
             return "Stop zu nah an Liquidation"
@@ -261,7 +277,7 @@ class Bot:
             order_id = self.ex.place_limit(sym, sig.side, amount, sig.price, sig.sl, sig.tp)
             self.state["pending"][sym] = {
                 "order_id": order_id, "side": sig.side, "price": sig.price, "amount": amount,
-                "sl": sig.sl, "tp": sig.tp, "score": sig.score,
+                "sl": sig.sl, "tp": sig.tp, "score": sig.score, "info": info,
                 # gueltig bis zum Ende des Bars nach dem Signal-Bar (wie im Backtest)
                 "expires_ms": sig.ts + 2 * TF_MS[self.cfg["timeframe"]],
             }
@@ -270,7 +286,7 @@ class Bot:
             return positions_pending
         entry = self.ex.open(sym, sig.side, amount, sig.sl, sig.tp)
         positions[sym] = {"side": sig.side, "amount": amount, "entry": entry}
-        self._register_open(sym, sig.side, entry, amount, sig.sl, sig.tp, sig.score)
+        self._register_open(sym, sig.side, entry, amount, sig.sl, sig.tp, sig.score, info)
         return "Position eroeffnet"
 
     # ------------------------------------------------------------------
@@ -282,6 +298,16 @@ class Bot:
             f"({(end / start - 1) * 100:+.1f} %)"
         )
 
+    def _flow_for_display(self, sym: str) -> dict | None:
+        at, m = self.last_flow.get(sym, (0, None))
+        if time.time() - at > self.flow_cfg.get("display_refresh_s", 120):
+            try:
+                m = self.flow.measure(self.ex.c, sym, None)
+                self.last_flow[sym] = (time.time(), m)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Flow-Anzeige %s: %s", sym, e)
+        return m
+
     def _update_status(self, now, equity, positions, views, reasons, block) -> None:
         syms = {}
         for sym, v in views.items():
@@ -292,6 +318,7 @@ class Bot:
                 "reason": reasons.get(sym, ""),
                 "position": {**positions[sym], **(m or {})} if sym in positions else None,
                 "pending": self.state["pending"].get(sym),
+                "flow": self._flow_for_display(sym),
                 "candles": [
                     {"time": int(r.ts // 1000), "open": r.open, "high": r.high, "low": r.low, "close": r.close}
                     for r in df.tail(CHART_BARS).itertuples()
