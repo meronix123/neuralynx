@@ -888,7 +888,9 @@ class FakeBitget:
         return [p for p in self.pos if not symbols or p["symbol"] in symbols]
 
     # --- Ausloese-Auftraege (Stop/Ziel der Einzel-Positionen: reduceOnly + triggerPrice) ---
-    def _plan_create(self, sym, side, amount, params):
+    def _plan_create(self, sym, side, amount, params, price=None):
+        if params and params.get("reduceOnly") and price is not None and "triggerPrice" not in params:
+            params = {**params, "triggerPrice": price, "limit": True}      # Ziel = Limit-Order (nur reduzierend)
         if not params or "triggerPrice" not in params:
             return None
         self.plans = getattr(self, "plans", {})
@@ -896,6 +898,7 @@ class FakeBitget:
         oid = f"p{self.n_plans}"
         kind = "loss_plan" if params.get("triggerType") == "mark_price" else "profit_plan"
         self.plans[oid] = {"symbol": sym.split("/")[0] + "USDT", "sym": sym, "planType": kind, "side": side,
+                           "kind": "normal" if params.get("limit") else "plan",
                            "triggerPrice": params["triggerPrice"], "size": amount, "reduceOnly": params.get("reduceOnly")}
         self.calls.append(("plan", kind, params["triggerPrice"], amount))
         return {"id": oid}
@@ -909,11 +912,13 @@ class FakeBitget:
 
     def _plan_list(self, sym, params):
         p = params or {}
-        if not p.get("trigger") or p.get("planType"):
+        if p.get("planType"):
             return None
+        want = "plan" if p.get("trigger") else "normal"
         return [{"id": k, "symbol": v["sym"], "type": "market", "side": v["side"], "triggerPrice": float(v["triggerPrice"]),
                  "amount": float(v["size"]), "reduceOnly": True}
-                for k, v in getattr(self, "plans", {}).items() if sym is None or v["sym"] == sym]
+                for k, v in getattr(self, "plans", {}).items()
+                if v["kind"] == want and (sym is None or v["sym"] == sym)]
 
     def fetch_open_orders(self, sym, since=None, limit=None, params=None):
         lst = self._plan_list(sym, params)
@@ -952,7 +957,7 @@ class FakeBitget:
         self.pos = [p for p in self.pos if p["symbol"] != sym]
 
     def create_order(self, *a):
-        plan = self._plan_create(a[0], a[2], a[3], a[5] if len(a) > 5 else None)
+        plan = self._plan_create(a[0], a[2], a[3], a[5] if len(a) > 5 else None, a[4] if len(a) > 4 else None)
         if plan:
             return plan
         self.calls.append(("create_order",) + a)
@@ -1583,7 +1588,7 @@ def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
             return {"last": self.last}
 
         def create_order(self, sym, typ, side, amount, price=None, params=None):
-            plan = self._plan_create(sym, side, amount, params)
+            plan = self._plan_create(sym, side, amount, params, price)
             if plan:
                 return plan
             self.calls.append(("create_order", sym, typ, side, amount, price, params))
@@ -1793,6 +1798,16 @@ def test_old_ticket_stops_are_migrated_to_reduce_only_triggers(tmp_path, monkeyp
     p = c.plans[tk["sl_id"]]
     assert p["side"] == "sell" and p["size"] == 0.001 and p["reduceOnly"] and float(p["triggerPrice"]) == 59000.0
     assert ("cancel_order", "77", "BTC/USDT:USDT", {"trigger": True, "planType": "normal_plan"}) in c.calls
+    assert p["kind"] == "plan"                                        # Stop = Ausloese-Auftrag
+    # Ziel, das noch als Ausloese-Auftrag liegt (feuerte bei Bitget sofort) -> wird zur Limit-Order
+    c.plans["t9"] = {"symbol": "BTCUSDT", "sym": "BTC/USDT:USDT", "planType": "profit_plan", "side": "sell",
+                     "kind": "plan", "triggerPrice": 63000.0, "size": 0.001, "reduceOnly": True}
+    tk["tp_id"] = "t9"
+    acc.tickets().save()
+    acc.refresh(force=True)
+    tk = acc.tickets().open()[0]
+    assert tk["tp_id"] != "t9" and "t9" not in c.plans and c.plans[tk["tp_id"]]["kind"] == "normal"
+    assert c.plans[tk["tp_id"]]["side"] == "sell" and float(c.plans[tk["tp_id"]]["triggerPrice"]) == 63000.0
 
 
 def test_quick_order_refused_where_bot_trades(tmp_path):

@@ -259,12 +259,11 @@ class Account:
                         if (o.get("id"), kind) not in seen:
                             seen.add((o.get("id"), kind))
                             out.append(self._order_row(o, kind))
-                    if kind in ("tpsl", "plan"):
-                        self._tpsl_ok[sym] = self._tpsl_ok.get(sym, 0) + 1
+                    self._tpsl_ok[sym] = self._tpsl_ok.get(sym, 0) + 1
                 except Exception as e:  # noqa: BLE001 - einzelne Order-Arten koennen fehlen
                     log.debug("Orders %s %s: %s", sym, kind, e)
-        # nur wenn BEIDE Arten (alte TP/SL- und neue Ausloese-Auftraege) gelesen werden konnten
-        self._tpsl_ok = {k: True for k, n in self._tpsl_ok.items() if n >= 2}
+        # nur wenn ALLE Arten (Limit-Ziele, Ausloese-Stops, alte TP/SL) gelesen werden konnten
+        self._tpsl_ok = {k: True for k, n in self._tpsl_ok.items() if n >= 3}
         return out
 
     def _history_cached(self, c) -> list[dict]:
@@ -611,7 +610,8 @@ class Account:
         """Hat Bitget ein Ziel/einen Stop ausgefuehrt? Dann Ticket schliessen und den Gegen-Auftrag stornieren."""
         tks = self.tickets()
         old_style = {o["id"] for o in orders if o.get("kind") == "tpsl"}
-        open_ids = old_style | {o["id"] for o in orders if o.get("kind") == "plan"}
+        triggers = {o["id"] for o in orders if o.get("kind") == "plan"}
+        open_ids = old_style | triggers | {o["id"] for o in orders if o.get("kind") == "normal"}
         size = {}
         for p in positions:
             k = (p["symbol"], p.get("side"))
@@ -649,7 +649,8 @@ class Account:
         for tk in tks.open():
             for kind, plan in (("sl", "loss_plan"), ("tp", "profit_plan")):
                 oid = tk.get(f"{kind}_id")
-                if oid and oid in old_style and size.get((tk["symbol"], tk["side"]), 0) > 0:
+                wrong = old_style | (triggers if kind == "tp" else set())   # Ziel als Ausloese-Auftrag = falsch
+                if oid and oid in wrong and size.get((tk["symbol"], tk["side"]), 0) > 0:
                     try:
                         new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, tk[kind], tk["amount"])
                         cancel_plan(c, tk["symbol"], oid)

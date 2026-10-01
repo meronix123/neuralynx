@@ -197,27 +197,32 @@ def place_pos_tpsl(client, symbol: str, side: str, sl: float | None, tp: float |
 def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, size: float) -> str:
     """Take-Profit (plan='profit_plan') oder Stop-Loss ('loss_plan') fuer GENAU `size` der Position.
 
-    Als nur-reduzierender Ausloese-Auftrag (Bitget Plan-Order, reduceOnly): Wird er ausgeloest,
-    schliesst Bitget hoechstens diese Menge - nie die ganze Position. (Bitgets eigene TP/SL-Auftraege
-    wirkten im One-Way-Modus teils auf die ganze Position.)"""
+    Ziel: nur-reduzierende LIMIT-Order zum Zielpreis (liegt im Orderbuch, eindeutig, Maker-Gebuehr).
+    Stop: nur-reduzierender Ausloese-Auftrag (Plan-Order, Markt bei Ausloesung) - liegt immer auf der
+    Verlustseite, die Ausloese-Richtung ist damit eindeutig. Beide schliessen hoechstens `size`."""
     close_side = "sell" if side == "long" else "buy"
-    params = {"triggerPrice": float(client.price_to_precision(symbol, trigger)), "reduceOnly": True,
-              "triggerType": "mark_price" if plan == "loss_plan" else "fill_price"}
+    qty = float(client.amount_to_precision(symbol, size))
+    px = float(client.price_to_precision(symbol, trigger))
     try:
-        o = client.create_order(symbol, "market", close_side, float(client.amount_to_precision(symbol, size)),
-                                None, params)
+        if plan == "profit_plan":
+            o = client.create_order(symbol, "limit", close_side, qty, px, {"reduceOnly": True})
+        else:
+            o = client.create_order(symbol, "market", close_side, qty, None,
+                                    {"triggerPrice": px, "reduceOnly": True, "triggerType": "mark_price"})
         return str(o.get("id") or "")
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {e}") from e
 
 
 def cancel_plan(client, symbol: str, order_id: str) -> None:
-    """Ausloese-Auftrag (Stop/Ziel) stornieren - neue Art (normal_plan), sonst alte TP/SL-Art."""
-    try:
-        client.cancel_order(order_id, symbol, {"trigger": True, "planType": "normal_plan"})
-        return
-    except Exception as e:  # noqa: BLE001
-        first = e
+    """Stop/Ziel stornieren - egal ob Ausloese-Auftrag, Limit-Order oder alter Bitget-TP/SL-Auftrag."""
+    errs = []
+    for params in ({"trigger": True, "planType": "normal_plan"}, {}):
+        try:
+            client.cancel_order(order_id, symbol, params)
+            return
+        except Exception as e:  # noqa: BLE001
+            errs.append(str(e))
     market = client.market(symbol)
     product_type, _ = client.handle_product_type_and_params(market, {})
     try:
@@ -225,7 +230,7 @@ def cancel_plan(client, symbol: str, order_id: str) -> None:
             "symbol": market["id"], "productType": product_type, "marginCoin": "USDT",
             "orderIdList": [{"orderId": order_id}], "planType": "profit_loss"})
     except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Storno {order_id}: {first} / {e}") from e
+        raise RuntimeError(f"Storno {order_id}: {' / '.join(errs)} / {e}") from e
 
 
 class BitgetExchange:
