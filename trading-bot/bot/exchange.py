@@ -195,28 +195,37 @@ def place_pos_tpsl(client, symbol: str, side: str, sl: float | None, tp: float |
 
 
 def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, size: float) -> str:
-    """Take-Profit (plan='profit_plan') oder Stop-Loss ('loss_plan') fuer eine TEILMENGE der Position
-    (Bitget place-tpsl-order mit size). So bekommt jede Einzel-Position ihr eigenes Ziel und ihren Stop."""
-    market = client.market(symbol)
-    product_type, _ = client.handle_product_type_and_params(market, {})
-    base = {"symbol": market["id"], "productType": product_type, "marginCoin": "USDT", "planType": plan,
-            "triggerPrice": client.price_to_precision(symbol, trigger),
-            "triggerType": "mark_price" if plan == "loss_plan" else "fill_price",
-            "executePrice": "0", "size": client.amount_to_precision(symbol, size)}
+    """Take-Profit (plan='profit_plan') oder Stop-Loss ('loss_plan') fuer GENAU `size` der Position.
+
+    Als nur-reduzierender Ausloese-Auftrag (Bitget Plan-Order, reduceOnly): Wird er ausgeloest,
+    schliesst Bitget hoechstens diese Menge - nie die ganze Position. (Bitgets eigene TP/SL-Auftraege
+    wirkten im One-Way-Modus teils auf die ganze Position.)"""
+    close_side = "sell" if side == "long" else "buy"
+    params = {"triggerPrice": float(client.price_to_precision(symbol, trigger)), "reduceOnly": True,
+              "triggerType": "mark_price" if plan == "loss_plan" else "fill_price"}
     try:
-        r = client.privateMixPostV2MixOrderPlaceTpslOrder({**base, "holdSide": hold_side(client, side)})
-        return str((r.get("data") or {}).get("orderId") or "")
+        o = client.create_order(symbol, "market", close_side, float(client.amount_to_precision(symbol, size)),
+                                None, params)
+        return str(o.get("id") or "")
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {e}") from e
 
 
 def cancel_plan(client, symbol: str, order_id: str) -> None:
-    """TP/SL-Auftrag (Plan-Order) stornieren."""
+    """Ausloese-Auftrag (Stop/Ziel) stornieren - neue Art (normal_plan), sonst alte TP/SL-Art."""
+    try:
+        client.cancel_order(order_id, symbol, {"trigger": True, "planType": "normal_plan"})
+        return
+    except Exception as e:  # noqa: BLE001
+        first = e
     market = client.market(symbol)
     product_type, _ = client.handle_product_type_and_params(market, {})
-    client.privateMixPostV2MixOrderCancelPlanOrder({
-        "symbol": market["id"], "productType": product_type, "marginCoin": "USDT",
-        "orderIdList": [{"orderId": order_id}], "planType": "profit_loss"})
+    try:
+        client.privateMixPostV2MixOrderCancelPlanOrder({
+            "symbol": market["id"], "productType": product_type, "marginCoin": "USDT",
+            "orderIdList": [{"orderId": order_id}], "planType": "profit_loss"})
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Storno {order_id}: {first} / {e}") from e
 
 
 class BitgetExchange:

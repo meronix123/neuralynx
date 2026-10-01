@@ -133,6 +133,12 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     if path == "/api/account/tpsl":
         return account.set_tpsl(body["symbol"], _num(body.get("sl")), _num(body.get("tp")))
     if path == "/api/account/quick":
+        st = getattr(bot, "state", None) or {}
+        if (bot.cfg.get("mode") == account.active and
+                (body.get("symbol") in st.get("meta", {}) or body.get("symbol") in st.get("pending", {}))):
+            raise RuntimeError(f"Der Bot hat in {body['symbol'].split(':')[0]} gerade selbst eine Position/Order auf "
+                               "diesem Konto - Bitget wuerde deine Einzel-Position damit zusammenlegen und der Stop des "
+                               "Bots gilt fuer alles. Bitte einen anderen Markt waehlen oder warten, bis der Bot fertig ist.")
         return account.quick_order(body["symbol"], body["side"], float(_num(body.get("margin_usdt")) or 0),
                                    int(_num(body.get("leverage")) or 10), float(_num(body.get("sl_pct")) or 10),
                                    float(_num(body.get("tp_pct")) or 0), body.get("type", "market"),

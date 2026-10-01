@@ -887,7 +887,38 @@ class FakeBitget:
     def fetch_positions(self, symbols=None):
         return [p for p in self.pos if not symbols or p["symbol"] in symbols]
 
+    # --- Ausloese-Auftraege (Stop/Ziel der Einzel-Positionen: reduceOnly + triggerPrice) ---
+    def _plan_create(self, sym, side, amount, params):
+        if not params or "triggerPrice" not in params:
+            return None
+        self.plans = getattr(self, "plans", {})
+        self.n_plans = getattr(self, "n_plans", 0) + 1
+        oid = f"p{self.n_plans}"
+        kind = "loss_plan" if params.get("triggerType") == "mark_price" else "profit_plan"
+        self.plans[oid] = {"symbol": sym.split("/")[0] + "USDT", "sym": sym, "planType": kind, "side": side,
+                           "triggerPrice": params["triggerPrice"], "size": amount, "reduceOnly": params.get("reduceOnly")}
+        self.calls.append(("plan", kind, params["triggerPrice"], amount))
+        return {"id": oid}
+
+    def _plan_cancel(self, oid, params):
+        if not (params or {}).get("trigger") or oid not in getattr(self, "plans", {}):
+            return False
+        self.plans.pop(oid)
+        self.calls.append(("cancel_plan", oid))
+        return True
+
+    def _plan_list(self, sym, params):
+        p = params or {}
+        if not p.get("trigger") or p.get("planType"):
+            return None
+        return [{"id": k, "symbol": v["sym"], "type": "market", "side": v["side"], "triggerPrice": float(v["triggerPrice"]),
+                 "amount": float(v["size"]), "reduceOnly": True}
+                for k, v in getattr(self, "plans", {}).items() if sym is None or v["sym"] == sym]
+
     def fetch_open_orders(self, sym, since=None, limit=None, params=None):
+        lst = self._plan_list(sym, params)
+        if lst is not None:
+            return lst
         if (params or {}).get("planType") == "profit_loss" and sym in (None, "BTC/USDT:USDT"):
             return [{"id": "77", "symbol": "BTC/USDT:USDT", "type": "market", "side": "sell", "triggerPrice": 59000,
                      "amount": 0.004, "filled": 0, "reduceOnly": True, "timestamp": 1_790_000_000_000}]
@@ -921,10 +952,15 @@ class FakeBitget:
         self.pos = [p for p in self.pos if p["symbol"] != sym]
 
     def create_order(self, *a):
+        plan = self._plan_create(a[0], a[2], a[3], a[5] if len(a) > 5 else None)
+        if plan:
+            return plan
         self.calls.append(("create_order",) + a)
         return {"id": "1"}
 
     def cancel_order(self, oid, sym, params=None):
+        if self._plan_cancel(oid, params):
+            return
         self.calls.append(("cancel_order", oid, sym, params))
 
     def set_margin_mode(self, *a):
@@ -1446,24 +1482,6 @@ def test_quick_orders_are_separate_positions(tmp_path, monkeypatch):
         def market(self, sym):
             return {"id": sym.split("/")[0] + "USDT", "limits": {"amount": {"min": 0.001}}}
 
-        def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
-            oid = f"p{len(self.plans) + 1}"
-            self.plans[oid] = req
-            self.calls.append(("plan", req["planType"], req["triggerPrice"], req["size"]))
-            return {"data": {"orderId": oid}}
-
-        def privateMixPostV2MixOrderCancelPlanOrder(self, req):  # noqa: N802
-            oid = req["orderIdList"][0]["orderId"]
-            self.plans.pop(oid, None)
-            self.calls.append(("cancel_plan", oid))
-
-        def fetch_open_orders(self, sym, since=None, limit=None, params=None):
-            if (params or {}).get("planType") == "profit_loss":
-                return [{"id": k, "symbol": v["symbol"][:-4] + "/USDT:USDT", "triggerPrice": float(v["triggerPrice"]),
-                         "amount": float(v["size"])}
-                        for k, v in self.plans.items() if sym is None or v["symbol"] == sym.split("/")[0] + "USDT"]
-            return []
-
     fake = {}
     cfg = copy.deepcopy(CFG)
     cfg["api"] = {"key": "", "secret": "", "password": ""}
@@ -1527,10 +1545,6 @@ def test_hedge_mode_account_orders(tmp_path, monkeypatch):
         def privateMixGetV2MixAccountAccounts(self, req):  # noqa: N802
             return {"data": [{"marginCoin": "USDT", "posMode": "hedge_mode"}]}
 
-        def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
-            self.calls.append(("plan", req["holdSide"]))
-            return {"data": {"orderId": f"x{len(self.calls)}"}}
-
         def fetch_ticker(self, sym):
             return {"last": 2000.0}
 
@@ -1544,7 +1558,7 @@ def test_hedge_mode_account_orders(tmp_path, monkeypatch):
     acc.quick_order("BTC/USDT:USDT", "short", 5.75, 10, 10, 20)   # Gegenrichtung zur offenen Long-Position erlaubt
     order = [x for x in c.calls if x[0] == "create_order"][-1]
     assert order[3] == "sell" and order[6]["hedged"] is True
-    assert ("plan", "short") in c.calls
+    assert {p["side"] for p in c.plans.values()} == {"buy"} and all(p["reduceOnly"] for p in c.plans.values())
 
 
 def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
@@ -1569,6 +1583,9 @@ def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
             return {"last": self.last}
 
         def create_order(self, sym, typ, side, amount, price=None, params=None):
+            plan = self._plan_create(sym, side, amount, params)
+            if plan:
+                return plan
             self.calls.append(("create_order", sym, typ, side, amount, price, params))
             oid = f"o{len(self.calls)}"
             self.orders_[oid] = {"status": "open" if typ == "limit" else "closed", "filled": 0 if typ == "limit" else amount,
@@ -1579,24 +1596,10 @@ def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
             return self.orders_[oid]
 
         def cancel_order(self, oid, sym, params=None):
+            if self._plan_cancel(oid, params):
+                return
             self.calls.append(("cancel_order", oid))
             self.orders_[oid]["status"] = "canceled"
-
-        def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
-            self.n_plans = getattr(self, "n_plans", 0) + 1
-            oid = f"p{self.n_plans}"
-            self.plans[oid] = req
-            return {"data": {"orderId": oid}}
-
-        def privateMixPostV2MixOrderCancelPlanOrder(self, req):  # noqa: N802
-            self.plans.pop(req["orderIdList"][0]["orderId"], None)
-
-        def fetch_open_orders(self, sym, since=None, limit=None, params=None):
-            if (params or {}).get("planType") == "profit_loss":
-                return [{"id": k, "symbol": sym or "ETH/USDT:USDT", "triggerPrice": float(v["triggerPrice"]),
-                         "amount": float(v["size"])}
-                        for k, v in self.plans.items()]
-            return []
 
     box = {}
     cfg = copy.deepcopy(CFG)
@@ -1766,3 +1769,44 @@ def test_position_margin_from_bitget_margin_size():
     assert row["margin"] == 12.2 and row["leverage"] == 20 and row["pnl_pct"] == pytest.approx(3 / 12.2 * 100)
     row = Account._pos_row({"symbol": "X", "contracts": 1, "initialMargin": 5.0, "unrealizedPnl": 1.0, "leverage": 10})
     assert row["margin"] == 5.0 and row["pnl_pct"] == pytest.approx(20.0)
+
+
+def test_old_ticket_stops_are_migrated_to_reduce_only_triggers(tmp_path, monkeypatch):
+    """Alte Bitget-TP/SL-Auftraege (wirkten teils auf die ganze Position) werden gegen nur-reduzierende
+    Ausloese-Auftraege mit genau der Ticket-Menge getauscht."""
+    from bot.account import PROFILE_KEYS, Account
+
+    for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
+        monkeypatch.delenv(n, raising=False)
+    box = {}
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, ["BTC/USDT:USDT"], factory=lambda api, demo=False: box.setdefault("c", FakeBitget(api, demo)),
+                  env_path=tmp_path / ".env")
+    acc.connect("k", "s", "p")
+    c = box["c"]
+    acc.tickets().add(symbol="BTC/USDT:USDT", side="long", amount=0.001, entry=60000.0, leverage=10,
+                      sl=59000.0, tp=63000.0, sl_id="77", tp_id="", opened_ms=0)
+    acc.refresh(force=True)
+    tk = acc.tickets().open()[0]
+    assert tk["sl_id"] != "77" and tk["sl_id"] in c.plans
+    p = c.plans[tk["sl_id"]]
+    assert p["side"] == "sell" and p["size"] == 0.001 and p["reduceOnly"] and float(p["triggerPrice"]) == 59000.0
+    assert ("cancel_order", "77", "BTC/USDT:USDT", {"trigger": True, "planType": "normal_plan"}) in c.calls
+
+
+def test_quick_order_refused_where_bot_trades(tmp_path):
+    from bot.dashboard import handle_action
+
+    class B:
+        cfg = {"mode": "live"}
+        state = {"meta": {"BTC/USDT:USDT": {}}, "pending": {}}
+
+    class A:
+        active = "live"
+
+        def quick_order(self, *a):
+            return "ok"
+    with pytest.raises(RuntimeError, match="zusammenlegen"):
+        handle_action(B(), A(), "/api/account/quick", {"symbol": "BTC/USDT:USDT", "side": "long"}, tmp_path / "S")
+    assert handle_action(B(), A(), "/api/account/quick", {"symbol": "ETH/USDT:USDT", "side": "long"}, tmp_path / "S") == "ok"

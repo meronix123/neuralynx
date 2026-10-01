@@ -259,10 +259,12 @@ class Account:
                         if (o.get("id"), kind) not in seen:
                             seen.add((o.get("id"), kind))
                             out.append(self._order_row(o, kind))
-                    if kind == "tpsl":
-                        self._tpsl_ok[sym] = True
+                    if kind in ("tpsl", "plan"):
+                        self._tpsl_ok[sym] = self._tpsl_ok.get(sym, 0) + 1
                 except Exception as e:  # noqa: BLE001 - einzelne Order-Arten koennen fehlen
                     log.debug("Orders %s %s: %s", sym, kind, e)
+        # nur wenn BEIDE Arten (alte TP/SL- und neue Ausloese-Auftraege) gelesen werden konnten
+        self._tpsl_ok = {k: True for k, n in self._tpsl_ok.items() if n >= 2}
         return out
 
     def _history_cached(self, c) -> list[dict]:
@@ -608,7 +610,8 @@ class Account:
     def _sync_tickets(self, positions: list[dict], orders: list[dict]) -> None:
         """Hat Bitget ein Ziel/einen Stop ausgefuehrt? Dann Ticket schliessen und den Gegen-Auftrag stornieren."""
         tks = self.tickets()
-        open_ids = {o["id"] for o in orders if o.get("kind") == "tpsl"}
+        old_style = {o["id"] for o in orders if o.get("kind") == "tpsl"}
+        open_ids = old_style | {o["id"] for o in orders if o.get("kind") == "plan"}
         size = {}
         for p in positions:
             k = (p["symbol"], p.get("side"))
@@ -641,6 +644,21 @@ class Account:
                 tk.update(status="open", exit=None, pnl=None, why=None, closed_ms=None)
                 tks.save()
                 log.info("Einzel-Position #%s wieder geoeffnet (Stop/Ziel liegen noch auf Bitget)", tk["id"])
+        # Alte Stops/Ziele (Bitget-TP/SL-Art, wirkte teils auf die ganze Position) gegen
+        # nur-reduzierende Ausloese-Auftraege mit genau der Ticket-Menge tauschen
+        for tk in tks.open():
+            for kind, plan in (("sl", "loss_plan"), ("tp", "profit_plan")):
+                oid = tk.get(f"{kind}_id")
+                if oid and oid in old_style and size.get((tk["symbol"], tk["side"]), 0) > 0:
+                    try:
+                        new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, tk[kind], tk["amount"])
+                        cancel_plan(c, tk["symbol"], oid)
+                        tk[f"{kind}_id"] = new_id
+                        open_ids = (open_ids - {oid}) | {new_id}
+                        tks.save()
+                        log.info("Einzel-Position #%s: %s auf Teil-Auftrag umgestellt", tk["id"], kind.upper())
+                    except Exception as e:  # noqa: BLE001 - alter Auftrag bleibt dann bestehen
+                        log.warning("Einzel-Position #%s %s umstellen: %s", tk["id"], kind.upper(), e)
         need: dict = {}
         for tk in tks.open():
             k = (tk["symbol"], tk["side"])
