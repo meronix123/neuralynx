@@ -464,11 +464,11 @@ class Account:
         return msg + (f" (Hinweis: {'; '.join(err)})" if err else "")
 
     @staticmethod
-    def _close_side(c, side: str) -> str:
-        """close_position: One-Way erwartet 'buy'/'sell', Hedge 'long'/'short'."""
+    def _close_side(c, side: str) -> str | None:
+        """close_position: Hedge 'long'/'short'; One-Way OHNE holdSide (sonst Bitget-Fehler 40017)."""
         if is_hedged(c):
             return side
-        return "buy" if side == "long" else "sell"
+        return None
 
     def close_ticket(self, ticket_id: int) -> str:
         with self.trade_lock:

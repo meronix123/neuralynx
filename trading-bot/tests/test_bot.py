@@ -992,7 +992,7 @@ def test_account_view_and_actions(tmp_path, monkeypatch):
     o = c.calls[-1]
     assert o[1:5] == ("BTC/USDT:USDT", "market", "sell", 0.002) and o[6]["stopLoss"]["triggerPrice"] == 62000
     acc.close("BTC/USDT:USDT")
-    assert ("close_position", "BTC/USDT:USDT", "buy") in c.calls
+    assert ("close_position", "BTC/USDT:USDT", None) in c.calls   # One-Way: ohne holdSide
     assert acc.close_all() == "Keine offene Position"
     acc.disconnect(forget=True)
     text = env.read_text()
@@ -1675,6 +1675,8 @@ def test_position_mode_auto_retry_on_40774():
 
         def close_position(self, symbol, side=None, params=None):
             self.sent.append(("close", side))
+            if not self.mode_hedge and side is not None:   # echtes Bitget: One-Way ohne holdSide
+                raise RuntimeError('bitget {"code":"40017","msg":"Parameter verification failed holdSide"}')
             self._check(side in ("long", "short"))
             return {"id": "2"}
 
@@ -1699,6 +1701,11 @@ def test_position_mode_auto_retry_on_40774():
     c.mode_hedge = False                                      # Konto auf One-Way umgestellt
     c.create_order("ETH/USDT:USDT", "market", "buy", 1, None, {})
     assert c.sent[-1] == ("order", False) and not is_hedged(c)
+    c.close_position("ETH/USDT:USDT", "long")                 # One-Way: Schliessen ohne holdSide (kein 40017)
+    assert c.sent[-1] == ("close", None)
+    c._bot_hedged = True                                      # falsch erkannt -> 40017 -> ohne holdSide wiederholt
+    c.close_position("ETH/USDT:USDT", "long")
+    assert c.sent[-2:] == [("close", "long"), ("close", None)]
 
 
 def test_quick_order_too_small_message_for_btc(tmp_path, monkeypatch):

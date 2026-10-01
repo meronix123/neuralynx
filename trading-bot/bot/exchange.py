@@ -28,6 +28,11 @@ def make_client(api: dict | None = None, demo: bool = False) -> ccxt.bitget:
 MODE_ERR = "40774"   # Bitget: Order passt nicht zum Positionsmodus (One-Way / Hedge)
 
 
+def _hold_err(e: Exception) -> bool:
+    """Bitget 40017 'Parameter verification failed holdSide': holdSide in falscher Schreibweise."""
+    return "40017" in str(e) and "holdSide" in str(e)
+
+
 def _flip_mode(client) -> None:
     client._bot_hedged = not is_hedged(client)
     log.warning("Bitget meldet anderen Positionsmodus - nutze jetzt %s", "Hedge" if client._bot_hedged else "One-Way")
@@ -51,27 +56,41 @@ def mode_safe(client) -> None:
                 _flip_mode(client)
 
     def close_position(symbol, side=None, params=None):
-        pos_side = {"buy": "long", "sell": "short"}.get(side, side)   # beide Schreibweisen annehmen
-        for attempt in (0, 1):
-            s = pos_side if is_hedged(client) else ("buy" if pos_side == "long" else "sell")
+        # One-Way: Bitget will KEIN holdSide (je Markt gibt es nur eine Position) - sonst Fehler 40017.
+        # Hedge: 'long'/'short'. Meldet Bitget den falschen Modus/Parameter, einmal anders wiederholen.
+        pos_side = {"buy": "long", "sell": "short"}.get(side, side)
+        flipped = False
+        while True:
+            s = pos_side if is_hedged(client) else None
             try:
                 return raw_close(symbol, s, params or {})
             except Exception as e:  # noqa: BLE001
-                if MODE_ERR not in str(e) or attempt:
+                if MODE_ERR in str(e) and not flipped and pos_side:
+                    _flip_mode(client)
+                    flipped = True
+                    continue
+                if not _hold_err(e) or not pos_side:
                     raise
-                _flip_mode(client)
+                return raw_close(symbol, None if s else pos_side, params or {})
 
     def with_hold(raw):
         def call(req, *a, **k):
             pos_side = {"buy": "long", "sell": "short"}.get(req.get("holdSide"), req.get("holdSide"))
-            for attempt in (0, 1):
-                h = pos_side if is_hedged(client) else ("buy" if pos_side == "long" else "sell")
+            alt = {"long": "buy", "short": "sell"}.get(pos_side)
+            flipped = False
+            while True:
+                h = pos_side if is_hedged(client) else alt
                 try:
                     return raw({**req, "holdSide": h}, *a, **k)
                 except Exception as e:  # noqa: BLE001
-                    if MODE_ERR not in str(e) or attempt:
+                    if MODE_ERR in str(e) and not flipped:
+                        _flip_mode(client)
+                        flipped = True
+                        continue
+                    if not _hold_err(e):
                         raise
-                    _flip_mode(client)
+                    # Bitget lehnt die holdSide-Schreibweise ab (40017): einmal die andere versuchen
+                    return raw({**req, "holdSide": alt if h == pos_side else pos_side}, *a, **k)
         return call
 
     client.create_order, client.close_position = create_order, close_position
