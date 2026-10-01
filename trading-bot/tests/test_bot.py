@@ -1314,3 +1314,27 @@ def test_demo_mode_against_fake_bitget(tmp_path, monkeypatch):
     assert any(o[0] == "limit" and o[4].get("reduceOnly") for o in fake.log)    # TP als Limit-Order
     assert sum(t["pnl"] for t in hist) == pytest.approx(fake.cash - 35.0, abs=1e-6) or fake.pos
     assert not [p for p in problems if "Fehler" in p or "Traceback" in p], problems[:5]
+
+
+def test_live_macro_score_loads(tmp_path, monkeypatch):
+    """Makro-Ampel live: Tabelle wird geladen und der aktuelle Wert gelesen (Fehler vom 01.10. abgesichert)."""
+    import time as _time
+
+    import pandas as pd
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    from bot.exchange import PaperExchange
+
+    now_ms = int(_time.time() * 1000)
+    scores = pd.DataFrame({"crypto": [0.5, -0.6], "gold": [0.2, 0.4], "avail": [now_ms - 3 * 86_400_000, now_ms - 1000]})
+    calls = []
+    monkeypatch.setattr(engine, "fetch_macro", lambda days: calls.append(days) or scores)
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["strategy"]["macro_filter"] = True
+    bot = engine.Bot(cfg, PaperExchange(cfg, FakeClient(synthetic(500, 1))), FakeContext())
+    assert bot._macro_score("BTC/USDT:USDT") == -0.6
+    assert bot._macro_score("XAU/USDT:USDT") == 0.4
+    assert len(calls) == 1                                  # 6 Stunden zwischengespeichert
+    monkeypatch.setattr(engine, "fetch_macro", lambda days: None)   # Quelle faellt aus -> alter Wert bleibt
+    bot._macro_cache = (0, scores)
+    assert bot._macro_score("BTC/USDT:USDT") == -0.6

@@ -344,7 +344,9 @@ class Bot:
         at, scores = self.__dict__.get("_macro_cache", (0, None))
         if time.time() - at > 6 * 3600:
             try:
-                scores = fetch_macro(400) or scores
+                new = fetch_macro(400)
+                if new is not None and len(new):
+                    scores = new
             except Exception as e:  # noqa: BLE001
                 log.warning("Makro-Daten: %s", e)
             # ohne Daten in 30 Minuten erneut versuchen statt erst in 6 Stunden
