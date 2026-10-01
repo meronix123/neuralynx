@@ -56,6 +56,10 @@ def explain_error(e: Exception) -> str:
         return ("Bitget hat die Anfrage blockiert (Cloudflare 403). Haeufigste Ursache: falsche Eingabe - "
                 "die Passphrase ist das selbst vergebene API-Passwort, nicht die Berechtigungen. "
                 "Sonst: VPN aus, kurz warten, erneut versuchen.")
+    if "40014" in msg:
+        return ("Dem API-Schluessel fehlen Futures-Rechte. Bei Bitget unter API-Verwaltung -> Schluessel bearbeiten: "
+                "Futures 'Positionen' (Holdings) UND 'Orders' auf Lesen + Bearbeiten stellen. "
+                "Auszahlen/Ueberweisen/Unterkonten bitte AUS lassen.")
     if "40037" in msg or "apikey" in msg.lower() and "not exist" in msg.lower():
         return "API-Key unbekannt - bitte genau kopieren (bei Demo-Schluesseln 'Testkonto' waehlen)."
     if "40012" in msg or "passphrase" in msg.lower():

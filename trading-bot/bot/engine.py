@@ -17,8 +17,8 @@ from .orderblocks import ob_blocks, zones_for_chart
 from .ml import features, train_from_examples
 from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
-from .strategy import (MTF_EMAS, MTF_ORDER, STRATEGY_NAMES, TF_MS, compute_signals, higher_tfs,
-                       last_closed_signal, snapshot, tf_direction, trail_stop)
+from .strategy import (MTF_EMAS, MTF_ORDER, REGIMES, STRATEGY_NAMES, TF_MS, compute_signals, higher_tfs,
+                       last_closed_signal, plan_text, snapshot, tf_direction, trail_stop)
 from .tfselect import active_tfs, adaptive, multi, profit_factor, recent, shadow_results, tf_allowed, tf_cfg
 
 log = logging.getLogger("bot")
@@ -44,8 +44,8 @@ def save_state(state: dict, mode: str = "paper") -> None:
     state_file(mode).write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def _series(df, col):
-    return [None if v != v else round(float(v), 8) for v in df[col].tail(CHART_BARS)]
+def _series(df, col, n: int = CHART_BARS):
+    return [None if v != v else round(float(v), 8) for v in df[col].tail(n)]
 
 
 class Bot:
@@ -81,6 +81,8 @@ class Bot:
         self._sig_cache: dict = {}
         self.manual_close: list[str] = []      # Schliessen-Knopf in der Oberflaeche
         self.last_error: dict | None = None
+        self.thoughts: list[dict] = []        # Gedanken-Protokoll fuer die Oberflaeche
+        self._last_seen: dict = {}            # zuletzt gemeldeter Zustand (nur Aenderungen melden)
         self.model = None
         self._model_trained_on = -1
         self._train_model()
@@ -137,6 +139,16 @@ class Bot:
             save_state(self.state, self.cfg["mode"])
             time.sleep(self.cfg["loop_seconds"])
 
+    def think(self, sym: str, text: str, kind: str = "info") -> None:
+        """Gedanken-Protokoll: was der Bot gerade beobachtet, entscheidet, tut."""
+        self.thoughts.append({"ms": int(time.time() * 1000), "sym": sym, "text": text, "kind": kind})
+        del self.thoughts[:-250]
+
+    def _changed(self, key: str, value) -> bool:
+        old = self._last_seen.get(key)
+        self._last_seen[key] = value
+        return old is not None and old != value
+
     def _set_error(self, msg: str) -> None:
         self.last_error = {"at": datetime.now(timezone.utc).isoformat(), "msg": msg[:300]}
         self.status["last_error"] = self.last_error
@@ -190,6 +202,19 @@ class Bot:
         self._train_model()
 
         block, risk_factor = self._global_block(equity, now)
+        if self._changed("block", block):
+            self.think("-", f"Neue Trades gesperrt: {block}" if block else "Sperre aufgehoben - neue Trades wieder erlaubt",
+                       "warn" if block else "info")
+        for tf, st in self.tf_stats.items():
+            if self._changed(f"gate|{tf}", st.get("ok")):
+                self.think("-", f"Zeiteinheit {tf} " + ("wieder FREI" if st.get("ok") else "GESPERRT")
+                           + f" (Schatten-Profit-Faktor {st.get('pf')})", "info" if st.get("ok") else "warn")
+        for sym, v in views.items():
+            for tf, tv in (v.get("tfs") or {self.cfg["timeframe"]: v}).items():
+                if TF_MS[tf] >= TF_MS["30m"] and len(tv["sig_df"]) > 2:
+                    reg = str(tv["sig_df"]["regime"].iloc[-2])
+                    if self._changed(f"reg|{sym}|{tf}", reg):
+                        self.think(sym, f"{tf}: Marktlage jetzt {REGIMES.get(reg, reg)}")
         reasons = {}
         for sym in self.ex.symbols:
             if sym not in views:
@@ -279,6 +304,7 @@ class Bot:
                     pnl = self.ex.closed_pnl(sym, o.get("placed_ms", o["expires_ms"] - 86_400_000))
                     if pnl is None:
                         log.info("%s Limit-Order nicht ausgefuehrt - storniert", sym)
+                        self.think(sym, f"Limit-Order @ {o['price']:.6g} nicht ausgefuehrt (Kurs kam nicht zurueck) - storniert")
                     else:
                         log.info("%s Limit-Order ausgefuehrt und sofort wieder geschlossen: %+.2f USDT", sym, pnl)
                         self.guard.on_open()
@@ -331,6 +357,7 @@ class Bot:
         }
         if self.limit_tp:
             self._place_tp(sym, side, amount, self.state["meta"][sym])
+        self.think(sym, f"Position eroeffnet: {side.upper()} {amount:g} @ {entry:.6g}, Stop {sl:.6g}, Ziel {tp:.6g}", "trade")
         strat = STRATEGY_NAMES.get(info.get("strategy", ""), info.get("strategy", ""))
         self.notify.send(
             f"NEU {sym} {side.upper()} {amount:g} @ {entry:.6g} | SL {sl:.6g} | TP {tp:.6g} "
@@ -516,6 +543,8 @@ class Bot:
     def _add_history(self, sym: str, m: dict, price: float, pnl: float, now: datetime) -> None:
         """Abgeschlossenen Trade verbuchen (Risiko-Zaehler, Historie, Nachricht)."""
         self.guard.on_close(pnl, now)
+        self.think(sym, f"Position geschlossen: {pnl:+.2f} USDT ({'Gewinn' if pnl >= 0 else 'Verlust'})",
+                   "win" if pnl >= 0 else "loss")
         self.state["history"].append({
             "symbol": sym, "side": m["side"], "entry": m["entry"], "exit": price,
             "amount": m["amount"], "sl": m["sl_init"], "tp": m["tp"], "pnl": pnl,
@@ -551,6 +580,7 @@ class Bot:
         try:
             self.ex.set_stop(sym, p["side"], new_sl, self._exchange_tp(m))
             log.info("%s Stop nachgezogen: %.6g -> %.6g", sym, m["sl"], new_sl)
+            self.think(sym, f"Stop nachgezogen {m['sl']:.6g} -> {new_sl:.6g} (Gewinn sichern)")
             m["sl"] = new_sl
         except Exception as e:  # noqa: BLE001
             log.warning("%s Stop nachziehen fehlgeschlagen: %s", sym, e)
@@ -566,6 +596,7 @@ class Bot:
         self._cancel_tp(sym, m)
         self.ex.close(sym, p["side"], p["amount"])
         self.notify.send(f"ZEIT-STOP {sym}: nach {bars} Bars ohne Fortschritt geschlossen ({progress:+.2f}R)")
+        self.think(sym, f"Zeit-Stop: nach {bars} Bars kaum Fortschritt ({progress:+.2f}R) - Position geschlossen")
         return True
 
     def _partial_take_profit(self, sym: str, p: dict, m: dict, price: float) -> bool:
@@ -627,6 +658,8 @@ class Bot:
             seen.add(key)
         traded = why.startswith(("Position eroeffnet", "Limit-Order"))
         log.info("SIGNAL %s %s %s (%s) -> %s", sym, tf, side.upper(), STRATEGY_NAMES.get(strategy, strategy), why)
+        self.think(sym, f"{tf}: Signal {side.upper()} ({STRATEGY_NAMES.get(strategy, strategy)}) -> "
+                        + ("gehandelt: " if traded else "nicht gehandelt: ") + why, "trade" if traded else "skip")
         lst = self.state.setdefault("signal_log", [])
         lst.append({"ms": int(time.time() * 1000), "symbol": sym, "tf": tf, "side": side,
                     "strategy": strategy, "why": why, "traded": traded})
@@ -818,6 +851,30 @@ class Bot:
             })
         return rows
 
+    CHART_TFS = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
+
+    def chart_data(self, sym: str, tf: str, bars: int = 300) -> dict:
+        """Chart fuer die Oberflaeche in beliebiger Zeiteinheit: Kerzen, EMAs, VWAP, Order Blocks."""
+        from .indicators import atr, ema, vwap_daily
+        if sym not in self.ex.symbols or tf not in self.CHART_TFS:
+            raise ValueError("Markt oder Zeiteinheit unbekannt")
+        df = self._candles(sym, tf, 1000).tail(1000).reset_index(drop=True)
+        df["ema_f"] = ema(df["close"], self.s["ema_fast"])
+        df["ema_s"] = ema(df["close"], self.s["ema_slow"])
+        df["vwap"] = vwap_daily(df) if TF_MS[tf] < TF_MS["1d"] else np.nan
+        df["atr"] = atr(df, self.s["atr_period"])
+        zones = zones_for_chart(df, self.s, max_each=6)
+        tail = df.tail(bars)
+        return {
+            "symbol": sym, "tf": tf, "tf_seconds": TF_MS[tf] // 1000,
+            "candles": [{"time": int(r.ts // 1000), "open": r.open, "high": r.high, "low": r.low, "close": r.close}
+                        for r in tail.itertuples()],
+            "ema_fast": _series(tail, "ema_f", bars), "ema_slow": _series(tail, "ema_s", bars),
+            "vwap": _series(tail, "vwap", bars),
+            "order_blocks": zones, "walls": self._walls(sym),
+            "price": float(df["close"].iloc[-1]),
+        }
+
     def _update_status(self, now, equity, positions, views, reasons, block) -> None:
         market = {sym: self._market(sym) for sym in views}
         pos_rows = self._position_rows(positions, market, now)
@@ -848,6 +905,7 @@ class Bot:
             "leverage": self.cfg["leverage"],
             "timeframe": self.cfg["timeframe"],
             "tf_select": self.cfg.get("tf_select", "fixed") if self.multi else "fixed",
+            "entry_tfs": self.tfs,
             "tf_stats": self.tf_stats,
             "tf_seconds": TF_MS[self.cfg["timeframe"]] // 1000,
             "updated": now.isoformat(),
@@ -873,4 +931,50 @@ class Bot:
             "pending_orders": [{"symbol": k, **{f: o.get(f) for f in ("side", "price", "amount", "sl", "tp", "expires_ms")},
                                 "tf": (o.get("info") or {}).get("tf")} for k, o in self.state["pending"].items()],
             "history": self.state["history"][-50:],
+            "brain": self._brain(views, positions, block),
+        }
+
+    def _brain(self, views: dict, positions: dict, block: str) -> dict:
+        """Alles fuer das Fenster 'Bot-Gehirn': Plan je Markt und Zeiteinheit, Filter, Gedanken."""
+        markets = {}
+        for sym, v in views.items():
+            cells = {}
+            for tf, tv in (v.get("tfs") or {self.cfg["timeframe"]: v}).items():
+                try:
+                    df = tv["sig_df"]
+                    row = df.iloc[-2]
+                    c = self.tf_conf.get(tf, {"trend_timeframe": self.cfg["trend_timeframe"], "strategy": self.s})
+                    p = plan_text(row, c["strategy"], tf, c["trend_timeframe"])
+                    st = self.tf_stats.get(tf, {})
+                    if self.multi and not st.get("ok", True):
+                        p = {**p, "state": "blocked", "text": f"GESPERRT (laeuft schlecht, Schatten-PF {st.get('pf')}) - "
+                                                              + p["text"]}
+                    p["mtf"] = round(float(row["mtf_score"]), 2) if "mtf_score" in row else None
+                    p["rsi"] = round(float(row["rsi"]), 0)
+                    p["regime"] = REGIMES.get(str(row["regime"]), str(row["regime"]))
+                    cells[tf] = p
+                except Exception as e:  # noqa: BLE001
+                    cells[tf] = {"icon": "?", "state": "wait", "text": f"keine Daten ({e})"}
+            snap = v["snapshot"]
+            markets[sym] = {"cells": cells, "position": sym in positions, "pending": sym in self.state["pending"],
+                            "macro": snap.get("macro"), "mtf_score": snap.get("mtf_score")}
+        g = self.guard.s
+        leader = next((k for k in views if is_leader(k)), None)
+        return {
+            "markets": markets, "tfs": self.tfs, "block": block,
+            "risk": {"trades_today": g["trades_today"], "max_trades": self.r["max_trades_per_day"],
+                     "consec_losses": g["consec_losses"], "max_consec": self.r["max_consecutive_losses"],
+                     "paused_until": g["pause_until"] if g["pause_until"] > time.time() else None,
+                     "day_start": g["day_start_equity"], "daily_limit_pct": self.r["daily_loss_limit_pct"],
+                     "positions": len(positions), "max_positions": self.r["max_open_positions"]},
+            "filters": {
+                "leader_regime": REGIMES.get(str(views[leader]["sig_df"]["regime"].iloc[-2]), "") if leader else None,
+                "fear_greed": self.ctx.fng, "calendar_ok": self.ctx.cal_ok,
+                "macro_on": bool(self.s.get("macro_filter")), "funding_on": bool(self.s.get("funding_filter")),
+                "mtf_on": bool(self.s.get("mtf_filter")), "ob": self.s.get("ob_filter", "off"),
+                "leader_on": bool(self.s.get("leader_filter")),
+                "strategies": self.s.get("strategies", []), "tf_select": self.cfg.get("tf_select", "fixed"),
+                "tf_min_pf": self.s.get("tf_min_pf", 1.0),
+            },
+            "thoughts": self.thoughts[-120:],
         }

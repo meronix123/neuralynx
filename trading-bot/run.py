@@ -4,6 +4,7 @@
     python run.py optimize --fast      # Schnell-Modus: 5m/15m/30m-Einstiege (120 Tage)
     python run.py optimize --zeiten    # feste Zeiteinheit gegen automatische Wahl (365 Tage)
     python run.py optimize --orderblocks  # Order-Block-Filter testen (365 Tage)
+    python run.py optimize --alle-zeiten  # Auto-Wahl mit 5 Minuten bis 1 Tag testen (180 Tage)
     python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
     python run.py signale              # welche Signale es gab und warum (nicht) gehandelt wurde
     python run.py fernzugriff          # Oberflaeche auch vom Handy (mit Passwort) / "fernzugriff aus"
@@ -144,6 +145,7 @@ def main() -> None:
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
     ap.add_argument("--zeiten", action="store_true", help="feste Zeiteinheit gegen automatische Wahl")
     ap.add_argument("--orderblocks", action="store_true", help="Order-Block-Filter testen")
+    ap.add_argument("--alle-zeiten", dest="alle_zeiten", action="store_true", help="5m bis 1d testen")
     args = ap.parse_args()
     cfg = load_config()
     setup_logging()
@@ -154,6 +156,10 @@ def main() -> None:
         return
     if args.command == "optimize":
         from bot.optimize import compare_cli, optimize_cli, orderblocks_cli
+        if args.alle_zeiten:
+            from bot.optimize import all_timeframes_cli
+            all_timeframes_cli(cfg, args.days or 180)
+            return
         if args.orderblocks:
             orderblocks_cli(cfg, args.days or 365)
             return

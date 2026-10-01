@@ -33,6 +33,8 @@ TF_MS = {
     "1h": 3_600_000,
     "2h": 7_200_000,
     "4h": 14_400_000,
+    "6h": 21_600_000,
+    "12h": 43_200_000,
     "1d": 86_400_000,
     "1w": 604_800_000,
 }
@@ -286,6 +288,45 @@ def last_closed_signal(sig_df: pd.DataFrame, s: dict, funding: float | None = No
     sl, tp = levels_from(side, price, float(row["sl_dist"]), float(row["tp_dist"]))
     return Signal(side, price, float(row["atr"]), sl, tp, int(row["ts"]), int(row["score"]),
                   str(row["strategy"]), str(row["regime"]))
+
+
+def plan_text(row, s: dict, tf: str, trend_tf: str) -> dict:
+    """Was der Bot auf dieser Zeiteinheit gerade sieht und worauf er wartet (fuer die Oberflaeche)."""
+    regime = str(row["regime"])
+    enabled = set(s.get("strategies", ["trend", "range", "breakout"]))
+    trend = int(row["trend"]) if row["trend"] == row["trend"] else 0
+    close, rsi_v = float(row["close"]), float(row["rsi"])
+    min_atr = (s.get("atr_limits") or {}).get(tf, (s["min_atr_pct"], s["max_atr_pct"]))[0]
+    ema_f = float(row["ema_f"])
+    if regime == "chaos":
+        return {"icon": "!", "state": "pause", "text": "Markt zu wild - keine neuen Trades"}
+    if float(row["atr_pct"]) < min_atr:
+        return {"icon": "~", "state": "wait", "text": f"zu ruhig (Schwankung {row['atr_pct']:.2f} % < {min_atr} %) - Gebuehren waeren zu hoch"}
+    if regime == "squeeze":
+        if "breakout" not in enabled:
+            return {"icon": "=", "state": "off", "text": "Ruhephase - Ausbruch-Strategie ist aus, wartet"}
+        hi, lo = row.get("don_hi"), row.get("don_lo")
+        return {"icon": "=", "state": "watch",
+                "text": f"Ruhephase - wartet auf Ausbruch ueber {hi:.6g} oder unter {lo:.6g} mit viel Volumen"}
+    if regime == "range":
+        if "range" not in enabled:
+            return {"icon": "=", "state": "off", "text": "Seitwaerts - diese Strategie ist aus, wartet auf Trend"}
+        return {"icon": "=", "state": "watch", "text": "Seitwaerts - kauft am unteren, verkauft am oberen Bollinger-Band"}
+    if trend == 0:
+        return {"icon": "?", "state": "wait", "text": f"kein klarer Trend auf {trend_tf} - wartet"}
+    if "trend" not in enabled:
+        return {"icon": "-", "state": "off", "text": "Trend-Strategie ist aus"}
+    up = trend == 1
+    side = "LONG" if up else "SHORT"
+    trig = s["rsi_long_trigger"] if up else s["rsi_short_trigger"]
+    dist = (close - ema_f) / close * 100
+    if up:
+        how = (f"wartet auf Ruecksetzer und Ausloeser: RSI ueber {trig} (jetzt {rsi_v:.0f}), MACD dreht hoch "
+               f"oder Kurs schliesst wieder ueber EMA21 ({ema_f:.6g}, {dist:+.2f} %)")
+    else:
+        how = (f"wartet auf Gegenbewegung und Ausloeser: RSI unter {trig} (jetzt {rsi_v:.0f}), MACD dreht runter "
+               f"oder Kurs schliesst wieder unter EMA21 ({ema_f:.6g}, {dist:+.2f} %)")
+    return {"icon": "^" if up else "v", "state": "watch", "text": f"{'Aufwaerts' if up else 'Abwaerts'}trend ({trend_tf}) - sucht {side}: {how}"}
 
 
 def snapshot(sig_df: pd.DataFrame, s: dict) -> dict:

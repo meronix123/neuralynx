@@ -27,9 +27,10 @@ trend_timeframe: 4h    # Trendfilter
 #              Schatten-Konto und handelt nur auf denen, die gerade funktionieren (mehr Trades)
 #   all      = alle Zeiteinheiten handeln, ohne Auswahl
 #   fixed    = nur "timeframe" oben
-# Je Markt immer nur EINE Position. Trend-Zeiteinheit: 15m->1h, 30m/1h->4h, 2h/4h->1 Tag.
+# Je Markt immer nur EINE Position. Trend-Zeiteinheit: 5m/15m->1h, 30m/1h->4h, 2h-6h->1 Tag, 12h/1d->1 Woche.
+# Die RICHTUNG wird zusaetzlich immer auf allen Ebenen von 1 Minute bis 1 Woche geprueft.
 tf_select: adaptive
-timeframes: [15m, 30m, 1h, 2h, 4h]
+timeframes: [15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d]   # 5m nur nach Test: python run.py optimize --alle-zeiten
 leverage: 10
 margin_mode: isolated  # isolated = maximaler Verlust pro Position begrenzt
 
@@ -112,6 +113,9 @@ strategy:
     1h: [0.2, 2.0]
     2h: [0.25, 2.5]
     4h: [0.3, 3.0]
+    6h: [0.35, 3.5]
+    12h: [0.45, 4.0]
+    1d: [0.6, 5.0]
   min_atr_pct: 0.3         # Rueckfall, falls die Zeiteinheit oben nicht steht
   max_atr_pct: 3.0
   volume_factor: 1.0       # Volumen muss >= Durchschnitt sein

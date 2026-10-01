@@ -45,6 +45,23 @@
   .bar { position:relative; height:6px; background:linear-gradient(90deg, #7f1d1d, #334155 45%, #334155 55%, #14532d); border-radius:3px; min-width:90px; }
   .bar i { position:absolute; top:-3px; width:3px; height:12px; background:#e6e8ee; border-radius:2px; }
   .wrap { overflow-x:auto; }
+  .tfbar { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
+  .tfbar button { background:#11141a; color:var(--dim); border:1px solid var(--line); border-radius:6px; padding:3px 8px; cursor:pointer; font:inherit; font-size:12px; }
+  .tfbar button.on { color:var(--text); border-color:var(--blue); background:#1a2233; }
+  .tfbar button.entry { box-shadow: inset 0 -2px 0 #3b82f6; }
+  #obcanvas { position:absolute; left:0; top:0; pointer-events:none; z-index:3; }
+  .obrow { cursor:default; }
+  .flow { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap:8px; }
+  .flow .step { background:#11141a; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; }
+  .flow .step b { display:block; margin-bottom:4px; }
+  table.brain td { text-align:left; vertical-align:top; min-width:120px; font-size:12px; }
+  table.brain td.cell { border-left:3px solid #334155; }
+  table.brain td.watch { border-left-color:#3b82f6; } table.brain td.blocked { border-left-color:#ef4444; opacity:.75; }
+  table.brain td.pause { border-left-color:#f59e0b; } table.brain td.off, table.brain td.wait { opacity:.6; }
+  .feed { max-height:460px; overflow-y:auto; font-size:13px; }
+  .feed div { padding:3px 0; border-bottom:1px dashed var(--line); }
+  .feed .trade { color:var(--blue); } .feed .win { color:var(--green); } .feed .loss { color:var(--red); }
+  .feed .warn { color:var(--amber); } .feed .skip { color:var(--dim); }
   nav { display:flex; gap:6px; padding:10px 16px 0; }
   nav button, .btn { background:#1d2230; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; }
   nav button.on { border-color:var(--blue); background:#1a2233; }
@@ -68,8 +85,24 @@
 </head>
 <body>
 <header id="head">Lade ...</header>
-<nav><button id="tab-bot" class="on" onclick="tab('bot')">Bot</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button></nav>
+<nav><button id="tab-bot" class="on" onclick="tab('bot')">Bot</button><button id="tab-brain" onclick="tab('brain')">Bot-Gehirn</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button></nav>
 <div id="toast"></div>
+<main id="view-brain" hidden>
+  <section class="panel" style="grid-column:1/-1">
+    <h3>So geht der Bot vor</h3>
+    <div id="brain-flow" class="flow"></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
+    <h3>Was er gerade beobachtet (je Markt und Zeiteinheit, letzte abgeschlossene Kerze)</h3>
+    <div class="wrap"><table id="brain-grid" class="brain"></table></div>
+    <p class="note">Blau umrandet = Zeiteinheit, auf der er handelt. Zeigen auf eine Zelle zeigt den ganzen Gedanken.</p>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
+    <h3>Gedanken-Protokoll (live)</h3>
+    <div style="margin-bottom:6px"><label style="display:inline"><input type="checkbox" id="brain-all" onchange="renderBrain()"> auch Marktlage-Wechsel zeigen</label></div>
+    <div id="brain-feed" class="feed"></div>
+  </section>
+</main>
 <main id="view-acc" hidden>
   <section class="panel" style="grid-column:1/-1">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -125,7 +158,8 @@
   <section class="panel"><h3>Maerkte</h3><div id="list"></div></section>
   <section class="panel">
     <h3 id="title">Chart</h3>
-    <div id="chart"></div>
+    <div id="tfbar" class="tfbar"></div>
+    <div style="position:relative"><div id="chart"></div><canvas id="obcanvas"></canvas></div>
     <div class="legend">
       <span><i style="background:#f59e0b"></i>EMA 21</span>
       <span><i style="background:#a855f7"></i>EMA 50</span>
@@ -143,6 +177,8 @@
     <div id="think" class="think"></div>
     <h3>Zeitebenen</h3>
     <div id="mtf" class="mtf"></div>
+    <h3 id="obtitle">Order Blocks</h3>
+    <div id="oblist" style="margin-bottom:12px"></div>
     <h3>Indikatoren</h3>
     <div id="ind"></div>
     <h3 style="margin-top:12px">Wirtschaftstermine</h3>
@@ -187,6 +223,9 @@ async function act(path, body, ask) {
 function tab(v) {
   view = v;
   document.getElementById("view-bot").hidden = v !== "bot";
+  document.getElementById("view-brain").hidden = v !== "brain";
+  document.getElementById("tab-brain").classList.toggle("on", v === "brain");
+  if (v === "brain") renderBrain();
   document.getElementById("view-acc").hidden = v !== "acc";
   document.getElementById("tab-bot").classList.toggle("on", v === "bot");
   document.getElementById("tab-acc").classList.toggle("on", v === "acc");
@@ -220,6 +259,61 @@ function toggleShow(k) {
   try { localStorage.setItem("chart_show", JSON.stringify(show)); } catch (e) { /* egal */ }
   render();
 }
+const TFS = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w"];
+const TF_NAME = { "1d": "1T", "1w": "1W" };
+let chartTf = null, chartData = null, chartKey = "";
+try { chartTf = localStorage.getItem("chart_tf"); } catch (e) { /* ohne Speicher */ }
+function setTf(tf) {
+  chartTf = tf; chartData = null;
+  try { localStorage.setItem("chart_tf", tf); } catch (e) { /* egal */ }
+  render(); pollChart();
+}
+async function pollChart() {
+  if (!data || !selected || view !== "bot") return;
+  const tf = chartTf || data.timeframe, key = selected + "|" + tf;
+  try {
+    const r = await fetch(`/api/chart?symbol=${encodeURIComponent(selected)}&tf=${tf}`);
+    if (r.ok) { chartData = await r.json(); chartKey = key; render(); }
+  } catch (e) { /* naechster Versuch */ }
+}
+setInterval(pollChart, 10000);
+
+// Order Blocks als Kaesten: vom Ursprungs-Kerze bis jetzt, Ober- bis Unterkante
+const obCanvas = document.getElementById("obcanvas");
+let obZones = [];
+function drawBoxes() {
+  const el = document.getElementById("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const w = el.clientWidth, h = el.clientHeight;
+  obCanvas.width = w * dpr; obCanvas.height = h * dpr; obCanvas.style.width = w + "px"; obCanvas.style.height = h + "px";
+  const ctx = obCanvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  if (!show.ob) return;
+  const right = w - chart.priceScale("right").width();
+  const ts = chart.timeScale();
+  const vis = ts.getVisibleRange();
+  ctx.font = "11px system-ui, sans-serif";
+  for (const z of obZones) {
+    const y1 = candles.priceToCoordinate(z.top), y2 = candles.priceToCoordinate(z.bottom);
+    if (y1 == null || y2 == null) continue;
+    let x1 = ts.timeToCoordinate(z.time);
+    if (x1 == null) x1 = vis && z.time < vis.from ? 0 : null;
+    if (x1 == null || x1 > right) continue;
+    const bull = z.kind === "bull";
+    ctx.fillStyle = bull ? "rgba(34,197,94,0.14)" : "rgba(239,68,68,0.14)";
+    ctx.strokeStyle = bull ? "rgba(34,197,94,0.7)" : "rgba(239,68,68,0.7)";
+    const top = Math.min(y1, y2), hh = Math.max(2, Math.abs(y2 - y1));
+    ctx.fillRect(x1, top, right - x1, hh);
+    ctx.strokeRect(x1 + 0.5, top + 0.5, right - x1 - 1, hh - 1);
+    ctx.fillStyle = bull ? "#22c55e" : "#ef4444";
+    ctx.fillText((bull ? "OB Kauf" : "OB Verkauf") + (z.touches ? ` (${z.touches}x getestet)` : ""), x1 + 4, top + 11);
+  }
+}
+chart.timeScale().subscribeVisibleTimeRangeChange(() => drawBoxes());
+chart.subscribeCrosshairMove(() => drawBoxes());
+new ResizeObserver(() => setTimeout(drawBoxes, 0)).observe(document.getElementById("chart"));
+setInterval(drawBoxes, 1000);
+
 function line(price, color, title, dashed) {
   lines.push(candles.createPriceLine({ price, color, title, lineWidth: 2, lineStyle: dashed ? 2 : 0, axisLabelVisible: true }));
 }
@@ -254,6 +348,40 @@ function renderPositions() {
     `<tr><td colspan="19" class="sub">Keine offene Position - der Bot wartet auf ein passendes Signal.</td></tr>`);
 }
 
+function renderBrain() {
+  if (!data || !data.brain || view !== "brain") return;
+  const b = data.brain, r = b.risk, f = b.filters;
+  const onoff = x => x ? '<span class="up">an</span>' : '<span class="sub">aus</span>';
+  const OBM = { off: "aus", avoid: "Gegen-Zone vor dem Ziel meiden", confirm: "nur nach Antest", both: "beides" };
+  const steps = [
+    ["1. Marktlage erkennen", `Auf jeder Zeiteinheit: Trend, Seitwaerts, Ruhephase oder Chaos (ADX, Bollinger, ATR). Strategien an: ${(f.strategies || []).map(x => STRAT[x] || x).join(", ")}.`],
+    ["2. Zeiteinheit waehlen", f.tf_select === "adaptive" ? `Beobachtet ${b.tfs.join(", ")}. Handelt nur, wo die letzten Schatten-Trades Profit-Faktor >= ${f.tf_min_pf} haben.` : `Feste Zeiteinheit ${b.tfs.join(", ")}.`],
+    ["3. Signal pruefen", "Ausloeser (RSI/MACD/EMA21) + mind. 4 von 6 Punkten (Struktur, Momentum, Trendstaerke, Volumen, nicht ueberkauft, VWAP)."],
+    ["4. Filter", `Zeitebenen bis 1 Woche ${onoff(f.mtf_on)} &middot; BTC-Leitwaehrung ${onoff(f.leader_on)} (BTC: ${f.leader_regime || "-"}) &middot; Makro-Ampel ${onoff(f.macro_on)} &middot; Funding ${onoff(f.funding_on)} &middot; Order Blocks: ${OBM[f.ob] || f.ob} &middot; Orderbuch/Fluss &middot; Wirtschaftstermine ${f.calendar_ok ? "geladen" : "nicht verfuegbar"}`],
+    ["5. Risiko", `Trades heute ${r.trades_today}/${r.max_trades} &middot; Positionen ${r.positions}/${r.max_positions} &middot; Verluste in Folge ${r.consec_losses}/${r.max_consec}${r.paused_until ? ` &middot; <span class="warn">Pause bis ${time(r.paused_until * 1000)}</span>` : ""} &middot; Tagesverlust-Grenze ${r.daily_limit_pct} %` + (f.fear_greed ? ` &middot; Fear&Greed ${f.fear_greed.value}` : "")],
+    ["6. Einstieg & Schutz", "Limit-Order zum Signalkurs (Maker), Stop-Loss sofort auf der Boerse, Ziel als Limit-Order, Zeit-Stop nach 12 Kerzen ohne Fortschritt." + (b.block ? ` <span class="warn">Gerade gesperrt: ${b.block}</span>` : "")],
+  ];
+  document.getElementById("brain-flow").innerHTML = steps.map(([h, x]) => `<div class="step"><b>${h}</b>${x}</div>`).join("");
+  const tfs = b.tfs;
+  const syms = Object.keys(b.markets);
+  const ICON = { "^": '<b class="up">&uarr;</b>', "v": '<b class="down">&darr;</b>', "=": "&harr;", "!": '<b class="warn">!</b>', "~": "~", "?": "?", "-": "-" };
+  document.getElementById("brain-grid").innerHTML = `<tr><th>Markt</th>${tfs.map(t => `<th style="text-align:left">${TF_NAME[t] || t}</th>`).join("")}</tr>` +
+    syms.map(sym => {
+      const m = b.markets[sym];
+      const head = `<td><b>${sym.split(":")[0]}</b><div class="sub">${m.position ? '<span class="up">Position offen</span>' : m.pending ? "Order wartet" : "sucht"}${m.macro != null ? ` &middot; Makro ${fmt(m.macro)}` : ""}</div></td>`;
+      return `<tr>${head}${tfs.map(t => {
+        const c = m.cells[t] || { icon: "?", state: "wait", text: "-" };
+        const short = c.text.length > 90 ? c.text.slice(0, 88) + "..." : c.text;
+        return `<td class="cell ${c.state}" title="${c.text.replace(/"/g, "'")}">${ICON[c.icon] || c.icon} ${short}<div class="sub">RSI ${c.rsi ?? "-"}${c.mtf != null ? " &middot; Zeitebenen " + (c.mtf > 0 ? "+" : "") + fmt(c.mtf) : ""}</div></td>`;
+      }).join("")}</tr>`;
+    }).join("");
+  const all = document.getElementById("brain-all").checked;
+  const feed = (b.thoughts || []).filter(x => all || !/Marktlage jetzt/.test(x.text)).slice().reverse();
+  document.getElementById("brain-feed").innerHTML = feed.length ? feed.map(x =>
+    `<div class="${x.kind}"><span class="sub">${time(x.ms)}</span> <b>${x.sym === "-" ? "Bot" : x.sym.split(":")[0]}</b> ${x.text}</div>`).join("")
+    : `<div class="sub">Noch keine Gedanken seit dem Start - sie erscheinen bei Signalen, Entscheidungen und Aenderungen.</div>`;
+}
+
 function renderSignals() {
   const sl = (data.signal_log || []).slice().reverse();
   const sw = data.sleep_warning;
@@ -282,6 +410,19 @@ function renderMarket(syms) {
   }).join("");
 }
 
+function renderObList(src, tf) {
+  const price = src.price ?? ((data.symbols[selected].market || {}).last) ?? data.symbols[selected].snapshot.close;
+  const zs = (src.order_blocks || []).slice().sort((a, b) =>
+    Math.abs((a.top + a.bottom) / 2 - price) - Math.abs((b.top + b.bottom) / 2 - price));
+  document.getElementById("obtitle").textContent = `Order Blocks (${TF_NAME[tf] || tf})`;
+  document.getElementById("oblist").innerHTML = zs.length ? zs.map(z => {
+    const mid = (z.top + z.bottom) / 2, d = (mid - price) / price * 100;
+    const inside = price <= z.top && price >= z.bottom;
+    return `<div class="row obrow"><span class="${z.kind === "bull" ? "up" : "down"}">${z.kind === "bull" ? "Kauf-Zone" : "Verkaufs-Zone"}
+      <span class="sub">${z.touches ? z.touches + "x getestet" : "frisch"} &middot; ${time(z.from_ts)}</span></span>
+      <b>${px(z.bottom)} - ${px(z.top)} <span class="sub">${inside ? "Kurs drin" : (d > 0 ? "+" : "") + fmt(d) + " %"}</span></b></div>`;
+  }).join("") : `<div class="sub">Keine offenen Order Blocks auf dieser Zeiteinheit</div>`;
+}
 function obRows(s) {
   const price = (s.market || {}).last ?? s.snapshot.close;
   const zs = s.order_blocks || [], w = s.walls || {};
@@ -289,9 +430,8 @@ function obRows(s) {
   const zb = near("bull"), zr = near("bear");
   const zt = z => z ? `${px(z.bottom)} - ${px(z.top)} (${fmt(Math.abs((z.top + z.bottom) / 2 - price) / price * 100)} %)` : "-";
   const wt = a => a && a.length ? `${px(a[0].price)} (${big(a[0].usdt)} USDT, ${fmt(a[0].x_median, 1)}x)` : "-";
+  void zt; void zb; void zr;  // Order Blocks stehen jetzt in der eigenen Liste oben
   return [
-    ["Order Block Kauf (Unterstuetzung)", `<span class="up">${zt(zb)}</span>`],
-    ["Order Block Verkauf (Widerstand)", `<span class="down">${zt(zr)}</span>`],
     ["Groesste Kauf-Wand", `<span style="color:#38bdf8">${wt(w.bids)}</span>`],
     ["Groesste Verkaufs-Wand", `<span style="color:#fb923c">${wt(w.asks)}</span>`],
   ];
@@ -378,11 +518,23 @@ function render() {
   }).join("");
 
   const s = data.symbols[selected];
-  document.getElementById("title").textContent = `${selected} - ${data.timeframe}`;
-  const bars = s.candles.map(c => ({ ...c, time: c.time + TZ }));
+  const tf = chartTf || data.timeframe;
+  const entryTfs = data.entry_tfs || [data.timeframe];
+  document.getElementById("tfbar").innerHTML = TFS.map(t =>
+    `<button class="${t === tf ? "on" : ""} ${entryTfs.includes(t) ? "entry" : ""}" onclick="setTf('${t}')" title="${entryTfs.includes(t) ? "Bot handelt auf dieser Zeiteinheit" : "nur Ansicht"}">${TF_NAME[t] || t}</button>`).join("");
+  const cd = chartData && chartKey === selected + "|" + tf ? chartData : null;
+  if (!cd && tf !== data.timeframe) pollChart();
+  const src = cd || { candles: s.candles, ema_fast: s.ema_fast, ema_slow: s.ema_slow, vwap: s.vwap,
+                      order_blocks: s.order_blocks, walls: s.walls, tf_seconds: data.tf_seconds };
+  const tfSec = src.tf_seconds || data.tf_seconds;
+  document.getElementById("title").textContent = `${selected.split(":")[0]} - ${TF_NAME[tf] || tf}` + (cd || tf === data.timeframe ? "" : " (laedt ...)");
+  const bars = src.candles.map(c => ({ ...c, time: c.time + TZ }));
   candles.setData(bars);
   const series = arr => bars.map((c, i) => arr[i] == null ? null : { time: c.time, value: arr[i] }).filter(Boolean);
-  emaF.setData(series(s.ema_fast)); emaS.setData(series(s.ema_slow)); vwap.setData(series(s.vwap));
+  emaF.setData(series(src.ema_fast)); emaS.setData(series(src.ema_slow)); vwap.setData(series(src.vwap || []));
+  obZones = (src.order_blocks || []).map(z => ({ ...z, time: Math.round(z.from_ts / 1000) + TZ }));  // Zeit der Ursprungs-Kerze
+  renderObList(src, tf);
+  setTimeout(drawBoxes, 0);
 
   lines.forEach(l => candles.removePriceLine(l)); lines = [];
   document.getElementById("cb-ob").checked = show.ob; document.getElementById("cb-walls").checked = show.walls;
@@ -394,19 +546,15 @@ function render() {
   } else if (plan) {
     line(plan.sl, "#ef4444", "Plan SL", true); line(plan.tp, "#22c55e", "Plan TP", true);
   }
-  if (show.ob) for (const z of s.order_blocks || []) {
-    const col = z.kind === "bull" ? "rgba(34,197,94,0.55)" : "rgba(239,68,68,0.55)";
-    const name = z.kind === "bull" ? "OB Kauf" : "OB Verkauf";
-    zline(z.top, col, z.kind === "bull" ? name : "", 1); zline(z.bottom, col, z.kind === "bear" ? name : "", 1);
-  }
-  if (show.walls && s.walls) {
-    for (const w of (s.walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.9)", "Kauf-Wand " + big(w.usdt), 3, 2);
-    for (const w of (s.walls.asks || []).slice(0, 2)) zline(w.price, "rgba(251,146,60,0.9)", "Verk.-Wand " + big(w.usdt), 3, 2);
+  const walls = src.walls || s.walls;
+  if (show.walls && walls) {
+    for (const w of (walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.9)", "Kauf-Wand " + big(w.usdt), 3, 2);
+    for (const w of (walls.asks || []).slice(0, 2)) zline(w.price, "rgba(251,146,60,0.9)", "Verk.-Wand " + big(w.usdt), 3, 2);
   }
   const markers = data.history.filter(t => t.symbol === selected).flatMap(t => [
-    { time: Math.floor(t.opened_ms / 1000 / data.tf_seconds) * data.tf_seconds + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
+    { time: Math.floor(t.opened_ms / 1000 / tfSec) * tfSec + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
       color: "#3b82f6", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: t.side },
-    { time: Math.floor(t.closed_ms / 1000 / data.tf_seconds) * data.tf_seconds + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
+    { time: Math.floor(t.closed_ms / 1000 / tfSec) * tfSec + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
       shape: "circle", text: (t.pnl >= 0 ? "+" : "") + fmt(t.pnl) },
   ]).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
   candles.setMarkers(markers);
@@ -434,6 +582,7 @@ function render() {
   renderPositions();
   renderMarket(syms);
   renderSignals();
+  renderBrain();
 
   document.getElementById("events").innerHTML = (data.next_events.length ? data.next_events.map(e =>
     `<div class="row"><span>${e.country} ${e.title}</span><b>${time(e.time)}</b></div>`).join("")

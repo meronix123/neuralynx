@@ -1406,3 +1406,27 @@ def test_bitget_errors_are_explained(tmp_path):
                    env_path=tmp_path / ".env")
     acc2.connect(" bg_123 ", "d989a9be3382\ne0cd 024c\u200b", "MeinPass123")   # zweizeilig kopiertes Secret
     assert seen == {"key": "bg_123", "secret": "d989a9be3382e0cd024c", "password": "MeinPass123"}
+
+
+def test_chart_data_any_timeframe_and_brain(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["tf_select"], cfg["timeframes"] = "adaptive", ["5m", "15m"]
+    client = FakeClient(synthetic(1500, 2))
+    client.i = 1500
+    bot = engine.Bot(cfg, PaperExchange(cfg, client), FakeContext())
+    bot.step()
+    for tf in ("5m", "1h", "4h"):
+        cd = bot.chart_data("AAA/USDT:USDT", tf)
+        assert cd["tf"] == tf and len(cd["candles"]) > 5 and len(cd["ema_fast"]) == len(cd["candles"])
+        assert all(z["kind"] in ("bull", "bear") and z["top"] >= z["bottom"] for z in cd["order_blocks"])
+    with pytest.raises(ValueError):
+        bot.chart_data("AAA/USDT:USDT", "7m")
+    brain = bot.status["brain"]
+    assert set(brain["markets"]["AAA/USDT:USDT"]["cells"]) == {"5m", "15m"}
+    assert all(c["text"] for c in brain["markets"]["AAA/USDT:USDT"]["cells"].values())
+    assert "risk" in brain and "filters" in brain

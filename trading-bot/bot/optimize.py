@@ -13,6 +13,7 @@ import pandas as pd
 from .backtest import (DATA, fetch_history, load_funding, load_macro, prepare, prepare_multi, simulate, streams,
                        usable)
 from .exchange import make_client, resolve_symbols
+from .strategy import TF_MS
 from .tfselect import tf_cfg
 
 # Einstiegs-Zeiteinheit, Trend-Zeiteinheit, Trend-EMAs (schnell, langsam)
@@ -336,3 +337,77 @@ def orderblocks_cli(base: dict, days: int) -> None:
     print(res.sort_values("test_pf", ascending=False).to_string(index=False))
     print(f"\nAlle Ergebnisse: {out}")
     print("Hinweis: Die Orderbuch-Waende lassen sich nicht rueckwirkend testen (Bitget speichert kein altes Orderbuch).")
+
+
+# ---------------------------------------------------------------------------
+# Alle Zeiteinheiten: aktuelle Einstellungen, Auto-Wahl ueber verschieden viele Zeiteinheiten
+ALLE_MODES = {
+    "bisher_15m-4h": ["15m", "30m", "1h", "2h", "4h"],
+    "15m-1d": ["15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"],
+    "5m-4h": ["5m", "15m", "30m", "1h", "2h", "4h"],
+    "5m-1d_alle": ["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"],
+    "1h-1d_langsam": ["1h", "2h", "4h", "6h", "12h", "1d"],
+}
+
+
+def compare_all_timeframes(base: dict, data: dict, rules: dict, base_tf: str = "5m",
+                           funding: dict | None = None, macro: pd.DataFrame | None = None) -> pd.DataFrame:
+    all_ts = sorted(set().union(*[set(df["ts"]) for df in data.values()]))
+    split = all_ts[int(len(all_ts) * 2 / 3)]
+    cfg0 = copy.deepcopy(base)
+    cfg0["tf_select"] = "adaptive"
+    tfs = sorted({t for v in ALLE_MODES.values() for t in v}, key=lambda t: TF_MS[t])
+    cfg0["timeframes"] = tfs
+    preps = {}
+    for tf in tfs:
+        print(f"  Signale {tf} ...", flush=True)
+        preps[tf] = prepare(tf_cfg(cfg0, tf), data, base_tf, funding, macro)
+    rows = []
+    for name, sel in ALLE_MODES.items():
+        cfg = copy.deepcopy(cfg0)
+        cfg["timeframes"] = sel
+        prep = streams({tf: preps[tf] for tf in sel})
+        train = simulate(cfg, prep, rules, end_ts=split)
+        test = simulate(cfg, prep, rules, start_ts=split)
+        per = test.get("per_tf")
+        rows.append({
+            "zeiteinheiten": name,
+            "train_trades": train["trades"], "train_pf": round(train.get("profit_factor", 0), 2),
+            "train_rendite_%": round(train.get("return_pct", 0), 1),
+            "test_trades": test["trades"], "test_pf": round(test.get("profit_factor", 0), 2),
+            "test_rendite_%": round(test.get("return_pct", 0), 1),
+            "test_max_rueckgang_%": round(test.get("max_drawdown_pct", 0), 1),
+            "test_trades_pro_tag": round(test.get("trades_per_day", 0), 2),
+            "test_je_zeiteinheit": "; ".join(f"{k}: {int(r.trades)} Tr. PF {r.profit_faktor}"
+                                             for k, r in per.iterrows()) if per is not None else "",
+        })
+        print(f"  {name}: fertig", flush=True)
+    return pd.DataFrame(rows)
+
+
+def all_timeframes_cli(base: dict, days: int) -> None:
+    base_tf = "5m"
+    print(f"Test: Auto-Wahl ueber verschieden viele Zeiteinheiten (5 Minuten bis 1 Tag), {days} Tage.")
+    client = make_client()
+    symbols = resolve_symbols(client, base["symbols"])
+    data, rules = {}, {}
+    for sym in symbols:
+        print(f"Lade {days} Tage {sym} ({base_tf}) ...")
+        data[sym] = fetch_history(client, sym, base_tf, days)
+        m = client.market(sym)
+        rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
+    data = usable(data)
+    res = compare_all_timeframes(base, data, rules, base_tf, load_funding(client, list(data), days),
+                                 load_macro(days))
+    DATA.mkdir(exist_ok=True)
+    out = DATA / "alle_zeiteinheiten.csv"
+    res.to_csv(out, index=False, sep=";", decimal=",")
+    pd.set_option("display.width", 250)
+    pd.set_option("display.max_columns", 30)
+    show = [c for c in res.columns if c != "test_je_zeiteinheit"]
+    print("\n===== ERGEBNIS =====")
+    print(res[show].to_string(index=False))
+    print("\nIm TEST gehandelt je Zeiteinheit:")
+    for _, r in res.iterrows():
+        print(f"  {r['zeiteinheiten']:<15} -> {r['test_je_zeiteinheit']}")
+    print(f"\nAlle Ergebnisse: {out}")
