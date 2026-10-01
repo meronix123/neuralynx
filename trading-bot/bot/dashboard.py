@@ -141,6 +141,8 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
         return account.close_ticket(int(body["id"]))
     if path == "/api/account/tickets_close_all":
         return account.close_all_tickets()
+    if path == "/api/account/ticket_move":
+        return account.move_level(int(body["id"]), body.get("kind", ""), _num(body.get("price")))
     if path == "/api/account/ticket_be":
         return account.breakeven(int(body["id"]))
     if path == "/api/account/order":
@@ -229,7 +231,10 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
                     self._login_page()
                 return
             if self.path.startswith("/api/status"):
-                self._json(200, bot.status)
+                st = bot.status
+                if isinstance(st, dict) and hasattr(bot, "_modes_ready"):   # Schluessel gerade verbunden? sofort zeigen
+                    st = {**st, "modes_ready": bot._modes_ready(), "mode": bot.cfg.get("mode", st.get("mode"))}
+                self._json(200, st)
             elif self.path.startswith("/api/live"):
                 try:
                     self._json(200, {"prices": bot.live_prices(), "ms": int(time.time() * 1000)})

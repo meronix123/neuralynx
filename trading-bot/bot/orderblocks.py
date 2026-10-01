@@ -39,13 +39,15 @@ def detect(o, h, lo, c, atr, disp_atr: float = 1.5, look: int = 3):
                 if c[j] < o[j]:
                     if j not in used and c[i] - h[j] >= disp_atr * a:
                         used.add(j)
-                        bull.append({"kind": "bull", "top": h[j], "bottom": lo[j], "i": j, "confirm": i, "touches": 0})
+                        bull.append({"kind": "bull", "top": h[j], "bottom": lo[j], "i": j, "confirm": i, "touches": 0,
+                                     "strength": (c[i] - h[j]) / a})
                     break
             for j in range(i - 1, max(i - look, 0) - 1, -1):
                 if c[j] > o[j]:
                     if -j - 1 not in used and lo[j] - c[i] >= disp_atr * a:
                         used.add(-j - 1)
-                        bear.append({"kind": "bear", "top": h[j], "bottom": lo[j], "i": j, "confirm": i, "touches": 0})
+                        bear.append({"kind": "bear", "top": h[j], "bottom": lo[j], "i": j, "confirm": i, "touches": 0,
+                                     "strength": (lo[j] - c[i]) / a})
                     break
         # 2) gebrochene / alte Zonen entfernen, Antests zaehlen (nur Zonen, die vor diesem Bar bekannt waren)
         keep = []
@@ -87,14 +89,15 @@ def add_columns(d, s: dict):
     return d
 
 
-def zones_for_chart(d, s: dict, max_each: int = 4) -> list[dict]:
-    """Noch gueltige Zonen (nur abgeschlossene Bars), die dem Kurs am naechsten liegen."""
+def zones_for_chart(d, s: dict, max_each: int = 4, disp: float | None = None) -> list[dict]:
+    """Noch gueltige Zonen (nur abgeschlossene Bars), die dem Kurs am naechsten liegen.
+    disp: Mindest-Staerke fuer die Anzeige (Standard wie der Filter); 'strong' = so stark wie der Filter verlangt."""
     closed = d.iloc[:-1]
     if len(closed) < 20:
         return []
     *_, zones = detect(closed["open"].to_numpy(), closed["high"].to_numpy(), closed["low"].to_numpy(),
                        closed["close"].to_numpy(), closed["atr"].to_numpy(),
-                       s.get("ob_disp_atr", 1.5), s.get("ob_look", 3))
+                       disp if disp is not None else s.get("ob_disp_atr", 1.5), s.get("ob_look", 3))
     price = float(closed["close"].iloc[-1])
     ts = closed["ts"].to_numpy()
     out = []
@@ -102,7 +105,9 @@ def zones_for_chart(d, s: dict, max_each: int = 4) -> list[dict]:
         zs = sorted((z for z in zones if z["kind"] == kind), key=lambda z: abs((z["top"] + z["bottom"]) / 2 - price))
         for z in zs[:max_each]:
             out.append({"kind": kind, "top": float(z["top"]), "bottom": float(z["bottom"]),
-                        "from_ts": int(ts[z["i"]]), "touches": z["touches"]})
+                        "from_ts": int(ts[z["i"]]), "touches": z["touches"],
+                        "strength": round(float(z["strength"]), 2),
+                        "strong": bool(z["strength"] >= s.get("ob_disp_atr", 1.5))})
     return out
 
 

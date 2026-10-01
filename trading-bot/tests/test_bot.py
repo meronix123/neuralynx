@@ -888,8 +888,8 @@ class FakeBitget:
         return [p for p in self.pos if not symbols or p["symbol"] in symbols]
 
     def fetch_open_orders(self, sym, since=None, limit=None, params=None):
-        if (params or {}).get("planType") == "profit_loss" and sym == "BTC/USDT:USDT":
-            return [{"id": "77", "symbol": sym, "type": "market", "side": "sell", "triggerPrice": 59000,
+        if (params or {}).get("planType") == "profit_loss" and sym in (None, "BTC/USDT:USDT"):
+            return [{"id": "77", "symbol": "BTC/USDT:USDT", "type": "market", "side": "sell", "triggerPrice": 59000,
                      "amount": 0.004, "filled": 0, "reduceOnly": True, "timestamp": 1_790_000_000_000}]
         return []
 
@@ -1459,8 +1459,9 @@ def test_quick_orders_are_separate_positions(tmp_path, monkeypatch):
 
         def fetch_open_orders(self, sym, since=None, limit=None, params=None):
             if (params or {}).get("planType") == "profit_loss":
-                return [{"id": k, "symbol": sym, "triggerPrice": float(v["triggerPrice"]), "amount": float(v["size"])}
-                        for k, v in self.plans.items() if v["symbol"] == sym.split("/")[0] + "USDT"]
+                return [{"id": k, "symbol": v["symbol"][:-4] + "/USDT:USDT", "triggerPrice": float(v["triggerPrice"]),
+                         "amount": float(v["size"])}
+                        for k, v in self.plans.items() if sym is None or v["symbol"] == sym.split("/")[0] + "USDT"]
             return []
 
     fake = {}
@@ -1582,7 +1583,8 @@ def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
             self.orders_[oid]["status"] = "canceled"
 
         def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
-            oid = f"p{len(self.plans) + 1}"
+            self.n_plans = getattr(self, "n_plans", 0) + 1
+            oid = f"p{self.n_plans}"
             self.plans[oid] = req
             return {"data": {"orderId": oid}}
 
@@ -1591,7 +1593,8 @@ def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
 
         def fetch_open_orders(self, sym, since=None, limit=None, params=None):
             if (params or {}).get("planType") == "profit_loss":
-                return [{"id": k, "symbol": sym, "triggerPrice": float(v["triggerPrice"]), "amount": float(v["size"])}
+                return [{"id": k, "symbol": sym or "ETH/USDT:USDT", "triggerPrice": float(v["triggerPrice"]),
+                         "amount": float(v["size"])}
                         for k, v in self.plans.items()]
             return []
 
@@ -1624,6 +1627,20 @@ def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
     acc.breakeven(tk["id"])
     tk = acc.tickets().active()[0]
     assert tk["be"] and tk["sl"] > 1950 and len(c.plans) == 2 and c.plans[tk["sl_id"]]["planType"] == "loss_plan"
+    # Stop/Ziel im Chart ziehen: neuer Auftrag, alter weg; falsche Seite wird abgelehnt
+    with pytest.raises(ValueError, match="sofort"):
+        acc.move_level(tk["id"], "sl", 1980.0)
+    acc.move_level(tk["id"], "tp", 2050.0)
+    acc.move_level(tk["id"], "sl", 1930.0)
+    tk = acc.tickets().active()[0]
+    assert tk["tp"] == 2050.0 and tk["sl"] == 1930.0 and not tk["be"] and len(c.plans) == 2
+    assert float(c.plans[tk["tp_id"]]["triggerPrice"]) == 2050.0
+    # Stop/Ziel-Auftraege nicht lesbar -> Einzel-Position bleibt offen (kein Schliessen ohne Beweis)
+    real = c.fetch_open_orders
+    c.fetch_open_orders = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+    acc.refresh(force=True)
+    assert acc.tickets().active()[0]["status"] == "open"
+    c.fetch_open_orders = real
     # zweite Limit-Order wartet, dann alles schliessen: Position zu, Limit storniert
     acc.quick_order("ETH/USDT:USDT", "long", 5.75, 10, 10, 20, "limit", 1900.0)
     assert len(acc.tickets().active()) == 2

@@ -82,7 +82,8 @@ def _f(v):
 
 
 class Account:
-    def __init__(self, cfg: dict, symbols: list[str] | None = None, factory=make_client, env_path=None):
+    def __init__(self, cfg: dict, symbols: list[str] | None = None, factory=make_client, env_path=None,
+                 async_refresh: bool = False):
         self.cfg = cfg
         self.symbols = list(symbols or [])
         self.factory = factory
@@ -94,6 +95,7 @@ class Account:
         self.updated = 0.0
         self.lock = threading.RLock()
         self.trade_lock = threading.RLock()   # Orders und Abgleich nie gleichzeitig
+        self.async_refresh = async_refresh    # nach Aktionen sofort antworten, Konto im Hintergrund neu laden
         for profile, names in PROFILE_KEYS.items():
             vals = [os.getenv(n, "") for n in names]
             if profile == "live" and os.getenv("BITGET_DEMO") == "1" and not os.getenv(PROFILE_KEYS["demo"][0]):
@@ -166,6 +168,14 @@ class Account:
             save_env({v: "" for v in PROFILE_KEYS[self.active]}, self.env_path)
 
     # --- Daten -----------------------------------------------------------
+    def after_action(self) -> None:
+        """Nach einer Order: Konto neu laden - im Betrieb im Hintergrund, damit die Oberflaeche sofort antwortet."""
+        self._hist_dirty = True
+        if not self.async_refresh:
+            self.refresh(force=True)
+            return
+        threading.Thread(target=self.refresh, kwargs={"force": True}, daemon=True).start()
+
     def refresh(self, force: bool = False) -> None:
         if not self.connected or (not force and time.time() - self.updated < REFRESH_S):
             return
@@ -179,7 +189,7 @@ class Account:
                 "positions": positions,
                 "unrealized": sum(p["pnl"] or 0 for p in positions),
                 "orders": self._orders(c, syms),
-                "history": self._history(c),
+                "history": self._history_cached(c),
                 "updated_ms": int(time.time() * 1000),
             }
             try:
@@ -224,7 +234,23 @@ class Account:
         }
 
     def _orders(self, c, syms: list[str]) -> list[dict]:
+        """Offene Orders aller Maerkte - wenn moeglich mit 3 Abrufen insgesamt statt 3 je Markt."""
         out, seen = [], set()
+        self._tpsl_ok = {}       # Markt -> Stop/Ziel-Auftraege konnten gelesen werden
+        kinds = (("normal", {}), ("tpsl", {"trigger": True, "planType": "profit_loss"}), ("plan", {"trigger": True}))
+        if not getattr(self, "_per_symbol_orders", False):
+            try:
+                for kind, params in kinds:
+                    for o in c.fetch_open_orders(None, None, None, dict(params)):
+                        if (o.get("id"), kind) not in seen:
+                            seen.add((o.get("id"), kind))
+                            out.append(self._order_row(o, kind))
+                self._tpsl_ok = {s: True for s in syms} | {o["symbol"]: True for o in out if o.get("symbol")}
+                return out
+            except Exception as e:  # noqa: BLE001 - Boerse/ccxt verlangt einen Markt -> einzeln abfragen
+                log.debug("Orders ohne Markt nicht moeglich (%s) - frage je Markt ab", e)
+                self._per_symbol_orders = True
+                out, seen = [], set()
         for sym in syms:
             for kind, params in (("normal", {}), ("tpsl", {"trigger": True, "planType": "profit_loss"}),
                                  ("plan", {"trigger": True})):
@@ -233,9 +259,18 @@ class Account:
                         if (o.get("id"), kind) not in seen:
                             seen.add((o.get("id"), kind))
                             out.append(self._order_row(o, kind))
+                    if kind == "tpsl":
+                        self._tpsl_ok[sym] = True
                 except Exception as e:  # noqa: BLE001 - einzelne Order-Arten koennen fehlen
                     log.debug("Orders %s %s: %s", sym, kind, e)
         return out
+
+    def _history_cached(self, c) -> list[dict]:
+        at, rows = getattr(self, "_hist_cache", (0.0, []))
+        if time.time() - at > 60 or getattr(self, "_hist_dirty", False):
+            rows = self._history(c)
+            self._hist_cache, self._hist_dirty = (time.time(), rows), False
+        return rows
 
     def _history(self, c) -> list[dict]:
         since = int(time.time() * 1000) - HISTORY_DAYS * 86_400_000
@@ -292,7 +327,7 @@ class Account:
                            {"reduceOnly": True, "marginMode": p.get("marginMode") or self.cfg.get("margin_mode"),
                             "hedged": is_hedged(c)})
             msg = f"{symbol}: {qty:g} von {_f(p['contracts']):g} geschlossen"
-        self.refresh(force=True)
+        self.after_action()
         return msg
 
     # --- Einzel-Positionen (Tickets) ---------------------------------------
@@ -369,7 +404,7 @@ class Account:
             tk = self.tickets().add(**base, status="pending", order_id=str(o.get("id")), entry=ref,
                                     sl=ref * (1 - sign * sl_pct / 100 / lev), tp=ref * (1 + sign * tp_pct / 100 / lev),
                                     margin=ref * qty / lev, sl_id="", tp_id="")
-            self.refresh(force=True)
+            self.after_action()
             return (f"Limit-Order #{tk['id']}: {side.upper()} {qty:g} {symbol.split(':')[0]} @ {ref:.6g} liegt - "
                     "Stop und Ziel werden bei Ausfuehrung gesetzt")
         entry = _f(o.get("average")) or last
@@ -379,7 +414,7 @@ class Account:
             base["leverage"] = real_lev
         tk = self.tickets().add(**base, status="opening", entry=entry, margin=entry * qty / real_lev)
         msg = self._protect_ticket(c, tk)
-        self.refresh(force=True)
+        self.after_action()
         return msg
 
     @staticmethod
@@ -453,7 +488,7 @@ class Account:
             if filled:
                 return self._activate(c, tk, *filled) + " (wurde gerade noch ausgefuehrt)"
             self.tickets().close(tk, None, "Limit-Order storniert")
-            self.refresh(force=True)
+            self.after_action()
             return f"Limit-Order #{tk['id']} storniert"
         for oid in (tk.get("sl_id"), tk.get("tp_id")):
             if oid:
@@ -465,7 +500,7 @@ class Account:
                            {"reduceOnly": True, "marginMode": self.cfg.get("margin_mode", "isolated"), "hedged": is_hedged(c)})
         price = _f(o.get("average")) or float(c.fetch_ticker(tk["symbol"])["last"])
         self.tickets().close(tk, price, "manuell")
-        self.refresh(force=True)
+        self.after_action()
         return f"Einzel-Position #{tk['id']} geschlossen ({tk['pnl']:+.2f} USDT geschaetzt)"
 
     def close_all_tickets(self) -> str:
@@ -480,6 +515,48 @@ class Account:
         if failed:
             raise RuntimeError(f"Geschlossen: {', '.join(done) or '-'} | Fehler: {'; '.join(failed)}")
         return f"{len(done)} Einzel-Position(en) geschlossen/storniert" if done else "Keine offenen Einzel-Positionen"
+
+    def move_level(self, ticket_id: int, kind: str, price: float) -> str:
+        """Stop ('sl') oder Ziel ('tp') einer Einzel-Position verschieben (z. B. per Ziehen im Chart)."""
+        with self.trade_lock:
+            c = self._need()
+            tk = next((x for x in self.tickets().active() if x["id"] == int(ticket_id)), None)
+            if tk is None:
+                raise RuntimeError("Einzel-Position nicht gefunden")
+            if kind not in ("sl", "tp") or not price or price <= 0:
+                raise ValueError("Stop (sl) oder Ziel (tp) und einen Preis angeben")
+            sign = 1 if tk["side"] == "long" else -1
+            if tk["status"] == "pending":       # Limit-Order: gilt ab Ausfuehrung, als % der Margin merken
+                ref = tk["entry"]
+                if (kind == "sl" and sign * (price - ref) >= 0) or (kind == "tp" and sign * (price - ref) <= 0):
+                    raise ValueError("Stop muss auf der Verlust-, Ziel auf der Gewinnseite des Limit-Preises liegen")
+                pct = abs(price - ref) / ref * tk["leverage"] * 100
+                tk.update({kind: price, f"{kind}_pct": pct})
+                self.tickets().save()
+                return f"#{tk['id']}: {'Stop' if kind == 'sl' else 'Ziel'} {price:.6g} gilt ab Ausfuehrung"
+            try:
+                price = float(c.price_to_precision(tk["symbol"], price))
+            except Exception:  # noqa: BLE001 - Markt unbekannt: Preis so lassen
+                pass
+            last = float(c.fetch_ticker(tk["symbol"])["last"])
+            if kind == "sl" and sign * (price - last) >= 0:
+                raise ValueError(f"Stop {price:.6g} wuerde sofort ausloesen (Kurs {last:.6g})")
+            if kind == "tp" and sign * (price - last) <= 0:
+                raise ValueError(f"Ziel {price:.6g} liegt schon hinter dem Kurs {last:.6g}")
+            plan = "loss_plan" if kind == "sl" else "profit_plan"
+            new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, price, tk["amount"])
+            old = tk.get(f"{kind}_id")
+            if old:
+                try:
+                    cancel_plan(c, tk["symbol"], old)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("alter Auftrag %s: %s", old, e)
+            tk.update({kind: price, f"{kind}_id": new_id})
+            if kind == "sl":
+                tk["be"] = sign * (price - tk["entry"]) >= 0
+            self.tickets().save()
+            self.after_action()
+            return f"#{tk['id']}: {'Stop' if kind == 'sl' else 'Ziel'} auf {price:.6g} verschoben"
 
     def breakeven(self, ticket_id: int) -> str:
         """Stop einer Einzel-Position auf den Einstand ziehen (inkl. Gebuehren) - Verlust dann ausgeschlossen."""
@@ -500,7 +577,7 @@ class Account:
                 log.debug("alter Stop %s: %s", tk["sl_id"], e)
         tk.update(sl=be, sl_id=new_id, be=True)
         self.tickets().save()
-        self.refresh(force=True)
+        self.after_action()
         return f"#{tk['id']}: Stop auf Einstand {be:.6g} gezogen"
 
     def _order_fill(self, c, tk: dict):
@@ -546,11 +623,31 @@ class Account:
                     log.warning("Einzel-Position #%s absichern: %s", tk["id"], e)
             elif st in ("canceled", "cancelled", "expired", "rejected"):
                 tks.close(tk, None, "Limit-Order storniert")
+        ok = getattr(self, "_tpsl_ok", {})
+        # Selbstheilung: faelschlich als ausgefuehrt markierte Tickets wieder oeffnen, wenn ihre Auftraege noch liegen
+        now_ms = time.time() * 1000
+        for tk in tks.items:
+            if (tk["status"] == "closed" and tk.get("why") in ("Ziel erreicht", "Stop ausgeloest")
+                    and now_ms - (tk.get("closed_ms") or 0) < 3 * 86_400_000
+                    and (tk.get("sl_id") in open_ids and tk.get("tp_id") in open_ids)
+                    and size.get((tk["symbol"], tk["side"]), 0) > 0):
+                tk.update(status="open", exit=None, pnl=None, why=None, closed_ms=None)
+                tks.save()
+                log.info("Einzel-Position #%s wieder geoeffnet (Stop/Ziel liegen noch auf Bitget)", tk["id"])
+        need: dict = {}
+        for tk in tks.open():
+            k = (tk["symbol"], tk["side"])
+            need[k] = need.get(k, 0) + tk["amount"]
         for tk in tks.open():
             if tk["id"] in fresh or time.time() * 1000 - (tk.get("opened_ms") or 0) < 15_000:
                 continue   # junge Positionen erst beim naechsten Abgleich pruefen (Bitget braucht kurz)
             sl_open, tp_open = tk.get("sl_id") in open_ids, tk.get("tp_id") in open_ids
-            if size.get((tk["symbol"], tk["side"]), 0) <= 0:
+            k = (tk["symbol"], tk["side"])
+            if size.get(k, 0) > 0 and (not ok.get(tk["symbol"])
+                                       or size[k] >= need.get(k, 0) * 0.999):
+                # Auftraege nicht lesbar ODER Positionsgroesse unveraendert -> nichts wurde ausgefuehrt
+                continue
+            if size.get(k, 0) <= 0:
                 why = "Ziel erreicht" if not tp_open and sl_open else "Stop ausgeloest" if not sl_open and tp_open else "Position geschlossen"
                 price = tk["tp"] if why == "Ziel erreicht" else tk["sl"] if why == "Stop ausgeloest" else None
             elif not tp_open and tk.get("tp_id"):
@@ -583,7 +680,7 @@ class Account:
         for tk in self.tickets().open():
             if tk["symbol"].split(":")[0] in done:
                 self.tickets().close(tk, None, "alle geschlossen")
-        self.refresh(force=True)
+        self.after_action()
         if failed:
             raise RuntimeError(f"Geschlossen: {', '.join(done) or '-'} | Fehler: {'; '.join(failed)}")
         return f"{len(done)} Position(en) geschlossen: {', '.join(done)}" if done else "Keine offene Position"
@@ -592,14 +689,14 @@ class Account:
         c = self._need()
         params = {} if kind == "normal" else {"trigger": True, **({"planType": "profit_loss"} if kind == "tpsl" else {})}
         c.cancel_order(order_id, symbol, params)
-        self.refresh(force=True)
+        self.after_action()
         return f"Order {order_id} storniert"
 
     def set_tpsl(self, symbol: str, sl: float | None, tp: float | None) -> str:
         c = self._need()
         p = self._position(symbol)
         place_pos_tpsl(c, symbol, p.get("side"), sl, tp)
-        self.refresh(force=True)
+        self.after_action()
         return f"{symbol}: Stop {sl if sl is not None else '-'} / Ziel {tp if tp is not None else '-'} gesetzt"
 
     def order(self, symbol: str, side: str, usdt: float, leverage: int, sl: float,
@@ -639,7 +736,7 @@ class Account:
             params["takeProfit"] = {"triggerPrice": tp}
         o = c.create_order(symbol, "limit" if order_type == "limit" else "market",
                            "buy" if side == "long" else "sell", qty, price if order_type == "limit" else None, params)
-        self.refresh(force=True)
+        self.after_action()
         return f"Order {o.get('id')} {side} {qty:g} {symbol} gesendet"
 
 

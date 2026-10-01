@@ -8,6 +8,7 @@
     python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
     python run.py signale              # welche Signale es gab und warum (nicht) gehandelt wurde
     python run.py fernzugriff          # Oberflaeche auch vom Handy (mit Passwort) / "fernzugriff aus"
+    python run.py modus live           # womit der Bot handelt: paper (Simulation) | demo (Testkonto) | live
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
 """
@@ -79,6 +80,34 @@ def _tailscale_ip() -> str | None:
         return None
 
 
+def set_mode(cfg: dict, option: str) -> None:
+    """Modus des Bots im Terminal umstellen (gilt ab dem naechsten Start)."""
+    from bot.account import save_env
+
+    names = {"paper": "Simulation", "demo": "Testkonto (Bitget-Demo)", "live": "ECHTES KONTO"}
+    alias = {"simulation": "paper", "test": "demo", "testkonto": "demo", "echt": "live", "real": "live"}
+    mode = alias.get(option.lower(), option.lower())
+    print(f"Aktueller Modus: {names.get(cfg['mode'], cfg['mode'])}")
+    if mode not in names:
+        print("Bitte angeben: python run.py modus paper | demo | live")
+        return
+    keys = {"demo": ("BITGET_DEMO_API_KEY", "BITGET_DEMO_API_SECRET", "BITGET_DEMO_API_PASSPHRASE"),
+            "live": ("BITGET_API_KEY", "BITGET_API_SECRET", "BITGET_API_PASSPHRASE")}.get(mode, ())
+    legacy_demo = mode == "demo" and os.getenv("BITGET_DEMO") == "1" and os.getenv("BITGET_API_KEY")
+    if keys and not all(os.getenv(k) for k in keys) and not legacy_demo:
+        print(f"Fuer {names[mode]} sind keine API-Schluessel gespeichert.")
+        print("Oberflaeche -> Reiter 'Bitget-Konto' -> Schluessel eintragen und bei 'Diese Schluessel sind fuer'")
+        print(f"'{'Echtes Konto' if mode == 'live' else 'Testkonto'}' waehlen -> Verbinden. Danach diesen Befehl nochmal.")
+        return
+    if mode == "live":
+        print(f"\n!!! Der Bot handelt dann SELBSTSTAENDIG mit ECHTEM GELD und {cfg['leverage']}x Hebel !!!")
+        if input("Zum Bestaetigen JA eingeben: ").strip().upper() != "JA":
+            print("Abgebrochen - nichts geaendert.")
+            return
+    save_env({"BOT_MODE": mode})
+    print(f"Gespeichert: {names[mode]}. Jetzt den Bot neu starten (Strg+C, dann python run.py bot).")
+
+
 def remote_setup(cfg: dict, option: str) -> None:
     """Fernzugriff ein-/ausschalten. Passwort wird nur als Hash in .env gespeichert."""
     from getpass import getpass
@@ -139,7 +168,7 @@ def signals(mode: str = "paper") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "optimize", "report", "signale", "fernzugriff", "check", "bot"])
+    ap.add_argument("command", choices=["backtest", "optimize", "report", "signale", "fernzugriff", "modus", "check", "bot"])
     ap.add_argument("option", nargs="?", default="")
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
@@ -169,6 +198,9 @@ def main() -> None:
         optimize_cli(cfg, args.days or (120 if args.fast else 365), fast=args.fast)
         return
 
+    if args.command == "modus":
+        set_mode(cfg, args.option)
+        return
     if args.command == "fernzugriff":
         remote_setup(cfg, args.option)
         return
@@ -198,7 +230,7 @@ def main() -> None:
     if cfg["dashboard"]["enabled"]:
         from bot.account import Account, refresher
         from bot.dashboard import start_dashboard
-        account = Account(cfg, ex.symbols)   # echtes Bitget-Konto (Schluessel in der Oberflaeche eingeben)
+        account = Account(cfg, ex.symbols, async_refresh=True)   # echtes Bitget-Konto (Schluessel in der Oberflaeche)
         refresher(account)
         pw_hash = os.getenv("DASHBOARD_PASSWORD_HASH") if os.getenv("DASHBOARD_REMOTE") == "1" else None
         start_dashboard(bot, cfg["dashboard"]["port"], account, remote_pw_hash=pw_hash or None)

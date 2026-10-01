@@ -902,7 +902,7 @@ class Bot:
         df["ema_s"] = ema(df["close"], self.s["ema_slow"])
         df["vwap"] = vwap_daily(df) if TF_MS[tf] < TF_MS["1d"] else np.nan
         df["atr"] = atr(df, self.s["atr_period"])
-        zones = zones_for_chart(df, self.s, max_each=6)
+        zones = zones_for_chart(df, self.s, max_each=6, disp=min(1.0, self.s.get("ob_disp_atr", 1.5)))
         tail = df.tail(bars)
         out = {
             "symbol": sym, "tf": tf, "tf_seconds": TF_MS[tf] // 1000,
