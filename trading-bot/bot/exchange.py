@@ -29,8 +29,9 @@ MODE_ERR = "40774"   # Bitget: Order passt nicht zum Positionsmodus (One-Way / H
 
 
 def _hold_err(e: Exception) -> bool:
-    """Bitget 40017 'Parameter verification failed holdSide': holdSide in falscher Schreibweise."""
-    return "40017" in str(e) and "holdSide" in str(e)
+    """Bitget lehnt Richtung/Auftragsart ab: 40017 'holdSide' oder 43011 'delegateType/executePrice'."""
+    m = str(e)
+    return ("40017" in m and "holdSide" in m) or "43011" in m
 
 
 def _flip_mode(client) -> None:
@@ -73,29 +74,46 @@ def mode_safe(client) -> None:
                     raise
                 return raw_close(symbol, None if s else pos_side, params or {})
 
-    def with_hold(raw):
+    def with_hold(raw, name):
         def call(req, *a, **k):
             pos_side = {"buy": "long", "sell": "short"}.get(req.get("holdSide"), req.get("holdSide"))
             alt = {"long": "buy", "short": "sell"}.get(pos_side)
             flipped = False
             while True:
                 h = pos_side if is_hedged(client) else alt
-                try:
-                    return raw({**req, "holdSide": h}, *a, **k)
-                except Exception as e:  # noqa: BLE001
-                    if MODE_ERR in str(e) and not flipped:
-                        _flip_mode(client)
-                        flipped = True
-                        continue
-                    if not _hold_err(e):
-                        raise
-                    # Bitget lehnt die holdSide-Schreibweise ab (40017): einmal die andere versuchen
-                    return raw({**req, "holdSide": alt if h == pos_side else pos_side}, *a, **k)
+                # Varianten: (holdSide, executePrice mitsenden?) - die zuletzt erfolgreiche zuerst
+                variants = [(h, True), (alt if h == pos_side else pos_side, True), (h, False),
+                            (alt if h == pos_side else pos_side, False)]
+                memo = client.__dict__.setdefault("_bot_tpsl_variant", {})
+                good = memo.get(name)
+                if good is not None:
+                    want = (pos_side if good[0] == "pos" else alt, good[1])
+                    variants = [want] + [v for v in variants if v != want]
+                last = None
+                for hs, with_exec in variants:
+                    r = {**req, "holdSide": hs}
+                    if not with_exec:
+                        r.pop("executePrice", None)
+                    try:
+                        out = raw(r, *a, **k)
+                        memo[name] = ("pos" if hs == pos_side else "alt", with_exec)
+                        return out
+                    except Exception as e:  # noqa: BLE001
+                        last = e
+                        if MODE_ERR in str(e) and not flipped:
+                            break
+                        if not _hold_err(e):
+                            raise
+                        log.info("Bitget lehnt TP/SL-Variante ab (%s, executePrice=%s): %s", hs, with_exec, e)
+                else:
+                    raise last
+                _flip_mode(client)
+                flipped = True
         return call
 
     client.create_order, client.close_position = create_order, close_position
-    client.privateMixPostV2MixOrderPlaceTpslOrder = with_hold(raw_tpsl)
-    client.privateMixPostV2MixOrderPlacePosTpsl = with_hold(raw_pos)
+    client.privateMixPostV2MixOrderPlaceTpslOrder = with_hold(raw_tpsl, "size")
+    client.privateMixPostV2MixOrderPlacePosTpsl = with_hold(raw_pos, "pos")
 
 
 def resolve_symbols(client: ccxt.Exchange, wanted: list[str]) -> list[str]:

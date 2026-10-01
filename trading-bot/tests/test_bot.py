@@ -1703,6 +1703,22 @@ def test_position_mode_auto_retry_on_40774():
     assert c.sent[-1] == ("order", False) and not is_hedged(c)
     c.close_position("ETH/USDT:USDT", "long")                 # One-Way: Schliessen ohne holdSide (kein 40017)
     assert c.sent[-1] == ("close", None)
+    # Bitget lehnt die TP/SL-Schreibweise ab (43011) -> andere Variante, danach direkt die funktionierende
+    tries = []
+
+    def picky(req):
+        tries.append(req["holdSide"])
+        if req["holdSide"] != "long":
+            raise RuntimeError('bitget {"code":"43011","msg":"The parameter does not meet the specification d delegateType is error"}')
+        return {"data": {"orderId": "9"}}
+    c2 = Raw()
+    c2.mode_hedge, c2.privateMixPostV2MixOrderPlaceTpslOrder = False, picky
+    mode_safe(c2)
+    c2._bot_hedged = False
+    assert c2.privateMixPostV2MixOrderPlaceTpslOrder({"holdSide": "long", "executePrice": "0"})["data"]["orderId"] == "9"
+    assert tries == ["buy", "long"]
+    c2.privateMixPostV2MixOrderPlaceTpslOrder({"holdSide": "long", "executePrice": "0"})
+    assert tries[-1] == "long" and len(tries) == 3
     c._bot_hedged = True                                      # falsch erkannt -> 40017 -> ohne holdSide wiederholt
     c.close_position("ETH/USDT:USDT", "long")
     assert c.sent[-2:] == [("close", "long"), ("close", None)]

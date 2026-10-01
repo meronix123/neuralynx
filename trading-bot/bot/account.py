@@ -544,7 +544,11 @@ class Account:
             if kind == "tp" and sign * (price - last) <= 0:
                 raise ValueError(f"Ziel {price:.6g} liegt schon hinter dem Kurs {last:.6g}")
             plan = "loss_plan" if kind == "sl" else "profit_plan"
-            new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, price, tk["amount"])
+            try:
+                new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, price, tk["amount"])
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(f"{e} - der bisherige {'Stop' if kind == 'sl' else 'Ziel'} "
+                                   f"{tk[kind]:.6g} bleibt aktiv") from e
             old = tk.get(f"{kind}_id")
             if old:
                 try:
@@ -569,7 +573,10 @@ class Account:
         last = float(c.fetch_ticker(tk["symbol"])["last"])
         if (sign == 1 and last <= be) or (sign == -1 and last >= be):
             raise RuntimeError("Kurs ist noch nicht ueber dem Einstand - Stop dort wuerde sofort ausloesen")
-        new_id = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", be, tk["amount"])
+        try:
+            new_id = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", be, tk["amount"])
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"{e} - der bisherige Stop {tk['sl']:.6g} bleibt aktiv") from e
         if tk.get("sl_id"):
             try:
                 cancel_plan(c, tk["symbol"], tk["sl_id"])
