@@ -70,6 +70,10 @@
   nav { display:flex; gap:6px; padding:10px 16px 0; }
   nav button, .btn { background:#1d2230; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; }
   nav button.on { border-color:var(--blue); background:#1a2233; }
+  nav { flex-wrap:wrap; align-items:center; }
+  .modebar { margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .modebar button.cur { color:#fff; font-weight:700; }
+  #mode-paper.cur { background:#334155; } #mode-demo.cur { background:#1e3a8a; } #mode-live.cur { background:#7f1d1d; }
   .btn:hover { border-color:var(--blue); } .btn.red { border-color:#7f1d1d; } .btn.red:hover { background:#7f1d1d; }
   .btn.sm { padding:2px 8px; font-size:12px; }
   .onoff { font-weight:700; display:flex; align-items:center; gap:8px; }
@@ -90,7 +94,11 @@
 </head>
 <body>
 <header id="head">Lade ...</header>
-<nav><button id="tab-bot" class="on" onclick="tab('bot')">Bot</button><button id="tab-brain" onclick="tab('brain')">Bot-Gehirn</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button></nav>
+<nav><button id="tab-bot" class="on" onclick="tab('bot')">Bot</button><button id="tab-brain" onclick="tab('brain')">Bot-Gehirn</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button>
+  <span class="modebar"><span class="sub">Bot handelt mit:</span>
+    <button id="mode-paper" onclick="switchMode('paper')">Simulation</button>
+    <button id="mode-demo" onclick="switchMode('demo')">Testkonto</button>
+    <button id="mode-live" onclick="switchMode('live')">Echtes Konto</button></span></nav>
 <div id="toast"></div>
 <main id="view-brain" hidden>
   <section class="panel" style="grid-column:1/-1">
@@ -623,10 +631,7 @@ function render() {
   const dayPnl = data.equity - data.day_start_equity;
   const fg = data.fear_greed;
   document.getElementById("head").innerHTML = `
-    <select id="mode-sel" class="badge ${data.mode}" style="width:auto;color:#fff;border:0;padding:4px 8px" onchange="switchMode(this.value)" title="Modus des Bots">
-      <option value="paper" ${data.mode === "paper" ? "selected" : ""}>SIMULATION</option>
-      <option value="demo" ${data.mode === "demo" ? "selected" : ""}>TESTKONTO</option>
-      <option value="live" ${data.mode === "live" ? "selected" : ""}>ECHTES KONTO</option></select>
+    <span class="badge ${data.mode}">${{ paper: "SIMULATION", demo: "TESTKONTO", live: "ECHTES KONTO" }[data.mode] || data.mode}</span>
     <div class="kpi"><span>Konto</span><b>${fmt(data.equity)} USDT</b></div>
     <div class="kpi"><span>Heute</span><b class="${dayPnl >= 0 ? "up" : "down"}">${dayPnl >= 0 ? "+" : ""}${fmt(dayPnl)} USDT</b></div>
     <div class="kpi"><span>Offen (unrealisiert)</span><b class="${(data.unrealized||0) >= 0 ? "up" : "down"}">${(data.unrealized||0) >= 0 ? "+" : ""}${fmt(data.unrealized||0)} USDT</b></div>
@@ -639,6 +644,7 @@ function render() {
     <button class="btn onoff ${data.paused ? "off" : "on"}" onclick="act('/api/bot/pause', {on: ${!data.paused}}, ${data.paused ? "null" : "'Bot AUS? Er eroeffnet dann keine neuen Trades (offene Positionen behalten Stop/Ziel).'"})"><span></span>Bot ${data.paused ? "AUS" : "AN"}</button>
     <button class="btn red" onclick="act('/api/bot/close_all', {}, 'ALLE Positionen und Limit-Orders des Bots jetzt zum Marktpreis schliessen?')">Alle Bot-Positionen schliessen</button>`;
 
+  for (const m of ["paper", "demo", "live"]) document.getElementById("mode-" + m).classList.toggle("cur", data.mode === m);
   const syms = Object.keys(data.symbols);
   if (!selected || !data.symbols[selected]) selected = syms[0];
   document.getElementById("list").innerHTML = syms.map(sym => {
@@ -796,13 +802,18 @@ async function switchMode(m) {
   const names = { paper: "Simulation (kein echtes Geld)", demo: "Testkonto (Bitget-Demo, Spielgeld)", live: "ECHTES KONTO (echtes Geld!)" };
   let body = { mode: m };
   if (m === "live") {
-    const c = prompt("ACHTUNG: Der Bot handelt dann mit ECHTEM GELD und " + data.leverage + "x Hebel.\nZum Bestaetigen JA eingeben:");
-    if (c !== "JA") { render(); return; }
+    if (data.mode === "live") return toast("Der Bot handelt bereits mit dem echten Konto", true);
+    const c = prompt("ACHTUNG: Der Bot handelt dann selbststaendig mit ECHTEM GELD und " + data.leverage + "x Hebel.\n" +
+      "Voraussetzung: Im Reiter 'Bitget-Konto' sind die Schluessel fuer das ECHTE Konto verbunden.\nZum Bestaetigen JA eingeben:");
+    if (c === null) return;
+    if (c.trim().toUpperCase() !== "JA") return toast("Nicht umgestellt - bitte genau JA eingeben", false);
     body.confirm = "JA";
-  } else if (!confirm(`Bot auf ${names[m]} umstellen? Er startet dazu neu.`)) { render(); return; }
+  } else {
+    if (data.mode === m) return toast("Ist bereits eingestellt", true);
+    if (!confirm(`Bot auf ${names[m]} umstellen? Er startet dazu neu.`)) return;
+  }
   const ok = await act("/api/bot/mode", body);
   if (ok && !/bereits/.test(ok.msg)) setTimeout(() => location.reload(), 7000);
-  else render();
 }
 function val(id) { return document.getElementById(id).value.trim(); }
 // Key und Secret enthalten nie Leerzeichen: beim Kopieren mitgerutschte Umbrueche/Leerzeichen entfernen
