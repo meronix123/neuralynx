@@ -133,11 +133,16 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     if path == "/api/account/tpsl":
         return account.set_tpsl(body["symbol"], _num(body.get("sl")), _num(body.get("tp")))
     if path == "/api/account/quick":
-        return account.quick_order(body["symbol"], body["side"], float(_num(body.get("margin_pct")) or 20),
+        return account.quick_order(body["symbol"], body["side"], float(_num(body.get("margin_usdt")) or 0),
                                    int(_num(body.get("leverage")) or 10), float(_num(body.get("sl_pct")) or 10),
-                                   float(_num(body.get("tp_pct")) or 0))
+                                   float(_num(body.get("tp_pct")) or 0), body.get("type", "market"),
+                                   _num(body.get("price")))
     if path == "/api/account/ticket_close":
         return account.close_ticket(int(body["id"]))
+    if path == "/api/account/tickets_close_all":
+        return account.close_all_tickets()
+    if path == "/api/account/ticket_be":
+        return account.breakeven(int(body["id"]))
     if path == "/api/account/order":
         return account.order(body["symbol"], body["side"], _num(body.get("usdt")), int(_num(body.get("leverage")) or 0),
                              _num(body.get("sl")), _num(body.get("tp")), body.get("type", "market"),

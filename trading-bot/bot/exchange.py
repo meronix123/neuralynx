@@ -20,7 +20,63 @@ def make_client(api: dict | None = None, demo: bool = False) -> ccxt.bitget:
     client = ccxt.bitget(params)
     if demo:
         client.enable_demo_trading(True)
+    if api:
+        mode_safe(client)
     return client
+
+
+MODE_ERR = "40774"   # Bitget: Order passt nicht zum Positionsmodus (One-Way / Hedge)
+
+
+def _flip_mode(client) -> None:
+    client._bot_hedged = not is_hedged(client)
+    log.warning("Bitget meldet anderen Positionsmodus - nutze jetzt %s", "Hedge" if client._bot_hedged else "One-Way")
+
+
+def mode_safe(client) -> None:
+    """Alle Order-Aufrufe dieses Clients automatisch an den Positionsmodus des Kontos anpassen.
+    Meldet Bitget trotzdem 40774, wird einmal mit dem anderen Modus wiederholt."""
+    raw_create, raw_close = client.create_order, client.close_position
+    raw_tpsl, raw_pos = client.privateMixPostV2MixOrderPlaceTpslOrder, client.privateMixPostV2MixOrderPlacePosTpsl
+
+    def create_order(symbol, type, side, amount, price=None, params=None):  # noqa: A002 - ccxt-Name
+        p = dict(params or {})
+        for attempt in (0, 1):
+            p["hedged"] = is_hedged(client)
+            try:
+                return raw_create(symbol, type, side, amount, price, p)
+            except Exception as e:  # noqa: BLE001
+                if MODE_ERR not in str(e) or attempt:
+                    raise
+                _flip_mode(client)
+
+    def close_position(symbol, side=None, params=None):
+        pos_side = {"buy": "long", "sell": "short"}.get(side, side)   # beide Schreibweisen annehmen
+        for attempt in (0, 1):
+            s = pos_side if is_hedged(client) else ("buy" if pos_side == "long" else "sell")
+            try:
+                return raw_close(symbol, s, params or {})
+            except Exception as e:  # noqa: BLE001
+                if MODE_ERR not in str(e) or attempt:
+                    raise
+                _flip_mode(client)
+
+    def with_hold(raw):
+        def call(req, *a, **k):
+            pos_side = {"buy": "long", "sell": "short"}.get(req.get("holdSide"), req.get("holdSide"))
+            for attempt in (0, 1):
+                h = pos_side if is_hedged(client) else ("buy" if pos_side == "long" else "sell")
+                try:
+                    return raw({**req, "holdSide": h}, *a, **k)
+                except Exception as e:  # noqa: BLE001
+                    if MODE_ERR not in str(e) or attempt:
+                        raise
+                    _flip_mode(client)
+        return call
+
+    client.create_order, client.close_position = create_order, close_position
+    client.privateMixPostV2MixOrderPlaceTpslOrder = with_hold(raw_tpsl)
+    client.privateMixPostV2MixOrderPlacePosTpsl = with_hold(raw_pos)
 
 
 def resolve_symbols(client: ccxt.Exchange, wanted: list[str]) -> list[str]:
@@ -72,6 +128,7 @@ def is_hedged(client) -> bool:
         client._bot_hedged = hedged
     except AttributeError:
         pass
+    log.info("Bitget Positionsmodus: %s", "Hedge (Long/Short getrennt)" if hedged else "One-Way")
     return hedged
 
 

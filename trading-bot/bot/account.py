@@ -93,6 +93,7 @@ class Account:
         self.data: dict = {}
         self.updated = 0.0
         self.lock = threading.RLock()
+        self.trade_lock = threading.RLock()   # Orders und Abgleich nie gleichzeitig
         for profile, names in PROFILE_KEYS.items():
             vals = [os.getenv(n, "") for n in names]
             if profile == "live" and os.getenv("BITGET_DEMO") == "1" and not os.getenv(PROFILE_KEYS["demo"][0]):
@@ -182,10 +183,11 @@ class Account:
                 "updated_ms": int(time.time() * 1000),
             }
             try:
-                self._sync_tickets(positions, data["orders"])
+                with self.trade_lock:
+                    self._sync_tickets(positions, data["orders"])
             except Exception as e:  # noqa: BLE001
                 log.warning("Einzel-Positionen abgleichen: %s", e)
-            data["tickets"] = self.tickets().open()
+            data["tickets"] = self.tickets().active()
             data["tickets_closed"] = [x for x in self.tickets().items if x["status"] == "closed"][-30:][::-1]
             with self.lock:
                 self.data, self.error, self.updated = data, "", time.time()
@@ -297,19 +299,28 @@ class Account:
             cache[self.active] = Tickets(path)
         return cache[self.active]
 
-    def quick_order(self, symbol: str, side: str, margin_pct: float = 20, leverage: int = 10,
-                    sl_pct: float = 10, tp_pct: float = 20) -> str:
-        """Schnell-Order: margin_pct % des freien Guthabens als Margin, Stop bei sl_pct % Verlust und
-        Ziel bei tp_pct % Gewinn - jeweils bezogen auf die Margin. Jede Order = eigene Einzel-Position."""
+    def quick_order(self, *a, **k) -> str:
+        with self.trade_lock:
+            return self._quick_order(*a, **k)
+
+    def _quick_order(self, symbol: str, side: str, margin_usdt: float = 5, leverage: int = 10,
+                     sl_pct: float = 10, tp_pct: float = 20, order_type: str = "market",
+                     price: float | None = None) -> str:
+        """Schnell-Order: margin_usdt USDT Einsatz (Margin), Stop bei sl_pct % Verlust und
+        Ziel bei tp_pct % Gewinn - jeweils bezogen auf die Margin. Jede Order = eigene Einzel-Position.
+        order_type 'limit': Order liegt zum Preis `price`; Stop/Ziel werden bei Ausfuehrung gesetzt."""
         c = self._need()
         if side not in ("long", "short"):
             raise ValueError("Richtung long oder short")
-        if not 0 < margin_pct <= 100 or not 1 <= int(leverage) <= 125:
-            raise ValueError("Kapital 1-100 %, Hebel 1-125")
+        if not margin_usdt or margin_usdt <= 0 or not 1 <= int(leverage) <= 125:
+            raise ValueError("Einsatz in USDT eingeben, Hebel 1-125")
         if not tp_pct or tp_pct <= 0:
             raise ValueError("Take-Profit ist Pflicht")
         if not 0 < sl_pct < 80:
             raise ValueError("Stop-Loss 1 bis 79 % der Margin (darueber droht vorher die Liquidation)")
+        limit = order_type == "limit"
+        if limit and not (price and price > 0):
+            raise ValueError("Limit-Preis eingeben (oder in den Chart klicken)")
         c.load_markets()
         if symbol not in c.markets:
             raise ValueError(f"Markt {symbol} gibt es auf Bitget nicht")
@@ -318,19 +329,19 @@ class Account:
             if (_f(p.get("contracts")) or 0) > 0 and p.get("side") != side:
                 raise RuntimeError(f"In {symbol} ist eine {p.get('side')}-Position offen - Gegenrichtung erst nach dem Schliessen")
         free = _f(c.fetch_balance({"type": "swap"}).get("USDT", {}).get("free")) or 0.0
-        margin = free * margin_pct / 100
-        price = float(c.fetch_ticker(symbol)["last"])
+        margin = float(margin_usdt)
+        if margin > free + 1e-9:
+            raise ValueError(f"Einsatz {margin:.2f} USDT ist mehr als verfuegbar ({free:.2f} USDT)")
+        last = float(c.fetch_ticker(symbol)["last"])
+        ref = float(price) if limit else last
         lev = int(leverage)
-        qty = float(c.amount_to_precision(symbol, margin * lev / price))
+        qty = float(c.amount_to_precision(symbol, margin * lev / ref))
         min_amt = _f(((c.market(symbol).get("limits") or {}).get("amount") or {}).get("min")) or 0
-        if qty <= 0 or qty < min_amt or qty * price < MIN_NOTIONAL:
-            need = MIN_NOTIONAL / lev / free * 100 if free > 0 else 100
-            raise ValueError(f"Order zu klein: {margin:.2f} USDT Margin x {lev} = {margin * lev:.2f} USDT Positionswert. "
-                             f"Bitget verlangt mind. {MIN_NOTIONAL:.0f} USDT (bzw. die Mindestmenge) - mind. "
-                             f"{min(100, need):.0f} % Kapital bei {lev}x waehlen (freies Guthaben {free:.2f} USDT).")
-        sign = 1 if side == "long" else -1
-        sl = price * (1 - sign * sl_pct / 100 / lev)
-        tp = price * (1 + sign * tp_pct / 100 / lev)
+        if qty <= 0 or qty < min_amt or qty * ref < MIN_NOTIONAL:
+            need = max(MIN_NOTIONAL, min_amt * ref) / lev
+            raise ValueError(f"Order zu klein: {margin:.2f} USDT Einsatz x {lev} = {margin * lev:.2f} USDT Positionswert. "
+                             f"Bitget verlangt mehr - bei {lev}x mind. ca. {need * 1.05:.2f} USDT Einsatz "
+                             f"(verfuegbar {free:.2f} USDT).")
         mm = self.cfg.get("margin_mode", "isolated")
         for fn in (lambda: c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"}),
                    lambda: c.set_leverage(lev, symbol, {"holdSide": "long", "marginMode": mm}),
@@ -339,33 +350,56 @@ class Account:
                 fn()
             except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
                 log.debug("Schnell-Order Vorbereitung %s: %s", symbol, e)
-        o = c.create_order(symbol, "market", "buy" if side == "long" else "sell", qty, None,
-                           {"marginMode": mm, "hedged": is_hedged(c)})
-        entry = _f(o.get("average")) or price
-        sl_id = tp_id = ""
+        o = c.create_order(symbol, "limit" if limit else "market", "buy" if side == "long" else "sell", qty,
+                           ref if limit else None, {"marginMode": mm, "hedged": is_hedged(c)})
+        base = dict(symbol=symbol, side=side, amount=qty, leverage=lev, sl_pct=sl_pct, tp_pct=tp_pct,
+                    opened_ms=int(time.time() * 1000))
+        if limit:
+            sign = 1 if side == "long" else -1
+            tk = self.tickets().add(**base, status="pending", order_id=str(o.get("id")), entry=ref,
+                                    sl=ref * (1 - sign * sl_pct / 100 / lev), tp=ref * (1 + sign * tp_pct / 100 / lev),
+                                    margin=ref * qty / lev, sl_id="", tp_id="")
+            self.refresh(force=True)
+            return (f"Limit-Order #{tk['id']}: {side.upper()} {qty:g} {symbol.split(':')[0]} @ {ref:.6g} liegt - "
+                    "Stop und Ziel werden bei Ausfuehrung gesetzt")
+        entry = _f(o.get("average")) or last
+        tk = self.tickets().add(**base, status="opening", entry=entry, margin=entry * qty / lev)
+        msg = self._protect_ticket(c, tk)
+        self.refresh(force=True)
+        return msg
+
+    def _protect_ticket(self, c, tk: dict) -> str:
+        """Stop und Ziel fuer genau diese Einzel-Position setzen (ab dem echten Einstiegspreis)."""
+        sign = 1 if tk["side"] == "long" else -1
+        tk["sl"] = tk["entry"] * (1 - sign * tk["sl_pct"] / 100 / tk["leverage"])
+        tk["tp"] = tk["entry"] * (1 + sign * tk["tp_pct"] / 100 / tk["leverage"])
         err = []
+        tk["sl_id"] = tk["tp_id"] = ""
         try:
-            sl_id = place_size_tpsl(c, symbol, side, "loss_plan", sl, qty)
+            tk["sl_id"] = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", tk["sl"], tk["amount"])
         except Exception as e:  # noqa: BLE001
             err.append(str(e))
         try:
-            tp_id = place_size_tpsl(c, symbol, side, "profit_plan", tp, qty)
+            tk["tp_id"] = place_size_tpsl(c, tk["symbol"], tk["side"], "profit_plan", tk["tp"], tk["amount"])
         except Exception as e:  # noqa: BLE001
             err.append(str(e))
-        if not sl_id:
+        tickets = self.tickets()
+        if not tk["sl_id"]:
             # ohne Stop keine offene Position stehen lassen
-            c.create_order(symbol, "market", "sell" if side == "long" else "buy", qty, None,
-                           {"reduceOnly": True, "marginMode": mm, "hedged": is_hedged(c)})
-            if tp_id:
+            c.create_order(tk["symbol"], "market", "sell" if tk["side"] == "long" else "buy", tk["amount"], None,
+                           {"reduceOnly": True, "marginMode": self.cfg.get("margin_mode", "isolated"),
+                            "hedged": is_hedged(c)})
+            if tk["tp_id"]:
                 try:
-                    cancel_plan(c, symbol, tp_id)
+                    cancel_plan(c, tk["symbol"], tk["tp_id"])
                 except Exception as e:  # noqa: BLE001
                     log.debug("TP-Storno: %s", e)
+            tickets.close(tk, None, "Stop nicht setzbar - sofort geschlossen")
             raise RuntimeError("Stop-Loss konnte nicht gesetzt werden - Position sofort wieder geschlossen. " + "; ".join(err))
-        self.tickets().add(symbol=symbol, side=side, amount=qty, entry=entry, sl=sl, tp=tp, sl_id=sl_id,
-                           tp_id=tp_id, leverage=lev, margin=entry * qty / lev, opened_ms=int(time.time() * 1000))
-        self.refresh(force=True)
-        msg = f"{side.upper()} {qty:g} {symbol.split(':')[0]} @ ~{entry:.6g} | Stop {sl:.6g} | Ziel {tp:.6g}"
+        tk["status"] = "open"
+        tickets.save()
+        msg = (f"#{tk['id']} {tk['side'].upper()} {tk['amount']:g} {tk['symbol'].split(':')[0]} @ ~{tk['entry']:.6g} "
+               f"| Stop {tk['sl']:.6g} | Ziel {tk['tp']:.6g}")
         return msg + (f" (Hinweis: {'; '.join(err)})" if err else "")
 
     @staticmethod
@@ -376,10 +410,25 @@ class Account:
         return "buy" if side == "long" else "sell"
 
     def close_ticket(self, ticket_id: int) -> str:
+        with self.trade_lock:
+            return self._close_ticket(ticket_id)
+
+    def _close_ticket(self, ticket_id: int) -> str:
         c = self._need()
-        tk = next((x for x in self.tickets().open() if x["id"] == int(ticket_id)), None)
+        tk = next((x for x in self.tickets().active() if x["id"] == int(ticket_id)), None)
         if tk is None:
             raise RuntimeError("Einzel-Position nicht gefunden (schon geschlossen?)")
+        if tk["status"] == "pending":
+            try:
+                c.cancel_order(tk["order_id"], tk["symbol"])
+            except Exception as e:  # noqa: BLE001 - evtl. gerade ausgefuehrt
+                log.info("Limit-Storno #%s: %s", tk["id"], e)
+            filled = self._order_fill(c, tk)
+            if filled:
+                return self._activate(c, tk, *filled) + " (wurde gerade noch ausgefuehrt)"
+            self.tickets().close(tk, None, "Limit-Order storniert")
+            self.refresh(force=True)
+            return f"Limit-Order #{tk['id']} storniert"
         for oid in (tk.get("sl_id"), tk.get("tp_id")):
             if oid:
                 try:
@@ -393,6 +442,59 @@ class Account:
         self.refresh(force=True)
         return f"Einzel-Position #{tk['id']} geschlossen ({tk['pnl']:+.2f} USDT geschaetzt)"
 
+    def close_all_tickets(self) -> str:
+        """Alle Einzel-Positionen schliessen und alle wartenden Limit-Orders stornieren."""
+        done, failed = [], []
+        for tk in list(self.tickets().active()):
+            try:
+                self.close_ticket(tk["id"])
+                done.append(f"#{tk['id']}")
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"#{tk['id']}: {e}")
+        if failed:
+            raise RuntimeError(f"Geschlossen: {', '.join(done) or '-'} | Fehler: {'; '.join(failed)}")
+        return f"{len(done)} Einzel-Position(en) geschlossen/storniert" if done else "Keine offenen Einzel-Positionen"
+
+    def breakeven(self, ticket_id: int) -> str:
+        """Stop einer Einzel-Position auf den Einstand ziehen (inkl. Gebuehren) - Verlust dann ausgeschlossen."""
+        c = self._need()
+        tk = next((x for x in self.tickets().open() if x["id"] == int(ticket_id)), None)
+        if tk is None:
+            raise RuntimeError("Nur fuer offene Einzel-Positionen")
+        sign = 1 if tk["side"] == "long" else -1
+        be = tk["entry"] * (1 + sign * 2 * self.cfg.get("fees", {}).get("taker", 0.0006))
+        last = float(c.fetch_ticker(tk["symbol"])["last"])
+        if (sign == 1 and last <= be) or (sign == -1 and last >= be):
+            raise RuntimeError("Kurs ist noch nicht ueber dem Einstand - Stop dort wuerde sofort ausloesen")
+        new_id = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", be, tk["amount"])
+        if tk.get("sl_id"):
+            try:
+                cancel_plan(c, tk["symbol"], tk["sl_id"])
+            except Exception as e:  # noqa: BLE001
+                log.debug("alter Stop %s: %s", tk["sl_id"], e)
+        tk.update(sl=be, sl_id=new_id, be=True)
+        self.tickets().save()
+        self.refresh(force=True)
+        return f"#{tk['id']}: Stop auf Einstand {be:.6g} gezogen"
+
+    def _order_fill(self, c, tk: dict):
+        """(Menge, Preis), wenn die Limit-Order (teilweise) ausgefuehrt wurde, sonst None."""
+        try:
+            o = c.fetch_order(tk["order_id"], tk["symbol"])
+        except Exception as e:  # noqa: BLE001
+            log.debug("Order %s: %s", tk.get("order_id"), e)
+            return None
+        filled = _f(o.get("filled")) or 0
+        if filled > 0 and o.get("status") in ("closed", "canceled", "cancelled", "expired"):
+            return filled, _f(o.get("average")) or _f(o.get("price")) or tk["entry"]
+        return None
+
+    def _activate(self, c, tk: dict, filled: float, avg: float) -> str:
+        tk.update(amount=filled, entry=avg, margin=avg * filled / tk["leverage"], opened_ms=int(time.time() * 1000))
+        msg = self._protect_ticket(c, tk)
+        log.info("Limit-Order ausgefuehrt: %s", msg)
+        return msg
+
     def _sync_tickets(self, positions: list[dict], orders: list[dict]) -> None:
         """Hat Bitget ein Ziel/einen Stop ausgefuehrt? Dann Ticket schliessen und den Gegen-Auftrag stornieren."""
         tks = self.tickets()
@@ -402,7 +504,25 @@ class Account:
             k = (p["symbol"], p.get("side"))
             size[k] = size.get(k, 0) + (p["amount"] or 0)
         c = self.client
+        fresh = set()   # gerade erst abgesichert -> Auftraege stehen noch nicht in `orders`
+        for tk in [x for x in tks.items if x["status"] == "pending"]:
+            try:
+                o = c.fetch_order(tk["order_id"], tk["symbol"])
+            except Exception as e:  # noqa: BLE001
+                log.debug("Limit-Order %s: %s", tk.get("order_id"), e)
+                continue
+            filled, st = _f(o.get("filled")) or 0, o.get("status")
+            if st == "closed" or (st in ("canceled", "cancelled", "expired") and filled > 0):
+                try:
+                    self._activate(c, tk, filled or tk["amount"], _f(o.get("average")) or tk["entry"])
+                    fresh.add(tk["id"])
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Einzel-Position #%s absichern: %s", tk["id"], e)
+            elif st in ("canceled", "cancelled", "expired", "rejected"):
+                tks.close(tk, None, "Limit-Order storniert")
         for tk in tks.open():
+            if tk["id"] in fresh or time.time() * 1000 - (tk.get("opened_ms") or 0) < 15_000:
+                continue   # junge Positionen erst beim naechsten Abgleich pruefen (Bitget braucht kurz)
             sl_open, tp_open = tk.get("sl_id") in open_ids, tk.get("tp_id") in open_ids
             if size.get((tk["symbol"], tk["side"]), 0) <= 0:
                 why = "Ziel erreicht" if not tp_open and sl_open else "Stop ausgeloest" if not sl_open and tp_open else "Position geschlossen"
@@ -519,9 +639,13 @@ class Tickets:
     def open(self) -> list[dict]:
         return [x for x in self.items if x["status"] == "open"]
 
+    def active(self) -> list[dict]:
+        """Offene Einzel-Positionen und wartende Limit-Orders."""
+        return [x for x in self.items if x["status"] in ("open", "pending", "opening")]
+
     def add(self, **kw) -> dict:
         tid = max([x["id"] for x in self.items] or [0]) + 1
-        item = {"id": tid, "status": "open", **kw}
+        item = {"id": tid, "status": "open", **kw}   # status kann per kw ueberschrieben werden
         self.items.append(item)
         self.save()
         return item

@@ -1470,16 +1470,18 @@ def test_quick_orders_are_separate_positions(tmp_path, monkeypatch):
                   env_path=tmp_path / ".env")
     acc.connect("k", "s", "p", demo=True)
     c = fake["c"]
-    # 20 % von 11,50 frei = 2,30 USDT Margin x 10 = 23 USDT Wert -> 0,000377 BTC -> Mindestmenge 0,001 nicht erreicht
-    with pytest.raises(ValueError, match="Mindestmenge"):
-        acc.quick_order("BTC/USDT:USDT", "long", 20, 10, 10, 20)
+    # 2,30 USDT Einsatz x 10 = 23 USDT Wert -> 0,000377 BTC -> Mindestmenge 0,001 nicht erreicht
+    with pytest.raises(ValueError, match="zu klein"):
+        acc.quick_order("BTC/USDT:USDT", "long", 2.3, 10, 10, 20)
+    with pytest.raises(ValueError, match="mehr als verfuegbar"):
+        acc.quick_order("BTC/USDT:USDT", "long", 50, 10, 10, 20)
     c.fetch_ticker = lambda sym: {"last": 2000.0}
     with pytest.raises(RuntimeError, match="Gegenrichtung"):       # BTC-Long offen -> kein Short
-        acc.quick_order("BTC/USDT:USDT", "short", 20, 10, 10, 20)
+        acc.quick_order("BTC/USDT:USDT", "short", 5, 10, 10, 20)
     with pytest.raises(ValueError, match="Take-Profit"):
-        acc.quick_order("BTC/USDT:USDT", "long", 20, 10, 10, 0)
-    acc.quick_order("BTC/USDT:USDT", "long", 50, 10, 10, 20)
-    acc.quick_order("BTC/USDT:USDT", "long", 50, 10, 10, 20)
+        acc.quick_order("BTC/USDT:USDT", "long", 5, 10, 10, 0)
+    acc.quick_order("BTC/USDT:USDT", "long", 5.75, 10, 10, 20)
+    acc.quick_order("BTC/USDT:USDT", "long", 5.75, 10, 10, 20)
     tks = acc.tickets().open()
     assert len(tks) == 2 and tks[0]["id"] != tks[1]["id"]                    # zwei getrennte Positionen
     t1 = tks[0]
@@ -1494,6 +1496,8 @@ def test_quick_orders_are_separate_positions(tmp_path, monkeypatch):
     # Ticket 2: Ziel wurde auf Bitget ausgefuehrt -> Stop stornieren, Ticket geschlossen
     t2 = acc.tickets().open()[0]
     c.plans.pop(t2["tp_id"])
+    for x in acc.tickets().items:
+        x["opened_ms"] -= 60_000        # Schonfrist fuer frisch eroeffnete Positionen vorbei
     acc.refresh(force=True)
     assert not acc.tickets().open()
     closed = [x for x in acc.tickets().items if x["id"] == t2["id"]][0]
@@ -1536,7 +1540,145 @@ def test_hedge_mode_account_orders(tmp_path, monkeypatch):
     acc.connect("k", "s", "p")
     c = box["c"]
     assert is_hedged(c) and hold_side(c, "short") == "short"
-    acc.quick_order("BTC/USDT:USDT", "short", 50, 10, 10, 20)     # Gegenrichtung zur offenen Long-Position erlaubt
+    acc.quick_order("BTC/USDT:USDT", "short", 5.75, 10, 10, 20)   # Gegenrichtung zur offenen Long-Position erlaubt
     order = [x for x in c.calls if x[0] == "create_order"][-1]
     assert order[3] == "sell" and order[6]["hedged"] is True
     assert ("plan", "short") in c.calls
+
+
+def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
+    from bot.account import PROFILE_KEYS, Account
+
+    for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
+        monkeypatch.delenv(n, raising=False)
+
+    class FL(FakeBitget):
+        markets = {"ETH/USDT:USDT": {"swap": True}}
+        last = 2000.0
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.pos = []
+            self.plans, self.orders_ = {}, {}
+
+        def market(self, sym):
+            return {"id": "ETHUSDT", "limits": {"amount": {"min": 0.001}}}
+
+        def fetch_ticker(self, sym):
+            return {"last": self.last}
+
+        def create_order(self, sym, typ, side, amount, price=None, params=None):
+            self.calls.append(("create_order", sym, typ, side, amount, price, params))
+            oid = f"o{len(self.calls)}"
+            self.orders_[oid] = {"status": "open" if typ == "limit" else "closed", "filled": 0 if typ == "limit" else amount,
+                                 "average": price or self.last, "price": price}
+            return {"id": oid, "average": None if typ == "limit" else self.last}
+
+        def fetch_order(self, oid, sym):
+            return self.orders_[oid]
+
+        def cancel_order(self, oid, sym, params=None):
+            self.calls.append(("cancel_order", oid))
+            self.orders_[oid]["status"] = "canceled"
+
+        def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
+            oid = f"p{len(self.plans) + 1}"
+            self.plans[oid] = req
+            return {"data": {"orderId": oid}}
+
+        def privateMixPostV2MixOrderCancelPlanOrder(self, req):  # noqa: N802
+            self.plans.pop(req["orderIdList"][0]["orderId"], None)
+
+        def fetch_open_orders(self, sym, since=None, limit=None, params=None):
+            if (params or {}).get("planType") == "profit_loss":
+                return [{"id": k, "symbol": sym, "triggerPrice": float(v["triggerPrice"]), "amount": float(v["size"])}
+                        for k, v in self.plans.items()]
+            return []
+
+    box = {}
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, ["ETH/USDT:USDT"], factory=lambda api, demo=False: box.setdefault("c", FL(api, demo)),
+                  env_path=tmp_path / ".env")
+    acc.connect("k", "s", "p")
+    c = box["c"]
+    with pytest.raises(ValueError, match="Limit-Preis"):
+        acc.quick_order("ETH/USDT:USDT", "long", 5.75, 10, 10, 20, "limit", None)
+    msg = acc.quick_order("ETH/USDT:USDT", "long", 5.75, 10, 10, 20, "limit", 1950.0)
+    assert "liegt" in msg
+    tk = acc.tickets().active()[0]
+    assert tk["status"] == "pending" and not c.plans                          # noch kein Stop/Ziel
+    acc.refresh(force=True)
+    assert acc.tickets().active()[0]["status"] == "pending"
+    c.orders_[tk["order_id"]].update(status="closed", filled=tk["amount"], average=1950.0)   # ausgefuehrt
+    c.pos = [{"symbol": "ETH/USDT:USDT", "side": "long", "contracts": tk["amount"], "entryPrice": 1950.0}]
+    acc.refresh(force=True)
+    tk = acc.tickets().active()[0]
+    assert tk["status"] == "open" and tk["entry"] == 1950.0 and len(c.plans) == 2
+    assert tk["sl"] == pytest.approx(1950 * 0.99) and tk["tp"] == pytest.approx(1950 * 1.02)
+    # Stop auf Einstand: erst wenn der Kurs darueber ist
+    c.last = 1940.0
+    with pytest.raises(RuntimeError, match="Einstand"):
+        acc.breakeven(tk["id"])
+    c.last = 1970.0
+    acc.breakeven(tk["id"])
+    tk = acc.tickets().active()[0]
+    assert tk["be"] and tk["sl"] > 1950 and len(c.plans) == 2 and c.plans[tk["sl_id"]]["planType"] == "loss_plan"
+    # zweite Limit-Order wartet, dann alles schliessen: Position zu, Limit storniert
+    acc.quick_order("ETH/USDT:USDT", "long", 5.75, 10, 10, 20, "limit", 1900.0)
+    assert len(acc.tickets().active()) == 2
+    assert "2 Einzel-Position" in acc.close_all_tickets()
+    assert not acc.tickets().active() and not c.plans
+    whys = sorted(x["why"] for x in acc.tickets().items)
+    assert whys == ["Limit-Order storniert", "manuell"]
+
+
+def test_position_mode_auto_retry_on_40774():
+    """Erkennt der Bot den Positionsmodus falsch, korrigiert er sich bei Bitget-Fehler 40774 selbst."""
+    from bot.exchange import is_hedged, mode_safe
+
+    class Raw:
+        markets = {}
+        mode_hedge = True          # wirklicher Modus des Kontos
+
+        def __init__(self):
+            self.sent = []
+
+        def load_markets(self):
+            raise RuntimeError("offline")     # Modus-Abfrage schlaegt fehl -> Bot nimmt One-Way an
+
+        def _check(self, hedged_req):
+            if hedged_req != self.mode_hedge:
+                raise RuntimeError('bitget {"code":"40774","msg":"The order type for unilateral position ..."}')
+
+        def create_order(self, symbol, type, side, amount, price=None, params=None):  # noqa: A002
+            self.sent.append(("order", params.get("hedged")))
+            self._check(bool(params.get("hedged")))
+            return {"id": "1"}
+
+        def close_position(self, symbol, side=None, params=None):
+            self.sent.append(("close", side))
+            self._check(side in ("long", "short"))
+            return {"id": "2"}
+
+        def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
+            self.sent.append(("tpsl", req["holdSide"]))
+            self._check(req["holdSide"] in ("long", "short"))
+            return {"data": {"orderId": "3"}}
+
+        def privateMixPostV2MixOrderPlacePosTpsl(self, req):  # noqa: N802
+            self._check(req["holdSide"] in ("long", "short"))
+            return {}
+
+    c = Raw()
+    mode_safe(c)
+    assert not is_hedged(c)                                   # falsch erkannt
+    c.create_order("ETH/USDT:USDT", "market", "buy", 1, None, {})
+    assert c.sent == [("order", False), ("order", True)] and is_hedged(c)   # selbst korrigiert
+    c.close_position("ETH/USDT:USDT", "buy")
+    assert c.sent[-1] == ("close", "long")
+    c.privateMixPostV2MixOrderPlaceTpslOrder({"holdSide": "sell", "planType": "loss_plan"})
+    assert c.sent[-1] == ("tpsl", "short")
+    c.mode_hedge = False                                      # Konto auf One-Way umgestellt
+    c.create_order("ETH/USDT:USDT", "market", "buy", 1, None, {})
+    assert c.sent[-1] == ("order", False) and not is_hedged(c)

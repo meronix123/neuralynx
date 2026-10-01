@@ -948,6 +948,7 @@ class Bot:
             "max_trades_per_day": self.r["max_trades_per_day"],
             "block": block,
             "paused": STOP_FILE.exists(),
+            "modes_ready": self._modes_ready(),
             "signal_log": self.state.get("signal_log", [])[-40:],
             "sleep_warning": self.status.get("sleep_warning"),
             "last_error": self.last_error,
@@ -965,6 +966,15 @@ class Bot:
             "history": self.state["history"][-50:],
             "brain": self._brain(views, positions, block),
         }
+
+    @staticmethod
+    def _modes_ready() -> dict:
+        """Sind Schluessel fuer Testkonto / echtes Konto hinterlegt? (fuer die Modus-Knoepfe)"""
+        import os
+        live = all(os.getenv(n) for n in ("BITGET_API_KEY", "BITGET_API_SECRET", "BITGET_API_PASSPHRASE"))
+        demo = all(os.getenv(n) for n in ("BITGET_DEMO_API_KEY", "BITGET_DEMO_API_SECRET", "BITGET_DEMO_API_PASSPHRASE"))
+        demo = demo or (os.getenv("BITGET_DEMO") == "1" and live)
+        return {"paper": True, "demo": demo, "live": live}
 
     def _brain(self, views: dict, positions: dict, block: str) -> dict:
         """Alles fuer das Fenster 'Bot-Gehirn': Plan je Markt und Zeiteinheit, Filter, Gedanken."""
