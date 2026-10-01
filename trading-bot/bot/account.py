@@ -199,12 +199,16 @@ class Account:
     @staticmethod
     def _pos_row(p: dict) -> dict:
         info = p.get("info") or {}
+        # echte Margin laut Bitget (marginSize) - ccxt rechnet bei isolierter Margin nur Wert/Hebel
+        margin = _f(info.get("marginSize")) or _f(p.get("initialMargin")) or _f(p.get("collateral"))
+        pnl = _f(p.get("unrealizedPnl"))
+        lev = _f(info.get("leverage")) or _f(p.get("leverage"))
         return {
             "symbol": p["symbol"], "side": p.get("side"), "amount": _f(p.get("contracts")),
             "entry": _f(p.get("entryPrice")), "mark": _f(p.get("markPrice")),
             "liq": _f(p.get("liquidationPrice")), "pnl": _f(p.get("unrealizedPnl")),
-            "pnl_pct": _f(p.get("percentage")), "leverage": _f(p.get("leverage")),
-            "margin_mode": p.get("marginMode"), "margin": _f(p.get("initialMargin") or p.get("collateral")),
+            "pnl_pct": 100 * pnl / margin if pnl is not None and margin else _f(p.get("percentage")), "leverage": lev,
+            "margin_mode": p.get("marginMode"), "margin": margin,
             "value": _f(p.get("notional")),
             "sl": _f(p.get("stopLossPrice")), "tp": _f(p.get("takeProfitPrice")),
             "opened_ms": p.get("timestamp") or _f(info.get("cTime")),
@@ -369,10 +373,26 @@ class Account:
             return (f"Limit-Order #{tk['id']}: {side.upper()} {qty:g} {symbol.split(':')[0]} @ {ref:.6g} liegt - "
                     "Stop und Ziel werden bei Ausfuehrung gesetzt")
         entry = _f(o.get("average")) or last
-        tk = self.tickets().add(**base, status="opening", entry=entry, margin=entry * qty / lev)
+        real_lev = self._real_leverage(c, symbol, side) or lev
+        if real_lev != lev:
+            log.warning("%s: Bitget nutzt Hebel %sx statt %sx (in der App eingestellt?)", symbol, real_lev, lev)
+            base["leverage"] = real_lev
+        tk = self.tickets().add(**base, status="opening", entry=entry, margin=entry * qty / real_lev)
         msg = self._protect_ticket(c, tk)
         self.refresh(force=True)
         return msg
+
+    @staticmethod
+    def _real_leverage(c, symbol: str, side: str) -> int | None:
+        """Hebel, den Bitget fuer diese Position wirklich nutzt (falls er sich nicht umstellen liess)."""
+        try:
+            for p in c.fetch_positions([symbol]):
+                if p.get("symbol") == symbol and p.get("side") == side and (_f(p.get("contracts")) or 0) > 0:
+                    lev = _f((p.get("info") or {}).get("leverage")) or _f(p.get("leverage"))
+                    return int(lev) if lev else None
+        except Exception as e:  # noqa: BLE001
+            log.debug("Hebel %s: %s", symbol, e)
+        return None
 
     def _protect_ticket(self, c, tk: dict) -> str:
         """Stop und Ziel fuer genau diese Einzel-Position setzen (ab dem echten Einstiegspreis)."""

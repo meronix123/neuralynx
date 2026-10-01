@@ -1715,3 +1715,14 @@ def test_quick_order_too_small_message_for_btc(tmp_path, monkeypatch):
     with pytest.raises(ValueError) as e:
         acc.quick_order("BTC/USDT:USDT", "long", 0.5, 10, 10, 20)
     assert "BTC" in str(e.value) and "8.50" in str(e.value) and "Einsatz" in str(e.value)
+
+
+def test_position_margin_from_bitget_margin_size():
+    from bot.account import Account
+
+    row = Account._pos_row({"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.004, "entryPrice": 60000,
+                            "unrealizedPnl": 3.0, "initialMargin": 24.0, "leverage": 10, "notional": 244,
+                            "info": {"marginSize": "12.2", "leverage": "20"}})
+    assert row["margin"] == 12.2 and row["leverage"] == 20 and row["pnl_pct"] == pytest.approx(3 / 12.2 * 100)
+    row = Account._pos_row({"symbol": "X", "contracts": 1, "initialMargin": 5.0, "unrealizedPnl": 1.0, "leverage": 10})
+    assert row["margin"] == 5.0 and row["pnl_pct"] == pytest.approx(20.0)
