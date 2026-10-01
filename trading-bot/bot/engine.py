@@ -113,7 +113,16 @@ class Bot:
         self.notify.send(f"Bot gestartet ({self.cfg['mode']}) - {syms}")
         for sym in self.ex.symbols:
             self.ex.setup(sym)
+        last = time.time()
         while True:
+            gap = time.time() - last
+            if gap > max(300, 5 * self.cfg["loop_seconds"]):
+                msg = (f"{gap / 60:.0f} Minuten Pause erkannt - der PC war vermutlich im Ruhezustand. "
+                       "In dieser Zeit hat der Bot nichts gesehen und nichts gehandelt.")
+                log.warning(msg)
+                self.status["sleep_warning"] = {"at": datetime.now(timezone.utc).isoformat(), "msg": msg}
+            last = time.time()
+            self._heartbeat()
             try:
                 self.step()
             except KeyboardInterrupt:
@@ -125,6 +134,23 @@ class Bot:
                 self.state["paper"] = self.ex.dump()
             save_state(self.state, self.cfg["mode"])
             time.sleep(self.cfg["loop_seconds"])
+
+    def _heartbeat(self) -> None:
+        """Einmal pro Stunde ins Log: Bot lebt, so viele Signale, so viele gehandelt, haeufigste Gruende."""
+        now = time.time()
+        if now - self.__dict__.get("_hb", now - 3601 + 60) < 3600:
+            return
+        self._hb = now
+        recent = [x for x in self.state.get("signal_log", []) if x["ms"] >= (now - 3600) * 1000]
+        traded = sum(1 for x in recent if x["traded"])
+        reasons: dict[str, int] = {}
+        for x in recent:
+            if not x["traded"]:
+                k = x["why"].split("(")[0].strip()
+                reasons[k] = reasons.get(k, 0) + 1
+        top = ", ".join(f"{k}: {n}" for k, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:3])
+        log.info("LEBENSZEICHEN: laeuft | letzte Stunde %d Signale, %d gehandelt%s", len(recent), traded,
+                 f" | nicht gehandelt wegen: {top}" if top else "")
 
     # ------------------------------------------------------------------
     def step(self) -> None:
@@ -416,9 +442,12 @@ class Bot:
                 continue
             st = self.tf_stats.get(tf, {})
             if not st.get("ok", True):
-                if int(v["sig_df"]["signal"].iloc[-2]) != 0:
-                    notes.append(f"{tf}: Signal ausgelassen - Zeiteinheit laeuft gerade schlecht "
-                                 f"(Schatten-PF {st.get('pf')})")
+                row = v["sig_df"].iloc[-2]
+                if int(row["signal"]) != 0:
+                    why = f"Zeiteinheit laeuft gerade schlecht (Schatten-PF {st.get('pf')})"
+                    notes.append(f"{tf}: Signal ausgelassen - {why}")
+                    self._note_signal(sym, tf, "long" if int(row["signal"]) == 1 else "short",
+                                      str(row["strategy"]), int(row["ts"]), why)
                 continue
             why = self._try_enter(sym, equity, positions, v, risk_factor, now, tf)
             if sym in positions or sym in self.state["pending"]:
@@ -528,7 +557,28 @@ class Bot:
             return "Signal verworfen (Funding-Rate extrem)"
         if self.state["last_sig"].get(sig_key) == sig.ts:
             return "Signal bereits bearbeitet"
+        why = self._decide(sym, equity, positions, view, risk_factor, now, tf, s, sig_key, sig, funding)
+        self._note_signal(sym, tf, sig.side, sig.strategy, sig.ts, why)
+        return why
 
+    def _note_signal(self, sym: str, tf: str, side: str, strategy: str, sig_ts: int, why: str) -> None:
+        """Jedes neue Signal einmal protokollieren - mit dem Grund, warum (nicht) gehandelt wurde."""
+        key = f"{sym}|{tf}|{sig_ts}"
+        seen = self.__dict__.setdefault("_noted", set())
+        if key in seen:
+            return
+        seen.add(key)
+        if len(seen) > 2000:
+            seen.clear()
+            seen.add(key)
+        traded = why.startswith(("Position eroeffnet", "Limit-Order"))
+        log.info("SIGNAL %s %s %s (%s) -> %s", sym, tf, side.upper(), STRATEGY_NAMES.get(strategy, strategy), why)
+        lst = self.state.setdefault("signal_log", [])
+        lst.append({"ms": int(time.time() * 1000), "symbol": sym, "tf": tf, "side": side,
+                    "strategy": strategy, "why": why, "traded": traded})
+        del lst[:-150]
+
+    def _decide(self, sym, equity, positions, view, risk_factor, now, tf, s, sig_key, sig, funding) -> str:
         ok, why = self.guard.can_open(equity, len(positions) + len(self.state["pending"]), now)
         if not ok:
             return why
@@ -745,6 +795,8 @@ class Bot:
             "max_trades_per_day": self.r["max_trades_per_day"],
             "block": block,
             "paused": STOP_FILE.exists(),
+            "signal_log": self.state.get("signal_log", [])[-40:],
+            "sleep_warning": self.status.get("sleep_warning"),
             "fear_greed": fng,
             "calendar_ok": self.ctx.cal_ok,
             "next_events": [

@@ -5,6 +5,7 @@
     python run.py optimize --zeiten    # feste Zeiteinheit gegen automatische Wahl (365 Tage)
     python run.py optimize --orderblocks  # Order-Block-Filter testen (365 Tage)
     python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
+    python run.py signale              # welche Signale es gab und warum (nicht) gehandelt wurde
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
 """
@@ -66,9 +67,30 @@ def report(mode: str = "paper") -> None:
           "NEIN - noetig: mind. 30 Trades und Profit-Faktor >= 1,3")
 
 
+def signals(mode: str = "paper") -> None:
+    """Letzte Signale mit Grund - zum Nachsehen, warum der Bot (nicht) gehandelt hat."""
+    from collections import Counter
+    from datetime import datetime
+
+    from bot.engine import load_state
+
+    log_ = load_state(mode).get("signal_log", [])
+    if not log_:
+        print("Noch keine Signale protokolliert (gibt es ab dieser Version).")
+        return
+    for x in log_[-40:]:
+        t = datetime.fromtimestamp(x["ms"] / 1000).strftime("%d.%m. %H:%M")
+        mark = "GEHANDELT" if x["traded"] else "nein"
+        print(f"{t}  {x['symbol'].split(':')[0]:<10} {x['tf']:<4} {x['side']:<5} {mark:<9} {x['why']}")
+    c = Counter(x["why"].split("(")[0].strip() for x in log_ if not x["traded"])
+    print(f"\n{len(log_)} Signale, {sum(x['traded'] for x in log_)} gehandelt. Haeufigste Gruende dagegen:")
+    for why, n in c.most_common(6):
+        print(f"  {n:>4}x  {why}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "optimize", "report", "check", "bot"])
+    ap.add_argument("command", choices=["backtest", "optimize", "report", "signale", "check", "bot"])
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
     ap.add_argument("--zeiten", action="store_true", help="feste Zeiteinheit gegen automatische Wahl")
@@ -92,6 +114,9 @@ def main() -> None:
         optimize_cli(cfg, args.days or (120 if args.fast else 365), fast=args.fast)
         return
 
+    if args.command == "signale":
+        signals(cfg["mode"])
+        return
     if args.command == "report":
         report(cfg["mode"])
         return

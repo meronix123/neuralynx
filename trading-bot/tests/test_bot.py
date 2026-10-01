@@ -1128,3 +1128,26 @@ def test_orderblock_comparison_runs():
         assert res.iloc[2]["test_trades"] < res.iloc[0]["test_trades"]
     finally:
         optimize.OB_DISP, optimize.OB_MODES = saved
+
+
+def test_signal_log_explains_decisions(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["strategy"]["strategies"] = ["trend", "range", "breakout"]  # unabhaengig von config.yaml
+    client = FakeClient(synthetic(2000, 3))
+    bot = engine.Bot(cfg, PaperExchange(cfg, client), FakeContext())
+    for i in range(400, 2000):
+        client.i = i
+        bot.step()
+    log_ = bot.state["signal_log"]
+    assert log_ and any(x["traded"] for x in log_)
+    keys = [(x["symbol"], x["tf"], x["why"], x["ms"]) for x in log_]
+    assert len(keys) == len(set(keys))                 # jedes Signal nur einmal
+    assert all(x["why"] for x in log_)
+    assert bot.status["signal_log"]
+    bot._hb = 0
+    bot._heartbeat()                                    # darf nicht abstuerzen

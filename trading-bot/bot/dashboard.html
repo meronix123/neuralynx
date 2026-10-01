@@ -150,6 +150,11 @@
     <div class="wrap"><table id="market"></table></div>
   </section>
   <section class="panel" style="grid-column:1/-1">
+    <h3>Signale - was der Bot gesehen hat und warum (nicht) gehandelt</h3>
+    <div id="sleepwarn" class="warn" style="margin-bottom:6px"></div>
+    <div class="wrap"><table id="signals"></table></div>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
     <h3>Letzte Trades</h3>
     <table id="hist"></table>
   </section>
@@ -240,6 +245,17 @@ function renderPositions() {
       <td><button class="btn sm red" onclick="act('/api/bot/close', {symbol: '${o.symbol}'}, 'Limit-Order stornieren?')">Stornieren</button></td></tr>`).join("");
   document.getElementById("positions").innerHTML = head + (body + pbody ||
     `<tr><td colspan="19" class="sub">Keine offene Position - der Bot wartet auf ein passendes Signal.</td></tr>`);
+}
+
+function renderSignals() {
+  const sl = (data.signal_log || []).slice().reverse();
+  const sw = data.sleep_warning;
+  document.getElementById("sleepwarn").textContent = sw ? `Achtung (${time(sw.at)}): ${sw.msg}` : "";
+  document.getElementById("signals").innerHTML = `<tr><th>Zeit</th><th>Markt</th><th>Zeiteinheit</th><th>Richtung</th><th>Strategie</th><th style="text-align:left">Ergebnis</th></tr>` +
+    (sl.length ? sl.map(x => `<tr><td>${time(x.ms)}</td><td>${x.symbol.split(":")[0]}</td><td>${x.tf}</td>
+      <td class="${x.side === "long" ? "up" : "down"}">${x.side.toUpperCase()}</td><td>${STRAT[x.strategy] || x.strategy || "-"}</td>
+      <td style="text-align:left" class="${x.traded ? "up" : "sub"}">${x.traded ? "GEHANDELT - " : "nicht gehandelt: "}${x.why}</td></tr>`).join("")
+      : `<tr><td colspan="6" class="sub">Seit dem Start noch kein Signal. Normal: im Schnitt ca. 1 Trade pro Tag ueber alle Maerkte.</td></tr>`);
 }
 
 function renderMarket(syms) {
@@ -408,6 +424,7 @@ function render() {
 
   renderPositions();
   renderMarket(syms);
+  renderSignals();
 
   document.getElementById("events").innerHTML = (data.next_events.length ? data.next_events.map(e =>
     `<div class="row"><span>${e.country} ${e.title}</span><b>${time(e.time)}</b></div>`).join("")
