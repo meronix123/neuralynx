@@ -107,6 +107,16 @@ Achtung: Diese Knoepfe wirken auf das ECHTE Konto (bzw. Demokonto bei "Demo-Schl
 auch wenn der Bot selbst im Paper-Modus laeuft. Die Oberflaeche ist nur auf diesem PC
 erreichbar. API-Schluessel immer OHNE Auszahlungsrecht anlegen.
 
+## Vom Handy aus ansehen (Fernzugriff)
+
+1. Auf dem PC: `python run.py fernzugriff` - Passwort festlegen (mind. 10 Zeichen, wird nur als Hash gespeichert).
+2. Fuer unterwegs **Tailscale** einrichten (kostenlos, privates verschluesseltes Netz - KEINE Portfreigabe im Router!):
+   - PC (Linux): `curl -fsSL https://tailscale.com/install.sh | sh` und `sudo tailscale up` (Link im Browser bestaetigen)
+   - Handy: App "Tailscale" installieren, mit demselben Konto anmelden
+3. Bot neu starten. Er zeigt die Handy-Adresse an (z. B. `http://100.x.y.z:8050`), alternativ `tailscale ip -4`.
+4. Auf dem Handy oeffnen, Passwort eingeben. Nach 5 Fehlversuchen 15 Minuten Sperre.
+Ausschalten: `python run.py fernzugriff aus`.
+
 ## Installation (Windows)
 
 1. Python 3.11 oder neuer installieren: https://www.python.org/downloads/

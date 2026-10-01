@@ -1338,3 +1338,66 @@ def test_live_macro_score_loads(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "fetch_macro", lambda days: None)   # Quelle faellt aus -> alter Wert bleibt
     bot._macro_cache = (0, scores)
     assert bot._macro_score("BTC/USDT:USDT") == -0.6
+
+
+def test_remote_access_requires_password(tmp_path, monkeypatch):
+    import http.client
+    import json
+    import re
+
+    from bot.dashboard import check_password, hash_password, start_dashboard
+
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    from bot.exchange import PaperExchange
+
+    h = hash_password("richtig-geheim-123")
+    assert "richtig" not in h and check_password("richtig-geheim-123", h) and not check_password("falsch", h)
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    bot = engine.Bot(cfg, PaperExchange(cfg, FakeClient(synthetic(500, 1))), FakeContext())
+    bot.status = {"symbols": {}, "x": 1}
+    srv = start_dashboard(bot, 8094, None, stop_file=tmp_path / "STOP", remote_pw_hash=h)
+    remote_host = "100.101.102.103:8094"   # wie ueber Tailscale vom Handy
+
+    def req(method, path, body=None, headers=None, host=remote_host):
+        c = http.client.HTTPConnection("127.0.0.1", 8094, timeout=10)
+        c.request(method, path, body=body, headers={"Host": host, **(headers or {})})
+        r = c.getresponse()
+        return r.status, dict(r.getheaders()), r.read().decode()
+
+    try:
+        assert req("GET", "/api/status", host="127.0.0.1:8094")[0] == 200     # am PC selbst ohne Anmeldung
+        st, _, body = req("GET", "/")
+        assert st == 200 and "Passwort" in body and "TOKEN" not in body       # vom Handy: erst Anmeldung
+        assert req("GET", "/api/status")[0] == 401
+        form = {"Content-Type": "application/x-www-form-urlencoded"}
+        assert req("POST", "/login", "password=falsch", form)[0] == 401
+        st, hd, _ = req("POST", "/login", "password=richtig-geheim-123", form)
+        assert st == 303 and "HttpOnly" in hd["Set-Cookie"] and "SameSite=Strict" in hd["Set-Cookie"]
+        cookie = {"Cookie": hd["Set-Cookie"].split(";")[0]}
+        st, _, body = req("GET", "/api/status", headers=cookie)
+        assert st == 200 and json.loads(body)["x"] == 1
+        page = req("GET", "/", headers=cookie)[2]
+        token = re.search(r'const TOKEN = "([0-9a-f]{32})"', page).group(1)
+        act = {**cookie, "X-Token": token, "Content-Type": "application/json"}
+        assert req("POST", "/api/bot/pause", '{"on": true}', act)[0] == 200 and (tmp_path / "STOP").exists()
+        assert req("POST", "/api/bot/pause", '{"on": false}', {"X-Token": token})[0] == 403    # ohne Anmeldung
+        assert req("POST", "/api/bot/pause", '{"on": false}', {**act, "Origin": "http://boese.example"})[0] == 403
+        for _ in range(5):                                                      # Sperre nach 5 Fehlversuchen
+            req("POST", "/login", "password=falsch", form)
+        assert req("POST", "/login", "password=richtig-geheim-123", form)[0] == 429
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_bitget_errors_are_explained():
+    from bot.account import Account, explain_error
+
+    assert "Passphrase" in explain_error(RuntimeError("bitget GET ... 403 Forbidden Sorry, you have been blocked Cloudflare"))
+    assert "Passphrase" in explain_error(RuntimeError('{"code":"40012","msg":"apikey/password is incorrect"}'))
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, [], factory=lambda api, demo=False: FakeBitget(api, demo))
+    with pytest.raises(ValueError, match="Berechtigungen"):
+        acc.connect("bg_123", "abc", "Lesen Schreiben Futures")      # Berechtigungen statt Passphrase

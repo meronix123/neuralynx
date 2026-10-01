@@ -3,6 +3,8 @@
 Aktionen (Schluessel speichern, Positionen schliessen, Orders ...) nur mit einem Zufalls-Token,
 das nur die eigene Seite kennt - fremde Webseiten im selben Browser koennen nichts ausloesen.
 """
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -17,6 +19,35 @@ log = logging.getLogger("bot")
 HTML = Path(__file__).with_name("dashboard.html")
 CHART_JS = Path(__file__).with_name("lightweight-charts.js")  # TradingView, Apache-2.0
 MAX_BODY = 20_000
+SESSION_DAYS = 30
+MAX_FAILS, LOCK_S = 5, 15 * 60
+
+LOGIN_HTML = """<!doctype html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Trading-Bot - Anmelden</title>
+<style>body{margin:0;background:#0f1115;color:#e6e8ee;font:16px system-ui,sans-serif;display:flex;
+min-height:100vh;align-items:center;justify-content:center}form{background:#171a21;border:1px solid #262b36;
+border-radius:12px;padding:24px;width:min(340px,90vw)}input,button{width:100%;box-sizing:border-box;
+padding:10px;margin-top:10px;border-radius:8px;border:1px solid #262b36;background:#11141a;color:#e6e8ee;
+font:inherit}button{background:#1a2233;border-color:#3b82f6;cursor:pointer}.e{color:#ef4444;font-size:14px}</style>
+</head><body><form method="post" action="/login"><b>Trading-Bot</b><div class="e">__MSG__</div>
+<input type="password" name="password" placeholder="Passwort" autofocus autocomplete="current-password">
+<button>Anmelden</button></form></body></html>"""
+
+
+def hash_password(pw: str, salt: bytes | None = None, iters: int = 200_000) -> str:
+    """Passwort nur als Hash speichern (PBKDF2-SHA256), nie im Klartext."""
+    salt = salt or secrets.token_bytes(16)
+    h = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, iters)
+    return f"pbkdf2${iters}${salt.hex()}${h.hex()}"
+
+
+def check_password(pw: str, stored: str) -> bool:
+    try:
+        _, iters, salt, h = stored.split("$")
+        calc = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), int(iters))
+        return hmac.compare_digest(calc.hex(), h)
+    except (ValueError, TypeError):
+        return False
 
 
 def _num(v):
@@ -108,25 +139,81 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     raise KeyError(path)
 
 
-def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None) -> ThreadingHTTPServer:
+def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
+                    remote_pw_hash: str | None = None) -> ThreadingHTTPServer:
+    """remote_pw_hash gesetzt = Fernzugriff (Handy) erlaubt: lauscht im Netzwerk, aber nur mit Passwort.
+    Vom PC selbst (localhost) geht es weiterhin ohne Anmeldung."""
     token = secrets.token_hex(16)
-    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    sessions: dict[str, float] = {}          # Sitzungs-Cookie -> gueltig bis
+    fails: dict[str, list] = {}              # IP -> [Fehlversuche, gesperrt bis]
     if stop_file is None:
         from .engine import STOP_FILE
         stop_file = STOP_FILE
 
     class Handler(BaseHTTPRequestHandler):
-        def _send(self, code: int, body: bytes, ctype: str) -> None:
+        def _send(self, code: int, body: bytes, ctype: str, headers: dict | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
+
+        def _local(self) -> bool:
+            p = self.server.server_address[1]  # echter Port (auch wenn 0 = "frei waehlen" angegeben war)
+            return (self.client_address[0] in ("127.0.0.1", "::1")
+                    and self.headers.get("Host") in {f"127.0.0.1:{p}", f"localhost:{p}"})
+
+        def _session(self) -> bool:
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == "botsession" and sessions.get(v, 0) > time.time():
+                    return True
+            return False
+
+        def _authorized(self) -> bool:
+            return self._local() or (remote_pw_hash is not None and self._session())
+
+        def _login_page(self, msg: str = "", code: int = 200) -> None:
+            self._send(code, LOGIN_HTML.replace("__MSG__", msg).encode(), "text/html; charset=utf-8")
+
+        def _login(self) -> None:
+            ip = self.client_address[0]
+            f = fails.setdefault(ip, [0, 0.0])
+            if f[1] > time.time():
+                self._login_page("Zu viele Fehlversuche - bitte 15 Minuten warten.", 429)
+                return
+            n = min(int(self.headers.get("Content-Length") or 0), 2000)
+            raw = self.rfile.read(n).decode(errors="replace")
+            from urllib.parse import parse_qs
+            pw = (parse_qs(raw).get("password") or [""])[0]
+            if remote_pw_hash and check_password(pw, remote_pw_hash):
+                fails.pop(ip, None)
+                sid = secrets.token_hex(24)
+                sessions[sid] = time.time() + SESSION_DAYS * 86_400
+                self._send(303, b"", "text/plain", {
+                    "Location": "/",
+                    "Set-Cookie": f"botsession={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_DAYS * 86_400}",
+                })
+                log.info("Oberflaeche: Anmeldung von %s", ip)
+                return
+            f[0] += 1
+            if f[0] >= MAX_FAILS:
+                f[:] = [0, time.time() + LOCK_S]
+                log.warning("Oberflaeche: %d Fehlversuche von %s - 15 Minuten gesperrt", MAX_FAILS, ip)
+            self._login_page("Falsches Passwort.", 401)
 
         def _json(self, code: int, obj) -> None:
             self._send(code, json.dumps(obj, default=str).encode(), "application/json")
 
         def do_GET(self):  # noqa: N802 - Name vorgegeben
+            if not self._authorized():
+                if self.path.startswith("/api/"):
+                    self._json(401, {"ok": False, "msg": "Bitte anmelden"})
+                else:
+                    self._login_page()
+                return
             if self.path.startswith("/api/status"):
                 self._json(200, bot.status)
             elif self.path.startswith("/api/account"):
@@ -143,9 +230,13 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None)
                 self.send_error(404)
 
         def do_POST(self):  # noqa: N802
+            if self.path == "/login":
+                self._login()
+                return
             origin = self.headers.get("Origin")
-            if (self.headers.get("Host") not in allowed_hosts or self.headers.get("X-Token") != token
-                    or (origin and origin.split("//")[-1] not in allowed_hosts)):
+            host = self.headers.get("Host") or ""
+            same_origin = not origin or origin.split("//")[-1] == host
+            if not self._authorized() or self.headers.get("X-Token") != token or not same_origin:
                 self._json(403, {"ok": False, "msg": "Nicht erlaubt"})
                 return
             n = int(self.headers.get("Content-Length") or 0)
@@ -165,7 +256,7 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None)
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0" if remote_pw_hash else "127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    log.info("Oberflaeche: http://localhost:%d", port)
+    log.info("Oberflaeche: http://localhost:%d%s", port, " (Fernzugriff mit Passwort aktiv)" if remote_pw_hash else "")
     return server

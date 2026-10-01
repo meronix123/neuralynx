@@ -6,6 +6,7 @@
     python run.py optimize --orderblocks  # Order-Block-Filter testen (365 Tage)
     python run.py report               # Auswertung der bisherigen Trades (Paper/Demo/Live)
     python run.py signale              # welche Signale es gab und warum (nicht) gehandelt wurde
+    python run.py fernzugriff          # Oberflaeche auch vom Handy (mit Passwort) / "fernzugriff aus"
     python run.py check                # Verbindung + API-Schluessel pruefen
     python run.py bot                  # Bot starten (Modus aus config.yaml)
 """
@@ -67,6 +68,49 @@ def report(mode: str = "paper") -> None:
           "NEIN - noetig: mind. 30 Trades und Profit-Faktor >= 1,3")
 
 
+def _tailscale_ip() -> str | None:
+    import subprocess
+    try:
+        out = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5)
+        ip = out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else None
+        return ip
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+def remote_setup(cfg: dict, option: str) -> None:
+    """Fernzugriff ein-/ausschalten. Passwort wird nur als Hash in .env gespeichert."""
+    from getpass import getpass
+
+    from bot.account import save_env
+    from bot.dashboard import hash_password
+
+    if option.lower() in ("aus", "off"):
+        save_env({"DASHBOARD_REMOTE": "0"})
+        print("Fernzugriff AUS. Die Oberflaeche ist nur noch auf diesem PC erreichbar (nach Neustart des Bots).")
+        return
+    print("Fernzugriff: Die Oberflaeche wird im Netzwerk erreichbar - NUR mit Passwort.")
+    print("Wichtig: KEINE Portfreigabe im Router! Fuer unterwegs Tailscale nutzen (siehe Anleitung).")
+    while True:
+        pw = getpass("Neues Passwort (mind. 10 Zeichen): ")
+        if len(pw) < 10:
+            print("Zu kurz.")
+            continue
+        if getpass("Passwort wiederholen: ") != pw:
+            print("Stimmt nicht ueberein.")
+            continue
+        break
+    save_env({"DASHBOARD_REMOTE": "1", "DASHBOARD_PASSWORD_HASH": hash_password(pw)})
+    port = cfg["dashboard"]["port"]
+    ip = _tailscale_ip()
+    print("\nGespeichert. Bot neu starten, dann auf dem Handy oeffnen:")
+    if ip:
+        print(f"  unterwegs (Tailscale): http://{ip}:{port}")
+    else:
+        print("  Tailscale ist noch nicht eingerichtet - siehe Anleitung. Danach zeigt dieser Befehl die Adresse.")
+    print(f"  im selben WLAN: http://<IP dieses PCs>:{port}   (IP anzeigen: hostname -I)")
+
+
 def signals(mode: str = "paper") -> None:
     """Letzte Signale mit Grund - zum Nachsehen, warum der Bot (nicht) gehandelt hat."""
     from collections import Counter
@@ -90,7 +134,8 @@ def signals(mode: str = "paper") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "optimize", "report", "signale", "check", "bot"])
+    ap.add_argument("command", choices=["backtest", "optimize", "report", "signale", "fernzugriff", "check", "bot"])
+    ap.add_argument("option", nargs="?", default="")
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
     ap.add_argument("--zeiten", action="store_true", help="feste Zeiteinheit gegen automatische Wahl")
@@ -114,6 +159,9 @@ def main() -> None:
         optimize_cli(cfg, args.days or (120 if args.fast else 365), fast=args.fast)
         return
 
+    if args.command == "fernzugriff":
+        remote_setup(cfg, args.option)
+        return
     if args.command == "signale":
         signals(cfg["mode"])
         return
@@ -142,8 +190,12 @@ def main() -> None:
         from bot.dashboard import start_dashboard
         account = Account(cfg, ex.symbols)   # echtes Bitget-Konto (Schluessel in der Oberflaeche eingeben)
         refresher(account)
-        start_dashboard(bot, cfg["dashboard"]["port"], account)
+        pw_hash = os.getenv("DASHBOARD_PASSWORD_HASH") if os.getenv("DASHBOARD_REMOTE") == "1" else None
+        start_dashboard(bot, cfg["dashboard"]["port"], account, remote_pw_hash=pw_hash or None)
         print(f"Oberflaeche im Browser oeffnen: http://localhost:{cfg['dashboard']['port']}")
+        if pw_hash:
+            ip = _tailscale_ip()
+            print("Fernzugriff (mit Passwort) aktiv" + (f": vom Handy http://{ip}:{cfg['dashboard']['port']}" if ip else ""))
     try:
         bot.run()
     except KeyboardInterrupt:

@@ -48,6 +48,22 @@ def save_env(values: dict[str, str], path=None) -> None:
         os.environ[k] = v
 
 
+def explain_error(e: Exception) -> str:
+    """Bitget-Fehler verstaendlich machen (statt einer ganzen Cloudflare-Webseite)."""
+    msg = str(e)
+    if "403" in msg and ("Cloudflare" in msg or "blocked" in msg):
+        return ("Bitget hat die Anfrage blockiert (Cloudflare 403). Haeufigste Ursache: falsche Eingabe - "
+                "die Passphrase ist das selbst vergebene API-Passwort, nicht die Berechtigungen. "
+                "Sonst: VPN aus, kurz warten, erneut versuchen.")
+    if "40037" in msg or "apikey" in msg.lower() and "not exist" in msg.lower():
+        return "API-Key unbekannt - bitte genau kopieren (bei Demo-Schluesseln 'Testkonto' waehlen)."
+    if "40012" in msg or "passphrase" in msg.lower():
+        return "Passphrase falsch - es ist das Passwort, das du beim Anlegen des API-Schluessels vergeben hast."
+    if "40018" in msg or "ip" in msg.lower() and "whitelist" in msg.lower():
+        return "Deine IP ist fuer diesen API-Schluessel nicht freigegeben (IP-Beschraenkung bei Bitget pruefen)."
+    return msg[:300]
+
+
 def _f(v):
     try:
         return None if v is None or v == "" else float(v)
@@ -102,9 +118,16 @@ class Account:
         key, secret, password = key.strip(), secret.strip(), password.strip()
         if not (key and secret and password):
             raise ValueError("API-Key, Secret und Passphrase eingeben")
+        for name, v in (("API-Key", key), ("Secret", secret), ("Passphrase", password)):
+            if not v.isascii() or any(ch.isspace() for ch in v):
+                raise ValueError(f"{name} enthaelt Leerzeichen oder Umlaute - die Passphrase ist das Passwort, "
+                                 "das du beim Anlegen des API-Schluessels vergeben hast (nicht die Berechtigungen)")
         profile = "demo" if demo else "live"
         client = self.factory({"key": key, "secret": secret, "password": password}, demo=demo)
-        client.fetch_balance({"type": "swap"})  # prueft die Schluessel (Fehler -> Exception)
+        try:
+            client.fetch_balance({"type": "swap"})  # prueft die Schluessel (Fehler -> Exception)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(explain_error(e)) from e
         with self.lock:
             self.clients[profile] = client
             if activate:
