@@ -1682,3 +1682,36 @@ def test_position_mode_auto_retry_on_40774():
     c.mode_hedge = False                                      # Konto auf One-Way umgestellt
     c.create_order("ETH/USDT:USDT", "market", "buy", 1, None, {})
     assert c.sent[-1] == ("order", False) and not is_hedged(c)
+
+
+def test_quick_order_too_small_message_for_btc(tmp_path, monkeypatch):
+    from bot.account import PROFILE_KEYS, Account
+
+    for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
+        monkeypatch.delenv(n, raising=False)
+
+    class FBtc(FakeBitget):
+        markets = {"BTC/USDT:USDT": {"swap": True}}
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.pos = []
+
+        def market(self, sym):
+            return {"id": "BTCUSDT", "limits": {"amount": {"min": 0.0001}}, "precision": {"amount": 0.0001}}
+
+        def fetch_ticker(self, sym):
+            return {"last": 85000.0}
+
+        def amount_to_precision(self, sym, v):     # wie ccxt: Fehler, wenn auf 0 gerundet wird
+            if v < 0.0001:
+                raise RuntimeError("bitget amount of BTC/USDT:USDT must be greater than minimum amount precision of 0.0001")
+            return f"{int(v * 10000) / 10000:.4f}"
+
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, [], factory=lambda api, demo=False: FBtc(api, demo), env_path=tmp_path / ".env")
+    acc.connect("k", "s", "p")
+    with pytest.raises(ValueError) as e:
+        acc.quick_order("BTC/USDT:USDT", "long", 0.5, 10, 10, 20)
+    assert "BTC" in str(e.value) and "8.50" in str(e.value) and "Einsatz" in str(e.value)

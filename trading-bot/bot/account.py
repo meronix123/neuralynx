@@ -335,12 +335,18 @@ class Account:
         last = float(c.fetch_ticker(symbol)["last"])
         ref = float(price) if limit else last
         lev = int(leverage)
-        qty = float(c.amount_to_precision(symbol, margin * lev / ref))
+        try:
+            qty = float(c.amount_to_precision(symbol, margin * lev / ref))
+        except Exception:  # noqa: BLE001 - ccxt: Menge rundet auf 0 -> unten verstaendlich melden
+            qty = 0.0
         min_amt = _f(((c.market(symbol).get("limits") or {}).get("amount") or {}).get("min")) or 0
+        if not min_amt:
+            min_amt = _f(((c.market(symbol).get("precision") or {}).get("amount"))) or 0
         if qty <= 0 or qty < min_amt or qty * ref < MIN_NOTIONAL:
             need = max(MIN_NOTIONAL, min_amt * ref) / lev
             raise ValueError(f"Order zu klein: {margin:.2f} USDT Einsatz x {lev} = {margin * lev:.2f} USDT Positionswert. "
-                             f"Bitget verlangt mehr - bei {lev}x mind. ca. {need * 1.05:.2f} USDT Einsatz "
+                             f"Bitget verlangt in {symbol.split(':')[0]} mind. {max(MIN_NOTIONAL, min_amt * ref):.2f} USDT "
+                             f"Positionswert - bei {lev}x also mind. ca. {need * 1.05:.2f} USDT Einsatz "
                              f"(verfuegbar {free:.2f} USDT).")
         mm = self.cfg.get("margin_mode", "isolated")
         for fn in (lambda: c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"}),

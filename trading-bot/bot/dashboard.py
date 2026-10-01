@@ -168,8 +168,11 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
             self.send_header("Cache-Control", "no-store")
             for k, v in (headers or {}).items():
                 self.send_header(k, v)
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # Browser hat die Anfrage abgebrochen (z. B. schnell umgeschaltet) - kein Fehler
 
         def _local(self) -> bool:
             p = self.server.server_address[1]  # echter Port (auch wenn 0 = "frei waehlen" angegeben war)
@@ -279,7 +282,16 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("0.0.0.0" if remote_pw_hash else "127.0.0.1", port), Handler)
+    class QuietServer(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):
+            import sys as _sys
+            if isinstance(_sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+                return   # abgebrochene Verbindung - kein Grund fuer eine Fehlermeldung
+            super().handle_error(request, client_address)
+
+    server = QuietServer(("0.0.0.0" if remote_pw_hash else "127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log.info("Oberflaeche: http://localhost:%d%s", port, " (Fernzugriff mit Passwort aktiv)" if remote_pw_hash else "")
     return server
