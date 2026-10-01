@@ -91,12 +91,16 @@ def remote_setup(cfg: dict, option: str) -> None:
         return
     print("Fernzugriff: Die Oberflaeche wird im Netzwerk erreichbar - NUR mit Passwort.")
     print("Wichtig: KEINE Portfreigabe im Router! Fuer unterwegs Tailscale nutzen (siehe Anleitung).")
+    ask = input if option.lower() == "sichtbar" else getpass
+    if ask is getpass:
+        print("(Beim Tippen erscheint nichts - das ist normal. Einfach tippen und Enter druecken.")
+        print(" Lieber sichtbar tippen? Abbrechen mit Strg+C und: python run.py fernzugriff sichtbar)")
     while True:
-        pw = getpass("Neues Passwort (mind. 10 Zeichen): ")
+        pw = ask("Neues Passwort (mind. 10 Zeichen): ").strip()
         if len(pw) < 10:
             print("Zu kurz.")
             continue
-        if getpass("Passwort wiederholen: ") != pw:
+        if ask("Passwort wiederholen: ").strip() != pw:
             print("Stimmt nicht ueberein.")
             continue
         break
