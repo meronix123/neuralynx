@@ -6,6 +6,7 @@ Aktionen (schliessen, stornieren, Stop/Ziel aendern, neue Order) wirken auf das 
 (bzw. das Demokonto, wenn "Demo" gewaehlt wurde) - unabhaengig davon, ob der Bot selbst
 im Paper-Modus laeuft.
 """
+import json
 import logging
 import os
 import re
@@ -13,7 +14,7 @@ import threading
 import time
 
 from .config import ROOT
-from .exchange import make_client, place_pos_tpsl
+from .exchange import cancel_plan, make_client, place_pos_tpsl, place_size_tpsl
 
 log = logging.getLogger("bot")
 ENV_FILE = ROOT / ".env"
@@ -23,7 +24,7 @@ PROFILE_KEYS = {
 }
 PROFILE_NAMES = {"live": "Echtkonto", "demo": "Testkonto"}
 HISTORY_DAYS = 30
-REFRESH_S = 15
+REFRESH_S = 5
 
 
 def save_env(values: dict[str, str], path=None) -> None:
@@ -176,6 +177,12 @@ class Account:
                 "history": self._history(c),
                 "updated_ms": int(time.time() * 1000),
             }
+            try:
+                self._sync_tickets(positions, data["orders"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("Einzel-Positionen abgleichen: %s", e)
+            data["tickets"] = self.tickets().open()
+            data["tickets_closed"] = [x for x in self.tickets().items if x["status"] == "closed"][-30:][::-1]
             with self.lock:
                 self.data, self.error, self.updated = data, "", time.time()
         except Exception as e:  # noqa: BLE001
@@ -276,6 +283,127 @@ class Account:
         self.refresh(force=True)
         return msg
 
+    # --- Einzel-Positionen (Tickets) ---------------------------------------
+    def tickets(self) -> "Tickets":
+        cache = self.__dict__.setdefault("_tickets", {})
+        if self.active not in cache:
+            path = (self.env_path.parent / "data" if self.env_path else ROOT / "data") / f"tickets_{self.active}.json"
+            cache[self.active] = Tickets(path)
+        return cache[self.active]
+
+    def quick_order(self, symbol: str, side: str, margin_pct: float = 20, leverage: int = 10,
+                    sl_pct: float = 10, tp_pct: float = 20) -> str:
+        """Schnell-Order: margin_pct % des freien Guthabens als Margin, Stop bei sl_pct % Verlust und
+        Ziel bei tp_pct % Gewinn - jeweils bezogen auf die Margin. Jede Order = eigene Einzel-Position."""
+        c = self._need()
+        if side not in ("long", "short"):
+            raise ValueError("Richtung long oder short")
+        if not 0 < margin_pct <= 100 or not 1 <= int(leverage) <= 125:
+            raise ValueError("Kapital 1-100 %, Hebel 1-125")
+        if not tp_pct or tp_pct <= 0:
+            raise ValueError("Take-Profit ist Pflicht")
+        if not 0 < sl_pct < 80:
+            raise ValueError("Stop-Loss 1 bis 79 % der Margin (darueber droht vorher die Liquidation)")
+        c.load_markets()
+        if symbol not in c.markets:
+            raise ValueError(f"Markt {symbol} gibt es auf Bitget nicht")
+        # Bitget One-Way-Modus: Gegenrichtung wuerde bestehende Einzel-Positionen aufloesen
+        for p in c.fetch_positions([symbol]):
+            if (_f(p.get("contracts")) or 0) > 0 and p.get("side") != side:
+                raise RuntimeError(f"In {symbol} ist eine {p.get('side')}-Position offen - Gegenrichtung erst nach dem Schliessen")
+        free = _f(c.fetch_balance({"type": "swap"}).get("USDT", {}).get("free")) or 0.0
+        margin = free * margin_pct / 100
+        price = float(c.fetch_ticker(symbol)["last"])
+        lev = int(leverage)
+        qty = float(c.amount_to_precision(symbol, margin * lev / price))
+        min_amt = _f(((c.market(symbol).get("limits") or {}).get("amount") or {}).get("min")) or 0
+        if qty <= 0 or qty < min_amt:
+            raise ValueError(f"Zu wenig Guthaben fuer die Mindestmenge ({margin:.2f} USDT Margin)")
+        sign = 1 if side == "long" else -1
+        sl = price * (1 - sign * sl_pct / 100 / lev)
+        tp = price * (1 + sign * tp_pct / 100 / lev)
+        mm = self.cfg.get("margin_mode", "isolated")
+        for fn in (lambda: c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"}),
+                   lambda: c.set_leverage(lev, symbol, {"holdSide": "long", "marginMode": mm}),
+                   lambda: c.set_leverage(lev, symbol, {"holdSide": "short", "marginMode": mm})):
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
+                log.debug("Schnell-Order Vorbereitung %s: %s", symbol, e)
+        o = c.create_order(symbol, "market", "buy" if side == "long" else "sell", qty, None, {"marginMode": mm})
+        entry = _f(o.get("average")) or price
+        sl_id = tp_id = ""
+        err = []
+        try:
+            sl_id = place_size_tpsl(c, symbol, side, "loss_plan", sl, qty)
+        except Exception as e:  # noqa: BLE001
+            err.append(str(e))
+        try:
+            tp_id = place_size_tpsl(c, symbol, side, "profit_plan", tp, qty)
+        except Exception as e:  # noqa: BLE001
+            err.append(str(e))
+        if not sl_id:
+            # ohne Stop keine offene Position stehen lassen
+            c.create_order(symbol, "market", "sell" if side == "long" else "buy", qty, None,
+                           {"reduceOnly": True, "marginMode": mm})
+            if tp_id:
+                try:
+                    cancel_plan(c, symbol, tp_id)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("TP-Storno: %s", e)
+            raise RuntimeError("Stop-Loss konnte nicht gesetzt werden - Position sofort wieder geschlossen. " + "; ".join(err))
+        self.tickets().add(symbol=symbol, side=side, amount=qty, entry=entry, sl=sl, tp=tp, sl_id=sl_id,
+                           tp_id=tp_id, leverage=lev, margin=entry * qty / lev, opened_ms=int(time.time() * 1000))
+        self.refresh(force=True)
+        msg = f"{side.upper()} {qty:g} {symbol.split(':')[0]} @ ~{entry:.6g} | Stop {sl:.6g} | Ziel {tp:.6g}"
+        return msg + (f" (Hinweis: {'; '.join(err)})" if err else "")
+
+    def close_ticket(self, ticket_id: int) -> str:
+        c = self._need()
+        tk = next((x for x in self.tickets().open() if x["id"] == int(ticket_id)), None)
+        if tk is None:
+            raise RuntimeError("Einzel-Position nicht gefunden (schon geschlossen?)")
+        for oid in (tk.get("sl_id"), tk.get("tp_id")):
+            if oid:
+                try:
+                    cancel_plan(c, tk["symbol"], oid)
+                except Exception as e:  # noqa: BLE001 - evtl. schon ausgefuehrt
+                    log.debug("Plan-Storno %s: %s", oid, e)
+        o = c.create_order(tk["symbol"], "market", "sell" if tk["side"] == "long" else "buy", tk["amount"], None,
+                           {"reduceOnly": True, "marginMode": self.cfg.get("margin_mode", "isolated")})
+        price = _f(o.get("average")) or float(c.fetch_ticker(tk["symbol"])["last"])
+        self.tickets().close(tk, price, "manuell")
+        self.refresh(force=True)
+        return f"Einzel-Position #{tk['id']} geschlossen ({tk['pnl']:+.2f} USDT geschaetzt)"
+
+    def _sync_tickets(self, positions: list[dict], orders: list[dict]) -> None:
+        """Hat Bitget ein Ziel/einen Stop ausgefuehrt? Dann Ticket schliessen und den Gegen-Auftrag stornieren."""
+        tks = self.tickets()
+        open_ids = {o["id"] for o in orders if o.get("kind") == "tpsl"}
+        size = {}
+        for p in positions:
+            size[p["symbol"]] = size.get(p["symbol"], 0) + (p["amount"] or 0)
+        c = self.client
+        for tk in tks.open():
+            sl_open, tp_open = tk.get("sl_id") in open_ids, tk.get("tp_id") in open_ids
+            if size.get(tk["symbol"], 0) <= 0:
+                why = "Ziel erreicht" if not tp_open and sl_open else "Stop ausgeloest" if not sl_open and tp_open else "Position geschlossen"
+                price = tk["tp"] if why == "Ziel erreicht" else tk["sl"] if why == "Stop ausgeloest" else None
+            elif not tp_open and tk.get("tp_id"):
+                why, price = "Ziel erreicht", tk["tp"]
+            elif not sl_open and tk.get("sl_id"):
+                why, price = "Stop ausgeloest", tk["sl"]
+            else:
+                continue
+            for oid in (tk.get("sl_id"), tk.get("tp_id")):
+                if oid in open_ids:
+                    try:
+                        cancel_plan(c, tk["symbol"], oid)
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("Plan-Storno %s: %s", oid, e)
+            tks.close(tk, price, why)
+            log.info("Einzel-Position #%s %s: %s", tk["id"], tk["symbol"], why)
+
     def close_all(self) -> str:
         """Alle offenen Positionen des gewaehlten Kontos zum Marktpreis schliessen."""
         c = self._need()
@@ -288,6 +416,9 @@ class Account:
                 done.append(p["symbol"].split(":")[0])
             except Exception as e:  # noqa: BLE001
                 failed.append(f"{p['symbol']}: {e}")
+        for tk in self.tickets().open():
+            if tk["symbol"].split(":")[0] in done:
+                self.tickets().close(tk, None, "alle geschlossen")
         self.refresh(force=True)
         if failed:
             raise RuntimeError(f"Geschlossen: {', '.join(done) or '-'} | Fehler: {'; '.join(failed)}")
@@ -318,6 +449,8 @@ class Account:
             raise ValueError("Positionswert in USDT angeben")
         if not sl:
             raise ValueError("Stop-Loss ist Pflicht")
+        if not tp:
+            raise ValueError("Take-Profit ist Pflicht")
         if not 1 <= int(leverage) <= 125:
             raise ValueError("Hebel 1 bis 125")
         c.load_markets()
@@ -344,6 +477,42 @@ class Account:
                            "buy" if side == "long" else "sell", qty, price if order_type == "limit" else None, params)
         self.refresh(force=True)
         return f"Order {o.get('id')} {side} {qty:g} {symbol} gesendet"
+
+
+class Tickets:
+    """Einzel-Positionen wie bei MetaTrader: jede Schnell-Order ist ein eigenes 'Ticket' mit eigenem
+    Einstieg, Stop-Loss und (Pflicht-)Take-Profit. Bitget fuehrt alles in EINER Position pro Markt -
+    die Tickets werden hier verwaltet, ihre Stops/Ziele liegen als Teil-Auftraege (Menge = Ticket) auf Bitget."""
+
+    def __init__(self, path):
+        self.path = path
+        self.items: list[dict] = []
+        if path and path.exists():
+            try:
+                self.items = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:
+                log.warning("Ticket-Datei unlesbar - starte leer")
+
+    def save(self) -> None:
+        if self.path:
+            self.path.parent.mkdir(exist_ok=True)
+            self.path.write_text(json.dumps(self.items[-500:], indent=1), encoding="utf-8")
+
+    def open(self) -> list[dict]:
+        return [x for x in self.items if x["status"] == "open"]
+
+    def add(self, **kw) -> dict:
+        tid = max([x["id"] for x in self.items] or [0]) + 1
+        item = {"id": tid, "status": "open", **kw}
+        self.items.append(item)
+        self.save()
+        return item
+
+    def close(self, item: dict, exit_price: float | None, why: str) -> None:
+        sign = 1 if item["side"] == "long" else -1
+        item.update(status="closed", exit=exit_price, why=why, closed_ms=int(time.time() * 1000),
+                    pnl=None if exit_price is None else sign * (exit_price - item["entry"]) * item["amount"])
+        self.save()
 
 
 def refresher(account: Account) -> threading.Thread:

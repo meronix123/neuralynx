@@ -132,6 +132,12 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
         return account.cancel(str(body["id"]), body["symbol"], body.get("kind", "normal"))
     if path == "/api/account/tpsl":
         return account.set_tpsl(body["symbol"], _num(body.get("sl")), _num(body.get("tp")))
+    if path == "/api/account/quick":
+        return account.quick_order(body["symbol"], body["side"], float(_num(body.get("margin_pct")) or 20),
+                                   int(_num(body.get("leverage")) or 10), float(_num(body.get("sl_pct")) or 10),
+                                   float(_num(body.get("tp_pct")) or 0))
+    if path == "/api/account/ticket_close":
+        return account.close_ticket(int(body["id"]))
     if path == "/api/account/order":
         return account.order(body["symbol"], body["side"], _num(body.get("usdt")), int(_num(body.get("leverage")) or 0),
                              _num(body.get("sl")), _num(body.get("tp")), body.get("type", "market"),
@@ -216,6 +222,11 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
                 return
             if self.path.startswith("/api/status"):
                 self._json(200, bot.status)
+            elif self.path.startswith("/api/live"):
+                try:
+                    self._json(200, {"prices": bot.live_prices(), "ms": int(time.time() * 1000)})
+                except Exception as e:  # noqa: BLE001
+                    self._json(400, {"ok": False, "msg": str(e)})
             elif self.path.startswith("/api/chart"):
                 from urllib.parse import parse_qs, urlparse
                 q = parse_qs(urlparse(self.path).query)

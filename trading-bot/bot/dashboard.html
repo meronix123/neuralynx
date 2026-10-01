@@ -51,6 +51,11 @@
   .tfbar button.entry { box-shadow: inset 0 -2px 0 #3b82f6; }
   #obcanvas { position:absolute; left:0; top:0; pointer-events:none; z-index:3; }
   .obrow { cursor:default; }
+  .term { display:grid; grid-template-columns: minmax(0, 1fr) 330px; gap:12px; }
+  @media (max-width: 1000px) { .term { grid-template-columns: minmax(0, 1fr); } }
+  .quick { background:#11141a; border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .btn.big { padding:14px 8px; font-weight:800; font-size:15px; }
+  .btn.buy { background:#14532d; border-color:#22c55e; } .btn.sell { background:#7f1d1d; border-color:#ef4444; }
   .flow { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap:8px; }
   .flow .step { background:#11141a; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; }
   .flow .step b { display:block; margin-bottom:4px; }
@@ -123,11 +128,48 @@
       <label>Passphrase = das Passwort, das du beim Anlegen des API-Schluessels bei Bitget selbst vergeben hast
         (NICHT die Berechtigungen)<input id="k-pass" type="password" autocomplete="off"></label>
     </div>
+    <p>Diese Schluessel sind fuer:
+      <label style="display:inline"><input type="radio" name="k-prof" value="live" checked> Echtes Konto</label>
+      <label style="display:inline;margin-left:10px"><input type="radio" name="k-prof" value="demo"> Testkonto (Bitget Demo-Handel)</label></p>
     <p><button class="btn" onclick="connectAcc()">Verbinden</button></p>
     <p id="acc-err" class="down"></p>
   </section>
   <section class="panel" style="grid-column:1/-1" id="acc-main" hidden>
     <div id="acc-head" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center"></div>
+  </section>
+  <section class="panel" id="acc-term-p" hidden style="grid-column:1/-1">
+    <div class="term">
+      <div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+          <h3 id="acc-chart-title" style="margin:0">Chart</h3>
+          <select id="acc-sym" style="width:auto" onchange="accSym=this.value; accChartData=null; pollAccChart()"></select>
+          <input id="acc-sym-other" placeholder="anderer Markt, z. B. DOGE" style="width:190px" onkeydown="if(event.key==='Enter'){otherSym()}">
+        </div>
+        <div id="acc-tfbar" class="tfbar"></div>
+        <div style="position:relative"><div id="acc-chart" style="height:420px"></div></div>
+      </div>
+      <div class="quick">
+        <h3>Schnell-Order (jede Order = eigene Position)</h3>
+        <div id="q-sym" style="font-weight:700;margin-bottom:6px"></div>
+        <div class="grid2" style="grid-template-columns:1fr 1fr">
+          <label>Kapital (% vom freien Guthaben)<input id="q-margin" inputmode="decimal" value="20"></label>
+          <label>Hebel<input id="q-lev" inputmode="numeric" value="10"></label>
+          <label>Stop-Loss (% Verlust der Margin)<input id="q-sl" inputmode="decimal" value="10"></label>
+          <label>Take-Profit (% Gewinn, Pflicht)<input id="q-tp" inputmode="decimal" value="20"></label>
+        </div>
+        <div id="q-prev" class="note"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px">
+          <button class="btn big buy" onclick="quick('long')">KAUFEN / LONG</button>
+          <button class="btn big sell" onclick="quick('short')">VERKAUFEN / SHORT</button>
+        </div>
+        <label style="margin-top:8px"><input type="checkbox" id="q-oneclick" onchange="try{localStorage.setItem('oneclick', this.checked?'1':'')}catch(e){}"> Ein-Klick-Handel (ohne Rueckfrage)</label>
+        <p class="note">Stop und Ziel liegen fuer jede Einzel-Position als eigener Auftrag auf Bitget und koennen hier nicht veraendert werden.
+          Bitget-Regel: in einem Markt nur eine Richtung gleichzeitig.</p>
+      </div>
+    </div>
+  </section>
+  <section class="panel" style="grid-column:1/-1" id="acc-tk-p" hidden>
+    <h3>Einzel-Positionen (Schnell-Orders)</h3><div class="wrap"><table id="acc-tk"></table></div>
   </section>
   <section class="panel" style="grid-column:1/-1" id="acc-pos-p" hidden>
     <h3>Offene Positionen (Bitget)</h3><div class="wrap"><table id="acc-pos"></table></div>
@@ -226,6 +268,7 @@ function tab(v) {
   document.getElementById("view-brain").hidden = v !== "brain";
   document.getElementById("tab-brain").classList.toggle("on", v === "brain");
   if (v === "brain") renderBrain();
+  if (v === "acc") setTimeout(pollAccChart, 300);
   document.getElementById("view-acc").hidden = v !== "acc";
   document.getElementById("tab-bot").classList.toggle("on", v === "bot");
   document.getElementById("tab-acc").classList.toggle("on", v === "acc");
@@ -276,7 +319,90 @@ async function pollChart() {
     if (r.ok) { chartData = await r.json(); chartKey = key; render(); }
   } catch (e) { /* naechster Versuch */ }
 }
-setInterval(pollChart, 10000);
+setInterval(pollChart, 5000);
+
+// Live-Kurse jede Sekunde: letzte Kerze, Kurs-Spalten und offene Positionen sofort aktualisieren
+let live = {}, lastBar = null, lastTfSec = 60;
+// Echtzeit: Browser verbindet sich direkt mit dem oeffentlichen Bitget-Datenstrom (kein Schluessel noetig).
+// Faellt der Strom aus, holt die Seite die Kurse jede Sekunde ueber den Bot (pollLive).
+let ws = null, wsOk = false, wsSubs = new Set(), wsPending = false;
+const instId = sym => sym.split("/")[0] + "USDT";
+const fromInst = {};
+function wsWanted() {
+  const s = new Set(data ? Object.keys(data.symbols) : []);
+  if (accSym) s.add(accSym);
+  for (const t of ((acc || {}).tickets || [])) s.add(t.symbol);
+  return s;
+}
+function wsSync() {
+  if (!ws || ws.readyState !== 1) return;
+  const want = wsWanted(), add = [...want].filter(s => !wsSubs.has(s));
+  if (!add.length) return;
+  for (const s of add) { fromInst[instId(s)] = s; wsSubs.add(s); }
+  ws.send(JSON.stringify({ op: "subscribe", args: add.map(s => ({ instType: "USDT-FUTURES", channel: "ticker", instId: instId(s) })) }));
+}
+function wsConnect() {
+  try { ws = new WebSocket("wss://ws.bitget.com/v2/ws/public"); } catch (e) { return; }
+  wsSubs = new Set();
+  ws.onopen = () => { wsOk = true; wsSync(); };
+  ws.onmessage = ev => {
+    if (ev.data === "pong") return;
+    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    for (const d of (m.data || [])) {
+      const sym = fromInst[d.instId || (m.arg || {}).instId];
+      const p = Number(d.lastPr ?? d.last);
+      if (sym && p > 0) live[sym] = p;
+    }
+    if (!wsPending) { wsPending = true; requestAnimationFrame(() => { wsPending = false; applyLive(); }); }
+  };
+  ws.onclose = () => { wsOk = false; setTimeout(wsConnect, 3000); };
+  ws.onerror = () => { try { ws.close(); } catch (e) { /* egal */ } };
+}
+setInterval(() => { if (ws && ws.readyState === 1) { ws.send("ping"); wsSync(); } }, 20000);
+setInterval(wsSync, 2000);
+wsConnect();
+
+let lastDom = 0;
+function applyLive() {
+  const p = live[selected];
+  if (p != null && lastBar) {
+    const now = Math.floor(Date.now() / 1000) + TZ;
+    lastBar = now >= lastBar.time + lastTfSec
+      ? { time: lastBar.time + Math.floor((now - lastBar.time) / lastTfSec) * lastTfSec, open: p, high: p, low: p, close: p }
+      : { ...lastBar, high: Math.max(lastBar.high, p), low: Math.min(lastBar.low, p), close: p };
+    try { candles.update(lastBar); } catch (e) { /* naechster Chart-Abruf korrigiert */ }
+  }
+  if (view === "acc" && accSeries && accLast && accChartData && live[accSym] != null) {
+    const q = live[accSym], sec = accChartData.tf_seconds, now = Math.floor(Date.now() / 1000) + TZ;
+    accLast = now >= accLast.time + sec ? { time: accLast.time + Math.floor((now - accLast.time) / sec) * sec, open: q, high: q, low: q, close: q }
+                                        : { ...accLast, high: Math.max(accLast.high, q), low: Math.min(accLast.low, q), close: q };
+    try { accSeries.update(accLast); } catch (e) { /* egal */ }
+  }
+  const t = Date.now();
+  if (t - lastDom > 250 && data) {   // Tabellen hoechstens 4x pro Sekunde neu zeichnen
+    lastDom = t;
+    updateListPrices();
+    if (view === "bot") { renderPositions(); renderMarket(Object.keys(data.symbols)); }
+    if (view === "acc" && acc && acc.tickets) { renderTickets(acc, acc.positions || []); document.getElementById("q-sym").textContent = accSym ? accSym.split(":")[0] + "  @ " + px(markPrice(accSym)) : "-"; }
+  }
+}
+
+async function pollLive() {
+  if (document.hidden || wsOk) return;
+  try {
+    const r = await fetch("/api/live");
+    if (!r.ok) return;
+    Object.assign(live, (await r.json()).prices || {});
+  } catch (e) { return; }
+  applyLive();
+}
+setInterval(pollLive, 1000);
+function updateListPrices() {
+  for (const el of document.querySelectorAll("[data-live]")) {
+    const v = live[el.dataset.live];
+    if (v != null) el.textContent = px(v);
+  }
+}
 
 // Order Blocks als Kaesten: vom Ursprungs-Kerze bis jetzt, Ober- bis Unterkante
 const obCanvas = document.getElementById("obcanvas");
@@ -328,7 +454,13 @@ function renderPositions() {
   const rows = data.positions || [], pend = data.pending_orders || [];
   const head = `<tr><th>Markt</th><th>Richtung</th><th>Zeiteinheit / Strategie</th><th>Einstieg</th><th>Aktuell</th><th>Menge</th><th>Wert</th><th>Margin</th>
     <th>Ergebnis USDT</th><th>auf Margin</th><th>R</th><th>Stop-Loss (Abstand)</th><th>Weg SL &rarr; TP</th><th>Take-Profit (Abstand)</th><th>Liquidation ca.</th><th>bei SL</th><th>bei TP</th><th>seit</th><th></th></tr>`;
-  const body = rows.map(r => {
+  const body = rows.map(r0 => {
+    const lp = live[r0.symbol], sign = r0.side === "long" ? 1 : -1;
+    const r = lp == null ? r0 : { ...r0, price: lp,
+      pnl: sign * (lp - r0.entry) * r0.amount - lp * r0.amount * 0.0006,
+      sl_dist_pct: r0.sl ? 100 * Math.abs(lp - r0.sl) / lp : null, tp_dist_pct: r0.tp ? 100 * Math.abs(r0.tp - lp) / lp : null,
+      value: lp * r0.amount, r: r0.r0 ? sign * (lp - r0.entry) / r0.r0 : null };
+    if (lp != null) r.pnl_pct = r0.margin ? 100 * r.pnl / r0.margin : null;
     const pos = r.sl != null && r.tp != null && r.tp !== r.sl ? Math.max(0, Math.min(100, 100 * (r.price - r.sl) / (r.tp - r.sl))) : null;
     return `<tr><td>${r.symbol.split(":")[0]}</td><td class="${r.side === "long" ? "up" : "down"}">${r.side.toUpperCase()}</td>
       <td>${r.tf} / ${STRAT[r.strategy] || "-"}${r.partial_done ? " (Teil verkauft)" : ""}</td><td>${px(r.entry)}</td><td><b>${px(r.price)}</b></td>
@@ -400,7 +532,7 @@ function renderMarket(syms) {
   document.getElementById("market").innerHTML = head + syms.map(sym => {
     const s = data.symbols[sym], m = s.market || {}, pos = s.position;
     const f = m.funding == null ? "-" : `<span class="${Math.abs(m.funding) > 0.0005 ? "warn" : ""}">${fmt(m.funding * 100, 4)} %</span>`;
-    return `<tr onclick="selected='${sym}';render()" style="cursor:pointer"><td>${sym.split(":")[0]}</td><td><b>${px(m.last ?? s.snapshot.close)}</b></td><td>${chg(m.change_pct)}</td>
+    return `<tr onclick="selected='${sym}';render()" style="cursor:pointer"><td>${sym.split(":")[0]}</td><td><b>${px(live[sym] ?? m.last ?? s.snapshot.close)}</b></td><td>${chg(m.change_pct)}</td>
       <td>${px(m.high)}</td><td>${px(m.low)}</td><td>${big(m.volume_usd)}</td><td>${px(m.bid)} / ${px(m.ask)}</td>
       <td>${m.spread_pct == null ? "-" : fmt(m.spread_pct, 3) + " %"}</td><td>${f}</td>
       <td style="color:#38bdf8">${(s.walls && s.walls.bids && s.walls.bids[0]) ? px(s.walls.bids[0].price) + " (" + big(s.walls.bids[0].usdt) + ")" : "-"}</td>
@@ -514,7 +646,7 @@ function render() {
     const tag = pos ? `<span class="${pos.side === "long" ? "up" : "down"}">${pos.side.toUpperCase()}</span>` : `<span class="sub">${v.regime_text}</span>`;
     return `<div class="sym ${sym === selected ? "active" : ""}" onclick="selected='${sym}';render()">
       <div class="top"><span>${sym.split(":")[0]}</span>${tag}</div>
-      <div class="sub">${px((s.market||{}).last ?? v.close)} ${chg((s.market||{}).change_pct)} &middot; RSI ${v.rsi} &middot; ${s.reason}</div></div>`;
+      <div class="sub"><span data-live="${sym}">${px(live[sym] ?? (s.market||{}).last ?? v.close)}</span> ${chg((s.market||{}).change_pct)} &middot; RSI ${v.rsi} &middot; ${s.reason}</div></div>`;
   }).join("");
 
   const s = data.symbols[selected];
@@ -530,6 +662,9 @@ function render() {
   document.getElementById("title").textContent = `${selected.split(":")[0]} - ${TF_NAME[tf] || tf}` + (cd || tf === data.timeframe ? "" : " (laedt ...)");
   const bars = src.candles.map(c => ({ ...c, time: c.time + TZ }));
   candles.setData(bars);
+  lastBar = bars.length ? { ...bars[bars.length - 1] } : null; lastTfSec = tfSec;
+  if (lastBar && live[selected] != null) { const lp = live[selected];
+    lastBar = { ...lastBar, high: Math.max(lastBar.high, lp), low: Math.min(lastBar.low, lp), close: lp }; candles.update(lastBar); }
   const series = arr => bars.map((c, i) => arr[i] == null ? null : { time: c.time, value: arr[i] }).filter(Boolean);
   emaF.setData(series(src.ema_fast)); emaS.setData(series(src.ema_slow)); vwap.setData(series(src.vwap || []));
   obZones = (src.order_blocks || []).map(z => ({ ...z, time: Math.round(z.from_ts / 1000) + TZ }));  // Zeit der Ursprungs-Kerze
@@ -608,7 +743,7 @@ function renderAcc() {
     ? "Testkonto verbinden (Bitget: Demo-Handel -> API-Verwaltung, Demo-Schluessel)"
     : "Echtes Bitget-Konto verbinden";
   document.getElementById("acc-connect").hidden = !!a.connected;
-  for (const id of ["acc-main", "acc-pos-p", "acc-ord-p", "acc-new-p", "acc-hist-p"]) document.getElementById(id).hidden = !a.connected;
+  for (const id of ["acc-main", "acc-term-p", "acc-tk-p", "acc-pos-p", "acc-ord-p", "acc-new-p", "acc-hist-p"]) document.getElementById(id).hidden = !a.connected;
   if (!a.connected) {
     document.getElementById("acc-err").textContent = a.error || "";
     return;
@@ -634,8 +769,7 @@ function renderAcc() {
       <td class="warn">${px(p.liq)}</td><td>${fmt(p.margin)}</td><td><b>${usd(p.pnl)}</b></td><td>${chg(p.pnl_pct)}</td>
       <td class="down">${px(p.sl)}</td><td class="up">${px(p.tp)}</td><td>${since(p.opened_ms)}</td>
       <td style="white-space:nowrap"><button class="btn sm red" onclick="act('/api/account/close', {symbol:'${p.symbol}', fraction:1}, '${p.symbol.split(":")[0]} komplett zum Marktpreis schliessen?')">Schliessen</button>
-        <button class="btn sm" onclick="act('/api/account/close', {symbol:'${p.symbol}', fraction:0.5}, 'Haelfte von ${p.symbol.split(":")[0]} schliessen?')">50 %</button>
-        <button class="btn sm" onclick="editTpsl('${p.symbol}', ${p.sl ?? "null"}, ${p.tp ?? "null"})">SL/TP</button></td></tr>`).join("")
+        <button class="btn sm" onclick="act('/api/account/close', {symbol:'${p.symbol}', fraction:0.5}, 'Haelfte von ${p.symbol.split(":")[0]} schliessen?')">50 %</button></td></tr>`).join("")
       : `<tr><td colspan="15" class="sub">Keine offenen Positionen</td></tr>`);
   const ord = a.orders || [];
   const KIND = { normal: "Order", tpsl: "Stop/Ziel", plan: "Ausloese-Order" };
@@ -653,6 +787,8 @@ function renderAcc() {
       <td>${px(t.entry)}</td><td>${px(t.exit)}</td><td>${fmt(t.amount, 4)}</td><td><b>${usd(t.pnl)}</b></td><td>${fmt(t.fees, 4)}</td><td>${fmt(t.funding, 4)}</td>
       <td>${t.opened_ms ? time(t.opened_ms) : "-"}</td><td>${t.closed_ms ? time(t.closed_ms) : "-"}</td></tr>`).join("")
       : `<tr><td colspan="10" class="sub">Keine abgeschlossenen Trades in den letzten 30 Tagen</td></tr>`);
+  renderTickets(a, pos);
+  renderTerminal(a);
   const sum = h.reduce((s, t) => s + (t.pnl || 0), 0), wins = h.filter(t => (t.pnl || 0) > 0).length;
   if (h.length) document.getElementById("acc-hist").innerHTML += `<tr><td colspan="5"><b>${h.length} Trades, ${wins} Gewinner</b></td><td><b>${usd(sum)}</b></td><td colspan="4"></td></tr>`;
 }
@@ -672,7 +808,7 @@ function val(id) { return document.getElementById(id).value.trim(); }
 // Key und Secret enthalten nie Leerzeichen: beim Kopieren mitgerutschte Umbrueche/Leerzeichen entfernen
 function keyval(id) { return document.getElementById(id).value.replace(/[\s\u200b-\u200d\ufeff]+/g, ""); }
 async function connectAcc() {
-  const demo = (acc || {}).active === "demo";
+  const demo = (document.querySelector("input[name=k-prof]:checked") || {}).value === "demo";
   const vals = { key: keyval("k-key"), secret: keyval("k-secret"), password: val("k-pass").replace(/[\u200b-\u200d\ufeff]/g, "") };
   const names = { key: "API-Key", secret: "Secret", password: "Passphrase" };
   for (const k of ["key", "secret", "password"]) {
@@ -699,11 +835,108 @@ function newOrder() {
   const margin = Number(b.usdt.replace(",", ".")) / Number(b.leverage || 1);
   act("/api/account/order", b, `${acc && acc.demo ? "DEMO" : "ECHTES GELD"}: ${b.side.toUpperCase()} ${b.symbol.split(":")[0]} fuer ${b.usdt} USDT (${b.leverage}x Hebel, Margin ca. ${fmt(margin)} USDT), Stop ${b.sl}, Ziel ${b.tp || "-"}. Senden?`);
 }
+let accSym = null, accTf = "15m", accChart = null, accSeries = null, accChartData = null, accLines = [], accLast = null;
+try { accTf = localStorage.getItem("acc_tf") || "15m"; document.getElementById("q-oneclick").checked = localStorage.getItem("oneclick") === "1"; } catch (e) { /* egal */ }
+function otherSym() {
+  const v = val("acc-sym-other").toUpperCase().replace(/USDT.*$/, "").replace(/[^A-Z0-9]/g, "");
+  if (!v) return;
+  accSym = `${v}/USDT:USDT`; accChartData = null; renderTerminal(acc || {}); pollAccChart();
+}
+function markPrice(sym) {
+  if (live[sym] != null) return live[sym];
+  if (accChartData && accChartData.symbol === sym) return accLast ? accLast.close : accChartData.price;
+  const p = ((acc || {}).positions || []).find(p => p.symbol === sym);
+  return p ? p.mark : null;
+}
+function renderTerminal(a) {
+  const sel = document.getElementById("acc-sym");
+  const syms = [...new Set([...(a.symbols || []), ...((a.positions || []).map(p => p.symbol)), ...((a.tickets || []).map(t => t.symbol)), ...(accSym ? [accSym] : [])])];
+  if (!accSym) accSym = syms[0] || null;
+  if (sel.dataset.k !== syms.join()) { sel.innerHTML = syms.map(s => `<option value="${s}">${s.split(":")[0]}</option>`).join(""); sel.dataset.k = syms.join(); }
+  sel.value = accSym;
+  document.getElementById("acc-tfbar").innerHTML = TFS.map(t => `<button class="${t === accTf ? "on" : ""}" onclick="accTf='${t}';try{localStorage.setItem('acc_tf','${t}')}catch(e){};accChartData=null;pollAccChart()">${TF_NAME[t] || t}</button>`).join("");
+  document.getElementById("q-sym").textContent = accSym ? accSym.split(":")[0] + (markPrice(accSym) != null ? "  @ " + px(markPrice(accSym)) : "") : "-";
+  quickPreview();
+}
+function quickPreview() {
+  const a = acc || {}, free = (a.balance || {}).free || 0, price = markPrice(accSym);
+  const m = Number(val("q-margin").replace(",", ".")), lev = Number(val("q-lev")), sl = Number(val("q-sl").replace(",", ".")), tp = Number(val("q-tp").replace(",", "."));
+  const margin = free * m / 100;
+  if (!price || !lev) { document.getElementById("q-prev").textContent = ""; return; }
+  document.getElementById("q-prev").innerHTML = `Margin ${fmt(margin)} USDT &middot; Positionswert ${fmt(margin * lev)} USDT<br>` +
+    `Long: Stop ${px(price * (1 - sl / 100 / lev))} (<span class="down">-${fmt(margin * sl / 100)} USDT</span>), Ziel ${px(price * (1 + tp / 100 / lev))} (<span class="up">+${fmt(margin * tp / 100)} USDT</span>)<br>` +
+    `Short: Stop ${px(price * (1 + sl / 100 / lev))}, Ziel ${px(price * (1 - tp / 100 / lev))}`;
+}
+for (const id of ["q-margin", "q-lev", "q-sl", "q-tp"]) document.getElementById(id).addEventListener("input", quickPreview);
+async function quick(side) {
+  const a = acc || {};
+  if (!accSym) return toast("Erst einen Markt waehlen", false);
+  const tp = Number(val("q-tp").replace(",", "."));
+  if (!(tp > 0)) return toast("Take-Profit ist Pflicht", false);
+  const body = { symbol: accSym, side, margin_pct: val("q-margin"), leverage: val("q-lev"), sl_pct: val("q-sl"), tp_pct: val("q-tp") };
+  const ask = document.getElementById("q-oneclick").checked ? null :
+    `${a.demo ? "TESTKONTO" : "ECHTES GELD"}: ${side === "long" ? "KAUFEN" : "VERKAUFEN"} ${accSym.split(":")[0]} mit ${body.margin_pct} % Kapital, ${body.leverage}x, Stop -${body.sl_pct} %, Ziel +${body.tp_pct} %?`;
+  await act("/api/account/quick", body, ask);
+}
+function renderTickets(a, pos) {
+  const tk = a.tickets || [], closed = a.tickets_closed || [];
+  let total = 0;
+  const rows = tk.map(t => {
+    const p = markPrice(t.symbol), sign = t.side === "long" ? 1 : -1;
+    const pnl = p == null ? null : sign * (p - t.entry) * t.amount;
+    total += pnl || 0;
+    return `<tr><td>#${t.id}</td><td>${t.symbol.split(":")[0]}</td><td class="${t.side === "long" ? "up" : "down"}">${t.side.toUpperCase()}</td>
+      <td>${fmt(t.amount, 4)}</td><td>${t.leverage}x</td><td>${px(t.entry)}</td><td><b>${px(p)}</b></td><td><b>${usd(pnl)}</b></td>
+      <td>${pnl == null || !t.margin ? "-" : chg(100 * pnl / t.margin)}</td><td class="down">${px(t.sl)}</td><td class="up">${px(t.tp)}</td><td>${since(t.opened_ms)}</td>
+      <td><button class="btn sm red" onclick="act('/api/account/ticket_close', {id: ${t.id}}, document.getElementById('q-oneclick').checked ? null : 'Einzel-Position #${t.id} schliessen?')">Schliessen</button></td></tr>`;
+  }).join("");
+  const done = closed.slice(0, 10).map(t => `<tr class="sub"><td>#${t.id}</td><td>${t.symbol.split(":")[0]}</td><td>${t.side.toUpperCase()}</td><td>${fmt(t.amount, 4)}</td>
+      <td>${t.leverage}x</td><td>${px(t.entry)}</td><td>${px(t.exit)}</td><td>${usd(t.pnl)}</td><td colspan="4">${t.why}</td><td>${t.closed_ms ? time(t.closed_ms) : ""}</td></tr>`).join("");
+  document.getElementById("acc-tk").innerHTML = `<tr><th>Nr.</th><th>Markt</th><th>Richtung</th><th>Menge</th><th>Hebel</th><th>Einstieg</th><th>Kurs</th><th>Ergebnis</th><th>%</th><th>Stop</th><th>Ziel (fest)</th><th>seit</th><th></th></tr>` +
+    (rows || `<tr><td colspan="13" class="sub">Keine offenen Einzel-Positionen</td></tr>`) +
+    (tk.length ? `<tr><td colspan="7"><b>${tk.length} offen</b></td><td><b>${usd(total)}</b></td><td colspan="5"></td></tr>` : "") +
+    (done ? `<tr><td colspan="13" class="sub" style="padding-top:10px">Zuletzt geschlossen:</td></tr>` + done : "");
+}
+function ensureAccChart() {
+  if (accChart) return;
+  accChart = LightweightCharts.createChart(document.getElementById("acc-chart"), {
+    layout: { background: { color: "#171a21" }, textColor: "#8a93a6" },
+    grid: { vertLines: { color: "#1f2430" }, horzLines: { color: "#1f2430" } }, timeScale: { timeVisible: true, secondsVisible: false } });
+  accSeries = accChart.addCandlestickSeries({ upColor:"#22c55e", downColor:"#ef4444", wickUpColor:"#22c55e", wickDownColor:"#ef4444", borderVisible:false });
+  new ResizeObserver(() => accChart.applyOptions({ width: document.getElementById("acc-chart").clientWidth })).observe(document.getElementById("acc-chart"));
+}
+async function pollAccChart() {
+  if (view !== "acc" || !accSym || !(acc || {}).connected) return;
+  ensureAccChart();
+  try {
+    const r = await fetch(`/api/chart?symbol=${encodeURIComponent(accSym)}&tf=${accTf}`);
+    const d = await r.json();
+    if (!r.ok) { toast(d.msg || "Chart nicht verfuegbar", false); return; }
+    accChartData = d;
+  } catch (e) { return; }
+  const bars = accChartData.candles.map(c => ({ ...c, time: c.time + TZ }));
+  accSeries.setData(bars); accLast = bars.length ? { ...bars[bars.length - 1] } : null;
+  document.getElementById("acc-chart-title").textContent = `${accSym.split(":")[0]} - ${TF_NAME[accTf] || accTf}`;
+  drawAccLines();
+  renderTerminal(acc || {});
+}
+function drawAccLines() {
+  if (!accSeries) return;
+  accLines.forEach(l => accSeries.removePriceLine(l)); accLines = [];
+  for (const t of ((acc || {}).tickets || []).filter(t => t.symbol === accSym)) {
+    accLines.push(accSeries.createPriceLine({ price: t.entry, color: "#3b82f6", lineWidth: 1, title: `#${t.id} ${t.side}` }));
+    accLines.push(accSeries.createPriceLine({ price: t.sl, color: "#ef4444", lineWidth: 1, lineStyle: 2, title: `#${t.id} SL` }));
+    accLines.push(accSeries.createPriceLine({ price: t.tp, color: "#22c55e", lineWidth: 1, lineStyle: 2, title: `#${t.id} TP` }));
+  }
+}
+setInterval(pollAccChart, 5000);
+
+
 async function pollAcc() {
   if (view !== "acc" && acc) return;
   try { acc = await (await fetch("/api/account")).json(); renderAcc(); } catch (e) { /* Bot nicht erreichbar */ }
 }
-setInterval(pollAcc, 5000);
+setInterval(pollAcc, 3000);
 
 async function poll() {
   try {
@@ -715,7 +948,7 @@ async function poll() {
     document.getElementById("head").innerHTML = `<span class="down">Keine Verbindung zum Bot</span>`;
   }
 }
-poll(); setInterval(poll, 5000);
+poll(); setInterval(poll, 3000);
 </script>
 </body>
 </html>

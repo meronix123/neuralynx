@@ -159,4 +159,4 @@ dashboard:
   enabled: true
   port: 8050        # im Browser: http://localhost:8050
 
-loop_seconds: 20
+loop_seconds: 10        # alle 10 Sekunden pruefen (Kurse in der Oberflaeche jede Sekunde)

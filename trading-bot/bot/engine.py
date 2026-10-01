@@ -839,7 +839,7 @@ class Bot:
                 "strategy": m.get("strategy"), "entry": entry, "price": price, "amount": amount,
                 "value": price * amount, "margin": margin, "pnl": upnl,
                 "pnl_pct": 100 * upnl / margin if margin else None,
-                "r": sign * (price - entry) / r0 if r0 else None,
+                "r": sign * (price - entry) / r0 if r0 else None, "r0": r0,
                 "sl": sl, "tp": tp,
                 "sl_dist_pct": 100 * abs(price - sl) / price if sl else None,
                 "tp_dist_pct": 100 * abs(tp - price) / price if tp else None,
@@ -851,13 +851,40 @@ class Bot:
             })
         return rows
 
+    def live_prices(self) -> dict:
+        """Aktuelle Kurse fuer die Oberflaeche - hoechstens einmal pro Sekunde von Bitget geholt."""
+        at, prices = self.__dict__.get("_live", (0.0, {}))
+        if time.time() - at < 1.0:
+            return prices
+        self._live = (time.time(), prices)   # parallele Anfragen nicht stapeln
+        new = {}
+        try:
+            for sym, tk in self.ex.c.fetch_tickers(self.ex.symbols).items():
+                if tk.get("last") is not None:
+                    new[sym] = float(tk["last"])
+        except Exception:  # noqa: BLE001 - z. B. nicht unterstuetzt -> einzeln
+            for sym in self.ex.symbols:
+                try:
+                    new[sym] = float(self.ex.c.fetch_ticker(sym)["last"])
+                except Exception as e:  # noqa: BLE001
+                    log.debug("Kurs %s: %s", sym, e)
+        prices = {**prices, **new}
+        self._live = (time.time(), prices)
+        return prices
+
     CHART_TFS = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
 
     def chart_data(self, sym: str, tf: str, bars: int = 300) -> dict:
         """Chart fuer die Oberflaeche in beliebiger Zeiteinheit: Kerzen, EMAs, VWAP, Order Blocks."""
         from .indicators import atr, ema, vwap_daily
-        if sym not in self.ex.symbols or tf not in self.CHART_TFS:
+        known = sym in self.ex.symbols or (sym in (getattr(self.ex.c, "markets", None) or {})
+                                           and self.ex.c.markets[sym].get("swap"))
+        if not known or tf not in self.CHART_TFS:
             raise ValueError("Markt oder Zeiteinheit unbekannt")
+        key = (sym, tf)
+        hit = self.__dict__.setdefault("_chart_cache", {}).get(key)
+        if hit and time.time() - hit[0] < 4:      # mehrere Fenster/Handy gleichzeitig: nicht doppelt laden
+            return hit[1]
         df = self._candles(sym, tf, 1000).tail(1000).reset_index(drop=True)
         df["ema_f"] = ema(df["close"], self.s["ema_fast"])
         df["ema_s"] = ema(df["close"], self.s["ema_slow"])
@@ -865,7 +892,7 @@ class Bot:
         df["atr"] = atr(df, self.s["atr_period"])
         zones = zones_for_chart(df, self.s, max_each=6)
         tail = df.tail(bars)
-        return {
+        out = {
             "symbol": sym, "tf": tf, "tf_seconds": TF_MS[tf] // 1000,
             "candles": [{"time": int(r.ts // 1000), "open": r.open, "high": r.high, "low": r.low, "close": r.close}
                         for r in tail.itertuples()],
@@ -874,6 +901,8 @@ class Bot:
             "order_blocks": zones, "walls": self._walls(sym),
             "price": float(df["close"].iloc[-1]),
         }
+        self._chart_cache[key] = (time.time(), out)
+        return out
 
     def _update_status(self, now, equity, positions, views, reasons, block) -> None:
         market = {sym: self._market(sym) for sym in views}

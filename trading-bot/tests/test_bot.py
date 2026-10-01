@@ -1430,3 +1430,76 @@ def test_chart_data_any_timeframe_and_brain(tmp_path, monkeypatch):
     assert set(brain["markets"]["AAA/USDT:USDT"]["cells"]) == {"5m", "15m"}
     assert all(c["text"] for c in brain["markets"]["AAA/USDT:USDT"]["cells"].values())
     assert "risk" in brain and "filters" in brain
+
+
+def test_quick_orders_are_separate_positions(tmp_path, monkeypatch):
+    """MetaTrader-Stil: jede Schnell-Order = eigenes Ticket mit eigenem Stop/Ziel (Teilmenge auf Bitget)."""
+    from bot.account import PROFILE_KEYS, Account
+
+    for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
+        monkeypatch.delenv(n, raising=False)
+
+    class FB(FakeBitget):
+        markets = {"BTC/USDT:USDT": {"swap": True}, "ETH/USDT:USDT": {"swap": True}}
+        plans: dict = {}
+
+        def market(self, sym):
+            return {"id": sym.split("/")[0] + "USDT", "limits": {"amount": {"min": 0.001}}}
+
+        def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
+            oid = f"p{len(self.plans) + 1}"
+            self.plans[oid] = req
+            self.calls.append(("plan", req["planType"], req["triggerPrice"], req["size"]))
+            return {"data": {"orderId": oid}}
+
+        def privateMixPostV2MixOrderCancelPlanOrder(self, req):  # noqa: N802
+            oid = req["orderIdList"][0]["orderId"]
+            self.plans.pop(oid, None)
+            self.calls.append(("cancel_plan", oid))
+
+        def fetch_open_orders(self, sym, since=None, limit=None, params=None):
+            if (params or {}).get("planType") == "profit_loss":
+                return [{"id": k, "symbol": sym, "triggerPrice": float(v["triggerPrice"]), "amount": float(v["size"])}
+                        for k, v in self.plans.items() if v["symbol"] == sym.split("/")[0] + "USDT"]
+            return []
+
+    fake = {}
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, ["BTC/USDT:USDT"], factory=lambda api, demo=False: fake.setdefault("c", FB(api, demo)),
+                  env_path=tmp_path / ".env")
+    acc.connect("k", "s", "p", demo=True)
+    c = fake["c"]
+    # 20 % von 11,50 frei = 2,30 USDT Margin x 10 = 23 USDT Wert -> 0,000377 BTC -> Mindestmenge 0,001 nicht erreicht
+    with pytest.raises(ValueError, match="Mindestmenge"):
+        acc.quick_order("BTC/USDT:USDT", "long", 20, 10, 10, 20)
+    c.fetch_ticker = lambda sym: {"last": 2000.0}
+    with pytest.raises(RuntimeError, match="Gegenrichtung"):       # BTC-Long offen -> kein Short
+        acc.quick_order("BTC/USDT:USDT", "short", 20, 10, 10, 20)
+    with pytest.raises(ValueError, match="Take-Profit"):
+        acc.quick_order("BTC/USDT:USDT", "long", 20, 10, 10, 0)
+    acc.quick_order("BTC/USDT:USDT", "long", 50, 10, 10, 20)
+    acc.quick_order("BTC/USDT:USDT", "long", 50, 10, 10, 20)
+    tks = acc.tickets().open()
+    assert len(tks) == 2 and tks[0]["id"] != tks[1]["id"]                    # zwei getrennte Positionen
+    t1 = tks[0]
+    assert t1["sl"] == pytest.approx(2000 * (1 - 0.10 / 10)) and t1["tp"] == pytest.approx(2000 * (1 + 0.20 / 10))
+    plans = [x for x in c.calls if x[0] == "plan"]
+    assert {p[1] for p in plans} == {"loss_plan", "profit_plan"} and all(float(p[3]) == t1["amount"] for p in plans)
+    # Ticket 1 von Hand schliessen: nur seine Menge, seine Auftraege storniert
+    acc.close_ticket(t1["id"])
+    last = [x for x in c.calls if x[0] == "create_order"][-1]
+    assert last[3] == "sell" and last[4] == t1["amount"] and last[6]["reduceOnly"]
+    assert ("cancel_plan", t1["sl_id"]) in c.calls and ("cancel_plan", t1["tp_id"]) in c.calls
+    # Ticket 2: Ziel wurde auf Bitget ausgefuehrt -> Stop stornieren, Ticket geschlossen
+    t2 = acc.tickets().open()[0]
+    c.plans.pop(t2["tp_id"])
+    acc.refresh(force=True)
+    assert not acc.tickets().open()
+    closed = [x for x in acc.tickets().items if x["id"] == t2["id"]][0]
+    assert closed["why"] == "Ziel erreicht" and closed["pnl"] > 0 and t2["sl_id"] not in c.plans
+    assert acc.view()["tickets_closed"][0]["id"] == t2["id"]
+    # Tickets ueberleben einen Neustart (Datei)
+    acc2 = Account(cfg, [], factory=lambda api, demo=False: FB(api, demo), env_path=tmp_path / ".env")
+    acc2.connect("k", "s", "p", demo=True)
+    assert len(acc2.tickets().items) == 2

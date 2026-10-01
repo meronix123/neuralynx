@@ -79,6 +79,35 @@ def place_pos_tpsl(client, symbol: str, side: str, sl: float | None, tp: float |
     raise RuntimeError(f"Stop/Ziel konnte nicht gesetzt werden: {last_err}")
 
 
+def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, size: float) -> str:
+    """Take-Profit (plan='profit_plan') oder Stop-Loss ('loss_plan') fuer eine TEILMENGE der Position
+    (Bitget place-tpsl-order mit size). So bekommt jede Einzel-Position ihr eigenes Ziel und ihren Stop."""
+    market = client.market(symbol)
+    product_type, _ = client.handle_product_type_and_params(market, {})
+    base = {"symbol": market["id"], "productType": product_type, "marginCoin": "USDT", "planType": plan,
+            "triggerPrice": client.price_to_precision(symbol, trigger),
+            "triggerType": "mark_price" if plan == "loss_plan" else "fill_price",
+            "executePrice": "0", "size": client.amount_to_precision(symbol, size)}
+    hold = ["buy", "long"] if side == "long" else ["sell", "short"]
+    last_err = None
+    for h in hold:
+        try:
+            r = client.privateMixPostV2MixOrderPlaceTpslOrder({**base, "holdSide": h})
+            return str((r.get("data") or {}).get("orderId") or "")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {last_err}")
+
+
+def cancel_plan(client, symbol: str, order_id: str) -> None:
+    """TP/SL-Auftrag (Plan-Order) stornieren."""
+    market = client.market(symbol)
+    product_type, _ = client.handle_product_type_and_params(market, {})
+    client.privateMixPostV2MixOrderCancelPlanOrder({
+        "symbol": market["id"], "productType": product_type, "marginCoin": "USDT",
+        "orderIdList": [{"orderId": order_id}], "planType": "profit_loss"})
+
+
 class BitgetExchange:
     """Echter Handel (mode live) oder Bitget-Demokonto (mode demo)."""
 
