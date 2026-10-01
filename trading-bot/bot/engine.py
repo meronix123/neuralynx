@@ -875,6 +875,15 @@ class Bot:
         self._live = (time.time(), prices)
         return prices
 
+    def _min_amount(self, sym: str) -> float:
+        """Kleinste handelbare Menge eines Markts (z. B. 0,0001 BTC)."""
+        try:
+            m = self.ex.c.market(sym)
+            return float(((m.get("limits") or {}).get("amount") or {}).get("min")
+                         or (m.get("precision") or {}).get("amount") or 0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     CHART_TFS = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
 
     def chart_data(self, sym: str, tf: str, bars: int = 300) -> dict:
@@ -903,6 +912,8 @@ class Bot:
             "vwap": _series(tail, "vwap", bars),
             "order_blocks": zones, "walls": self._walls(sym),
             "price": float(df["close"].iloc[-1]),
+            "min_amount": self._min_amount(sym),
+            "min_notional": self.cfg["fees"].get("min_notional", 5.0),
         }
         self._chart_cache[key] = (time.time(), out)
         return out

@@ -941,7 +941,12 @@ function quickPreview() {
   const margin = m;
   document.getElementById("q-free").textContent = `(verfuegbar ${fmt(free)} USDT)`;
   if (!price || !lev) { document.getElementById("q-prev").textContent = ""; return; }
-  document.getElementById("q-prev").innerHTML = `Margin ${fmt(margin)} USDT &middot; Positionswert ${fmt(margin * lev)} USDT<br>` +
+  const cd = accChartData && accChartData.symbol === accSym ? accChartData : null;
+  const minVal = Math.max(cd ? cd.min_notional || 5 : 5, cd ? (cd.min_amount || 0) * price : 0);
+  const minStake = minVal / lev * 1.05;
+  const tooSmall = margin * lev < minVal * 1.0001;
+  document.getElementById("q-prev").innerHTML = `Einsatz ${fmt(margin)} USDT x ${lev} = <b>${fmt(margin * lev)} USDT Positionswert</b><br>` +
+    `<span class="${tooSmall ? "down" : "sub"}">${accSym.split(":")[0]}: Bitget-Minimum ${fmt(minVal)} USDT Positionswert = mind. ${fmt(minStake)} USDT Einsatz bei ${lev}x${tooSmall ? " - ZU WENIG" : ""}</span><br>` +
     `Long: Stop ${px(price * (1 - sl / 100 / lev))} (<span class="down">-${fmt(margin * sl / 100)} USDT</span>), Ziel ${px(price * (1 + tp / 100 / lev))} (<span class="up">+${fmt(margin * tp / 100)} USDT</span>)<br>` +
     `Short: Stop ${px(price * (1 + sl / 100 / lev))}, Ziel ${px(price * (1 - tp / 100 / lev))}`;
 }
