@@ -687,6 +687,7 @@ function render() {
   } else if (plan) {
     line(plan.sl, "#ef4444", "Plan SL", true); line(plan.tp, "#22c55e", "Plan TP", true);
   }
+  for (const l of accountLines(selected)) zline(l.price, l.color, l.title, l.style, l.width);
   const walls = src.walls || s.walls;
   if (show.walls && walls) {
     for (const w of (walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.9)", "Kauf-Wand " + big(w.usdt), 3, 2);
@@ -846,7 +847,7 @@ function newOrder() {
   const margin = Number(b.usdt.replace(",", ".")) / Number(b.leverage || 1);
   act("/api/account/order", b, `${acc && acc.demo ? "DEMO" : "ECHTES GELD"}: ${b.side.toUpperCase()} ${b.symbol.split(":")[0]} fuer ${b.usdt} USDT (${b.leverage}x Hebel, Margin ca. ${fmt(margin)} USDT), Stop ${b.sl}, Ziel ${b.tp || "-"}. Senden?`);
 }
-let accSym = null, accTf = "15m", accChart = null, accSeries = null, accChartData = null, accLines = [], accLast = null;
+let accInd = null, accSym = null, accTf = "15m", accChart = null, accSeries = null, accChartData = null, accLines = [], accLast = null;
 try { accTf = localStorage.getItem("acc_tf") || "15m"; document.getElementById("q-oneclick").checked = localStorage.getItem("oneclick") === "1"; } catch (e) { /* egal */ }
 function otherSym() {
   const v = val("acc-sym-other").toUpperCase().replace(/USDT.*$/, "").replace(/[^A-Z0-9]/g, "");
@@ -914,6 +915,11 @@ function ensureAccChart() {
     layout: { background: { color: "#171a21" }, textColor: "#8a93a6" },
     grid: { vertLines: { color: "#1f2430" }, horzLines: { color: "#1f2430" } }, timeScale: { timeVisible: true, secondsVisible: false } });
   accSeries = accChart.addCandlestickSeries({ upColor:"#22c55e", downColor:"#ef4444", wickUpColor:"#22c55e", wickDownColor:"#ef4444", borderVisible:false });
+  accInd = {
+    f: accChart.addLineSeries({ color:"#f59e0b", lineWidth:1, priceLineVisible:false, lastValueVisible:false }),
+    s: accChart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisible:false, lastValueVisible:false }),
+    v: accChart.addLineSeries({ color:"#64748b", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false }),
+  };
   new ResizeObserver(() => accChart.applyOptions({ width: document.getElementById("acc-chart").clientWidth })).observe(document.getElementById("acc-chart"));
 }
 async function pollAccChart() {
@@ -927,25 +933,45 @@ async function pollAccChart() {
   } catch (e) { return; }
   const bars = accChartData.candles.map(c => ({ ...c, time: c.time + TZ }));
   accSeries.setData(bars); accLast = bars.length ? { ...bars[bars.length - 1] } : null;
+  const ser = arr => bars.map((c, i) => arr && arr[i] != null ? { time: c.time, value: arr[i] } : null).filter(Boolean);
+  accInd.f.setData(ser(accChartData.ema_fast)); accInd.s.setData(ser(accChartData.ema_slow)); accInd.v.setData(ser(accChartData.vwap));
   document.getElementById("acc-chart-title").textContent = `${accSym.split(":")[0]} - ${TF_NAME[accTf] || accTf}`;
   drawAccLines();
   renderTerminal(acc || {});
 }
+function accountLines(sym) {
+  // Positionen des Bitget-Kontos fuer einen Markt: Einstieg, Stop, Ziel, Liquidation (+ liegende TP/SL-Auftraege)
+  const a = acc || {}, out = [];
+  if (!a.connected) return out;
+  for (const p of (a.positions || []).filter(p => p.symbol === sym)) {
+    const tag = `Konto ${p.side === "long" ? "Long" : "Short"}`;
+    if (p.entry) out.push({ price: p.entry, color: "#3b82f6", title: `${tag} ${fmt(p.amount, 4)}`, style: 0, width: 2 });
+    if (p.sl) out.push({ price: p.sl, color: "#ef4444", title: `${tag} SL`, style: 0, width: 2 });
+    if (p.tp) out.push({ price: p.tp, color: "#22c55e", title: `${tag} TP`, style: 0, width: 2 });
+    if (p.liq) out.push({ price: p.liq, color: "#f59e0b", title: "Liquidation", style: 1, width: 1 });
+  }
+  const tkIds = new Set((a.tickets || []).flatMap(t => [t.sl_id, t.tp_id]));
+  for (const o of (a.orders || []).filter(o => o.symbol === sym && o.trigger && !tkIds.has(o.id)))
+    out.push({ price: o.trigger, color: "#94a3b8", title: o.kind === "tpsl" ? "Stop/Ziel-Auftrag" : "Ausloese-Order", style: 2, width: 1 });
+  for (const t of (a.tickets || []).filter(t => t.symbol === sym)) {
+    out.push({ price: t.entry, color: "#3b82f6", title: `#${t.id} ${t.side}`, style: 0, width: 1 });
+    out.push({ price: t.sl, color: "#ef4444", title: `#${t.id} SL`, style: 2, width: 1 });
+    out.push({ price: t.tp, color: "#22c55e", title: `#${t.id} TP`, style: 2, width: 1 });
+  }
+  return out;
+}
 function drawAccLines() {
   if (!accSeries) return;
   accLines.forEach(l => accSeries.removePriceLine(l)); accLines = [];
-  for (const t of ((acc || {}).tickets || []).filter(t => t.symbol === accSym)) {
-    accLines.push(accSeries.createPriceLine({ price: t.entry, color: "#3b82f6", lineWidth: 1, title: `#${t.id} ${t.side}` }));
-    accLines.push(accSeries.createPriceLine({ price: t.sl, color: "#ef4444", lineWidth: 1, lineStyle: 2, title: `#${t.id} SL` }));
-    accLines.push(accSeries.createPriceLine({ price: t.tp, color: "#22c55e", lineWidth: 1, lineStyle: 2, title: `#${t.id} TP` }));
-  }
+  for (const l of accountLines(accSym))
+    accLines.push(accSeries.createPriceLine({ price: l.price, color: l.color, lineWidth: l.width, lineStyle: l.style, title: l.title, axisLabelVisible: true }));
 }
 setInterval(pollAccChart, 5000);
 
 
 async function pollAcc() {
-  if (view !== "acc" && acc) return;
-  try { acc = await (await fetch("/api/account")).json(); renderAcc(); } catch (e) { /* Bot nicht erreichbar */ }
+  if (view !== "acc" && acc && !acc.connected) return;
+  try { acc = await (await fetch("/api/account")).json(); renderAcc(); drawAccLines(); } catch (e) { /* Bot nicht erreichbar */ }
 }
 setInterval(pollAcc, 3000);
 

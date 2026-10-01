@@ -151,6 +151,7 @@ fees:
   maker: 0.0002    # Bitget Futures Maker-Gebuehr (Limit-Orders)
   taker: 0.0006    # Bitget Futures Taker-Gebuehr
   slippage: 0.0003 # geschaetzter Kursverlust bei Market-Orders
+  min_notional: 5  # Bitget: jede Order mind. 5 USDT Positionswert
 
 paper:
   start_equity: 35  # Startkapital in USDT fuer die Simulation

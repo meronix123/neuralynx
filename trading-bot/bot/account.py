@@ -14,7 +14,7 @@ import threading
 import time
 
 from .config import ROOT
-from .exchange import cancel_plan, make_client, place_pos_tpsl, place_size_tpsl
+from .exchange import cancel_plan, is_hedged, make_client, place_pos_tpsl, place_size_tpsl
 
 log = logging.getLogger("bot")
 ENV_FILE = ROOT / ".env"
@@ -25,6 +25,7 @@ PROFILE_KEYS = {
 PROFILE_NAMES = {"live": "Echtkonto", "demo": "Testkonto"}
 HISTORY_DAYS = 30
 REFRESH_S = 5
+MIN_NOTIONAL = 5.0   # Bitget: jede Order mind. 5 USDT Positionswert
 
 
 def save_env(values: dict[str, str], path=None) -> None:
@@ -57,6 +58,9 @@ def explain_error(e: Exception) -> str:
         return ("Bitget hat die Anfrage blockiert (Cloudflare 403). Haeufigste Ursache: falsche Eingabe - "
                 "die Passphrase ist das selbst vergebene API-Passwort, nicht die Berechtigungen. "
                 "Sonst: VPN aus, kurz warten, erneut versuchen.")
+    if "45110" in msg or "minimum amount" in msg:
+        return ("Order zu klein: Bitget verlangt mindestens 5 USDT Positionswert (Menge x Kurs). "
+                "Mehr Kapital-% oder hoeheren Hebel waehlen.")
     if "40014" in msg:
         return ("Dem API-Schluessel fehlen Futures-Rechte. Bei Bitget unter API-Verwaltung -> Schluessel bearbeiten: "
                 "Futures 'Positionen' (Holdings) UND 'Orders' auf Lesen + Bearbeiten stellen. "
@@ -271,14 +275,16 @@ class Account:
         p = self._position(symbol)
         side = p.get("side")
         if fraction >= 0.999:
-            c.close_position(symbol, "buy" if side == "long" else "sell")
+            c.close_position(symbol, self._close_side(c, side))
             msg = f"{symbol} {side} komplett geschlossen"
         else:
             qty = float(c.amount_to_precision(symbol, _f(p["contracts"]) * fraction))
-            if qty <= 0:
-                raise RuntimeError("Menge zu klein zum Teil-Schliessen")
+            px_now = _f(p.get("markPrice")) or _f(p.get("entryPrice")) or 0
+            if qty <= 0 or qty * px_now < MIN_NOTIONAL:
+                raise RuntimeError("Haelfte waere unter 5 USDT (Bitget-Minimum) - bitte ganz schliessen")
             c.create_order(symbol, "market", "sell" if side == "long" else "buy", qty, None,
-                           {"reduceOnly": True, "marginMode": p.get("marginMode") or self.cfg.get("margin_mode")})
+                           {"reduceOnly": True, "marginMode": p.get("marginMode") or self.cfg.get("margin_mode"),
+                            "hedged": is_hedged(c)})
             msg = f"{symbol}: {qty:g} von {_f(p['contracts']):g} geschlossen"
         self.refresh(force=True)
         return msg
@@ -307,8 +313,8 @@ class Account:
         c.load_markets()
         if symbol not in c.markets:
             raise ValueError(f"Markt {symbol} gibt es auf Bitget nicht")
-        # Bitget One-Way-Modus: Gegenrichtung wuerde bestehende Einzel-Positionen aufloesen
-        for p in c.fetch_positions([symbol]):
+        # Bitget One-Way-Modus: Gegenrichtung wuerde bestehende Einzel-Positionen aufloesen (Hedge-Modus: erlaubt)
+        for p in ([] if is_hedged(c) else c.fetch_positions([symbol])):
             if (_f(p.get("contracts")) or 0) > 0 and p.get("side") != side:
                 raise RuntimeError(f"In {symbol} ist eine {p.get('side')}-Position offen - Gegenrichtung erst nach dem Schliessen")
         free = _f(c.fetch_balance({"type": "swap"}).get("USDT", {}).get("free")) or 0.0
@@ -317,8 +323,11 @@ class Account:
         lev = int(leverage)
         qty = float(c.amount_to_precision(symbol, margin * lev / price))
         min_amt = _f(((c.market(symbol).get("limits") or {}).get("amount") or {}).get("min")) or 0
-        if qty <= 0 or qty < min_amt:
-            raise ValueError(f"Zu wenig Guthaben fuer die Mindestmenge ({margin:.2f} USDT Margin)")
+        if qty <= 0 or qty < min_amt or qty * price < MIN_NOTIONAL:
+            need = MIN_NOTIONAL / lev / free * 100 if free > 0 else 100
+            raise ValueError(f"Order zu klein: {margin:.2f} USDT Margin x {lev} = {margin * lev:.2f} USDT Positionswert. "
+                             f"Bitget verlangt mind. {MIN_NOTIONAL:.0f} USDT (bzw. die Mindestmenge) - mind. "
+                             f"{min(100, need):.0f} % Kapital bei {lev}x waehlen (freies Guthaben {free:.2f} USDT).")
         sign = 1 if side == "long" else -1
         sl = price * (1 - sign * sl_pct / 100 / lev)
         tp = price * (1 + sign * tp_pct / 100 / lev)
@@ -330,7 +339,8 @@ class Account:
                 fn()
             except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
                 log.debug("Schnell-Order Vorbereitung %s: %s", symbol, e)
-        o = c.create_order(symbol, "market", "buy" if side == "long" else "sell", qty, None, {"marginMode": mm})
+        o = c.create_order(symbol, "market", "buy" if side == "long" else "sell", qty, None,
+                           {"marginMode": mm, "hedged": is_hedged(c)})
         entry = _f(o.get("average")) or price
         sl_id = tp_id = ""
         err = []
@@ -345,7 +355,7 @@ class Account:
         if not sl_id:
             # ohne Stop keine offene Position stehen lassen
             c.create_order(symbol, "market", "sell" if side == "long" else "buy", qty, None,
-                           {"reduceOnly": True, "marginMode": mm})
+                           {"reduceOnly": True, "marginMode": mm, "hedged": is_hedged(c)})
             if tp_id:
                 try:
                     cancel_plan(c, symbol, tp_id)
@@ -357,6 +367,13 @@ class Account:
         self.refresh(force=True)
         msg = f"{side.upper()} {qty:g} {symbol.split(':')[0]} @ ~{entry:.6g} | Stop {sl:.6g} | Ziel {tp:.6g}"
         return msg + (f" (Hinweis: {'; '.join(err)})" if err else "")
+
+    @staticmethod
+    def _close_side(c, side: str) -> str:
+        """close_position: One-Way erwartet 'buy'/'sell', Hedge 'long'/'short'."""
+        if is_hedged(c):
+            return side
+        return "buy" if side == "long" else "sell"
 
     def close_ticket(self, ticket_id: int) -> str:
         c = self._need()
@@ -370,7 +387,7 @@ class Account:
                 except Exception as e:  # noqa: BLE001 - evtl. schon ausgefuehrt
                     log.debug("Plan-Storno %s: %s", oid, e)
         o = c.create_order(tk["symbol"], "market", "sell" if tk["side"] == "long" else "buy", tk["amount"], None,
-                           {"reduceOnly": True, "marginMode": self.cfg.get("margin_mode", "isolated")})
+                           {"reduceOnly": True, "marginMode": self.cfg.get("margin_mode", "isolated"), "hedged": is_hedged(c)})
         price = _f(o.get("average")) or float(c.fetch_ticker(tk["symbol"])["last"])
         self.tickets().close(tk, price, "manuell")
         self.refresh(force=True)
@@ -382,11 +399,12 @@ class Account:
         open_ids = {o["id"] for o in orders if o.get("kind") == "tpsl"}
         size = {}
         for p in positions:
-            size[p["symbol"]] = size.get(p["symbol"], 0) + (p["amount"] or 0)
+            k = (p["symbol"], p.get("side"))
+            size[k] = size.get(k, 0) + (p["amount"] or 0)
         c = self.client
         for tk in tks.open():
             sl_open, tp_open = tk.get("sl_id") in open_ids, tk.get("tp_id") in open_ids
-            if size.get(tk["symbol"], 0) <= 0:
+            if size.get((tk["symbol"], tk["side"]), 0) <= 0:
                 why = "Ziel erreicht" if not tp_open and sl_open else "Stop ausgeloest" if not sl_open and tp_open else "Position geschlossen"
                 price = tk["tp"] if why == "Ziel erreicht" else tk["sl"] if why == "Stop ausgeloest" else None
             elif not tp_open and tk.get("tp_id"):
@@ -412,7 +430,7 @@ class Account:
             if (_f(p.get("contracts")) or 0) <= 0:
                 continue
             try:
-                c.close_position(p["symbol"], "buy" if p.get("side") == "long" else "sell")
+                c.close_position(p["symbol"], self._close_side(c, p.get("side")))
                 done.append(p["symbol"].split(":")[0])
             except Exception as e:  # noqa: BLE001
                 failed.append(f"{p['symbol']}: {e}")
@@ -468,9 +486,9 @@ class Account:
             except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
                 log.debug("Order-Vorbereitung %s: %s", symbol, e)
         qty = float(c.amount_to_precision(symbol, usdt / ref))
-        if qty <= 0:
-            raise ValueError("Betrag zu klein fuer die Mindestmenge")
-        params = {"marginMode": mm, "stopLoss": {"triggerPrice": sl}}
+        if qty <= 0 or qty * ref < MIN_NOTIONAL:
+            raise ValueError(f"Order zu klein: Bitget verlangt mind. {MIN_NOTIONAL:.0f} USDT Positionswert")
+        params = {"marginMode": mm, "stopLoss": {"triggerPrice": sl}, "hedged": is_hedged(c)}
         if tp:
             params["takeProfit"] = {"triggerPrice": tp}
         o = c.create_order(symbol, "limit" if order_type == "limit" else "market",

@@ -738,6 +738,9 @@ class Bot:
         amount = round_amount(amount, step, min_amt)
         if amount <= 0:
             return "Konto zu klein fuer Mindestmenge"
+        if amount * sig.price < self.cfg["fees"].get("min_notional", 5.0):
+            return (f"Position waere nur {amount * sig.price:.2f} USDT wert - Bitget verlangt mind. "
+                    f"{self.cfg['fees'].get('min_notional', 5.0):.0f} USDT")
 
         try:
             return self._place_entry(sym, sig, amount, info, positions, tf)

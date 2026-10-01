@@ -1503,3 +1503,40 @@ def test_quick_orders_are_separate_positions(tmp_path, monkeypatch):
     acc2 = Account(cfg, [], factory=lambda api, demo=False: FB(api, demo), env_path=tmp_path / ".env")
     acc2.connect("k", "s", "p", demo=True)
     assert len(acc2.tickets().items) == 2
+
+
+def test_hedge_mode_account_orders(tmp_path, monkeypatch):
+    """Bitget-Konto im Hedge-Modus: Orders mit tradeSide (hedged), TP/SL mit holdSide long/short."""
+    from bot.account import PROFILE_KEYS, Account
+    from bot.exchange import hold_side, is_hedged
+
+    for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
+        monkeypatch.delenv(n, raising=False)
+
+    class FH(FakeBitget):
+        markets = {"BTC/USDT:USDT": {"swap": True}}
+
+        def market(self, sym):
+            return {"id": "BTCUSDT", "limits": {"amount": {"min": 0.001}}}
+
+        def privateMixGetV2MixAccountAccounts(self, req):  # noqa: N802
+            return {"data": [{"marginCoin": "USDT", "posMode": "hedge_mode"}]}
+
+        def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802
+            self.calls.append(("plan", req["holdSide"]))
+            return {"data": {"orderId": f"x{len(self.calls)}"}}
+
+        def fetch_ticker(self, sym):
+            return {"last": 2000.0}
+
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    box = {}
+    acc = Account(cfg, [], factory=lambda api, demo=False: box.setdefault("c", FH(api, demo)), env_path=tmp_path / ".env")
+    acc.connect("k", "s", "p")
+    c = box["c"]
+    assert is_hedged(c) and hold_side(c, "short") == "short"
+    acc.quick_order("BTC/USDT:USDT", "short", 50, 10, 10, 20)     # Gegenrichtung zur offenen Long-Position erlaubt
+    order = [x for x in c.calls if x[0] == "create_order"][-1]
+    assert order[3] == "sell" and order[6]["hedged"] is True
+    assert ("plan", "short") in c.calls

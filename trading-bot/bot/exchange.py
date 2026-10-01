@@ -55,6 +55,33 @@ def to_df(rows: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
 
 
+def is_hedged(client) -> bool:
+    """Steht das Bitget-Konto im Hedge-Modus (Long und Short getrennt) statt One-Way? (einmal je Verbindung)"""
+    cached = getattr(client, "_bot_hedged", None)
+    if cached is not None:
+        return cached
+    hedged = False
+    try:
+        client.load_markets()
+        product_type, _ = client.handle_product_type_and_params(client.market("BTC/USDT:USDT"), {})
+        r = client.privateMixGetV2MixAccountAccounts({"productType": product_type})
+        hedged = any(a.get("posMode") == "hedge_mode" for a in (r.get("data") or []))
+    except Exception as e:  # noqa: BLE001 - im Zweifel One-Way (Standard des Bots)
+        log.debug("Positionsmodus: %s", e)
+    try:
+        client._bot_hedged = hedged
+    except AttributeError:
+        pass
+    return hedged
+
+
+def hold_side(client, side: str) -> str:
+    """holdSide fuer TP/SL-Auftraege: One-Way 'buy'/'sell', Hedge 'long'/'short'."""
+    if is_hedged(client):
+        return "long" if side == "long" else "short"
+    return "buy" if side == "long" else "sell"
+
+
 def place_pos_tpsl(client, symbol: str, side: str, sl: float | None, tp: float | None) -> None:
     """Stop-Loss und/oder Take-Profit fuer die ganze Position auf Bitget setzen (place-pos-tpsl)."""
     if sl is None and tp is None:
@@ -67,16 +94,10 @@ def place_pos_tpsl(client, symbol: str, side: str, sl: float | None, tp: float |
     if tp is not None:
         base.update(stopSurplusTriggerPrice=client.price_to_precision(symbol, tp),
                     stopSurplusTriggerType="fill_price")
-    # One-Way-Modus erwartet je nach Konto "buy"/"sell" oder "long"/"short"
-    hold = ["buy", "long"] if side == "long" else ["sell", "short"]
-    last_err = None
-    for h in hold:
-        try:
-            client.privateMixPostV2MixOrderPlacePosTpsl({**base, "holdSide": h})
-            return
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-    raise RuntimeError(f"Stop/Ziel konnte nicht gesetzt werden: {last_err}")
+    try:
+        client.privateMixPostV2MixOrderPlacePosTpsl({**base, "holdSide": hold_side(client, side)})
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Stop/Ziel konnte nicht gesetzt werden: {e}") from e
 
 
 def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, size: float) -> str:
@@ -88,15 +109,11 @@ def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, s
             "triggerPrice": client.price_to_precision(symbol, trigger),
             "triggerType": "mark_price" if plan == "loss_plan" else "fill_price",
             "executePrice": "0", "size": client.amount_to_precision(symbol, size)}
-    hold = ["buy", "long"] if side == "long" else ["sell", "short"]
-    last_err = None
-    for h in hold:
-        try:
-            r = client.privateMixPostV2MixOrderPlaceTpslOrder({**base, "holdSide": h})
-            return str((r.get("data") or {}).get("orderId") or "")
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-    raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {last_err}")
+    try:
+        r = client.privateMixPostV2MixOrderPlaceTpslOrder({**base, "holdSide": hold_side(client, side)})
+        return str((r.get("data") or {}).get("orderId") or "")
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {e}") from e
 
 
 def cancel_plan(client, symbol: str, order_id: str) -> None:
@@ -158,7 +175,7 @@ class BitgetExchange:
     # --- Handel ------------------------------------------------------
     def _protect(self, sl: float, tp: float | None) -> dict:
         """Stop-Loss immer; Take-Profit nur, wenn er nicht als eigene Limit-Order liegt (tp=None)."""
-        p = {"marginMode": self.cfg["margin_mode"], "stopLoss": {"triggerPrice": sl}}
+        p = {"marginMode": self.cfg["margin_mode"], "stopLoss": {"triggerPrice": sl}, "hedged": is_hedged(self.c)}
         if tp is not None:
             p["takeProfit"] = {"triggerPrice": tp}
         return p
@@ -192,7 +209,7 @@ class BitgetExchange:
         """Take-Profit als liegende Limit-Order (nur reduzierend, Maker-Gebuehr)."""
         order = self.c.create_order(
             symbol, "limit", "sell" if side == "long" else "buy", amount, price,
-            {"reduceOnly": True, "postOnly": True, "marginMode": self.cfg["margin_mode"]},
+            {"reduceOnly": True, "postOnly": True, "marginMode": self.cfg["margin_mode"], "hedged": is_hedged(self.c)},
         )
         return str(order["id"])
 
@@ -217,7 +234,7 @@ class BitgetExchange:
     def close(self, symbol: str, side: str, amount: float) -> None:
         self.c.create_order(
             symbol, "market", "sell" if side == "long" else "buy", amount, None,
-            {"reduceOnly": True, "marginMode": self.cfg["margin_mode"]},
+            {"reduceOnly": True, "marginMode": self.cfg["margin_mode"], "hedged": is_hedged(self.c)},
         )
 
     def closed_pnl(self, symbol: str, since_ms: int) -> float | None:
