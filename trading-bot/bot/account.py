@@ -8,6 +8,7 @@ im Paper-Modus laeuft.
 """
 import logging
 import os
+import re
 import threading
 import time
 
@@ -115,7 +116,9 @@ class Account:
 
     def connect(self, key: str, secret: str, password: str, demo: bool = False, save: bool = True,
                 activate: bool = True) -> None:
-        key, secret, password = key.strip(), secret.strip(), password.strip()
+        # Key/Secret enthalten nie Leerzeichen -> beim Kopieren mitgerutschte Umbrueche entfernen
+        key, secret = (re.sub(r"[\s\u200b-\u200d\ufeff]+", "", v) for v in (key, secret))
+        password = re.sub(r"[\u200b-\u200d\ufeff]", "", password).strip()
         if not (key and secret and password):
             raise ValueError("API-Key, Secret und Passphrase eingeben")
         for name, v in (("API-Key", key), ("Secret", secret), ("Passphrase", password)):

@@ -1391,7 +1391,7 @@ def test_remote_access_requires_password(tmp_path, monkeypatch):
         srv.server_close()
 
 
-def test_bitget_errors_are_explained():
+def test_bitget_errors_are_explained(tmp_path):
     from bot.account import Account, explain_error
 
     assert "Passphrase" in explain_error(RuntimeError("bitget GET ... 403 Forbidden Sorry, you have been blocked Cloudflare"))
@@ -1401,3 +1401,8 @@ def test_bitget_errors_are_explained():
     acc = Account(cfg, [], factory=lambda api, demo=False: FakeBitget(api, demo))
     with pytest.raises(ValueError, match="Berechtigungen"):
         acc.connect("bg_123", "abc", "Lesen Schreiben Futures")      # Berechtigungen statt Passphrase
+    seen = {}
+    acc2 = Account(cfg, [], factory=lambda api, demo=False: seen.update(api) or FakeBitget(api, demo),
+                   env_path=tmp_path / ".env")
+    acc2.connect(" bg_123 ", "d989a9be3382\ne0cd 024c\u200b", "MeinPass123")   # zweizeilig kopiertes Secret
+    assert seen == {"key": "bg_123", "secret": "d989a9be3382e0cd024c", "password": "MeinPass123"}

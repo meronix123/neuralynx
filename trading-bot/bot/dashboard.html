@@ -86,6 +86,7 @@
     <div class="grid2">
       <label>API-Key<input id="k-key" autocomplete="off"></label>
       <label>Secret<input id="k-secret" type="password" autocomplete="off"></label>
+      <label><input type="checkbox" onchange="for (const id of ['k-secret','k-pass']) document.getElementById(id).type = this.checked ? 'text' : 'password'"> Eingaben anzeigen</label>
       <label>Passphrase = das Passwort, das du beim Anlegen des API-Schluessels bei Bitget selbst vergeben hast
         (NICHT die Berechtigungen)<input id="k-pass" type="password" autocomplete="off"></label>
     </div>
@@ -519,14 +520,22 @@ async function switchMode(m) {
   else render();
 }
 function val(id) { return document.getElementById(id).value.trim(); }
+// Key und Secret enthalten nie Leerzeichen: beim Kopieren mitgerutschte Umbrueche/Leerzeichen entfernen
+function keyval(id) { return document.getElementById(id).value.replace(/[\s\u200b-\u200d\ufeff]+/g, ""); }
 async function connectAcc() {
   const demo = (acc || {}).active === "demo";
-  const bad = [["k-key", "API-Key"], ["k-secret", "Secret"], ["k-pass", "Passphrase"]].find(([id]) => !/^[\x21-\x7e]+$/.test(val(id)));
-  if (bad) {
-    toast(`${bad[1]}: leer oder enthaelt Leerzeichen/Umlaute. Die Passphrase ist dein selbst vergebenes API-Passwort, nicht die Berechtigungen.`, false);
-    return;
+  const vals = { key: keyval("k-key"), secret: keyval("k-secret"), password: val("k-pass").replace(/[\u200b-\u200d\ufeff]/g, "") };
+  const names = { key: "API-Key", secret: "Secret", password: "Passphrase" };
+  for (const k of ["key", "secret", "password"]) {
+    if (!vals[k]) { toast(`${names[k]} ist leer.`, false); return; }
+    const badch = [...vals[k]].find(ch => !/[\x21-\x7e]/.test(ch));
+    if (badch) {
+      toast(`${names[k]} enthaelt ein ungueltiges Zeichen (${badch === " " ? "Leerzeichen" : "'" + badch + "'"}).` +
+        (k === "password" ? " Die Passphrase ist dein selbst vergebenes API-Passwort (ohne Umlaute/Leerzeichen), nicht die Berechtigungen." : ""), false);
+      return;
+    }
   }
-  const ok = await act("/api/account/connect", { key: val("k-key"), secret: val("k-secret"), password: val("k-pass"), demo });
+  const ok = await act("/api/account/connect", { ...vals, demo });
   if (ok) for (const id of ["k-key", "k-secret", "k-pass"]) document.getElementById(id).value = "";
 }
 function editTpsl(sym, sl, tp) {
