@@ -147,11 +147,16 @@ class BitgetExchange:
 
     def place_limit(self, symbol: str, side: str, amount: float, price: float, sl: float,
                     tp: float | None) -> str:
-        """Post-Only-Limit-Order (Maker-Gebuehr) mit Stop-Loss (und ggf. Take-Profit)."""
-        order = self.c.create_order(
-            symbol, "limit", "buy" if side == "long" else "sell", amount, price,
-            {**self._protect(sl, tp), "postOnly": True},
-        )
+        """Post-Only-Limit-Order (Maker-Gebuehr) mit Stop-Loss (und ggf. Take-Profit).
+
+        Liegt der Kurs schon auf der anderen Seite (Post-Only wuerde sofort ausfuehren und wird
+        abgelehnt), wird eine normale Limit-Order gesetzt: sofort ausgefuehrt zum Limit oder besser."""
+        args = (symbol, "limit", "buy" if side == "long" else "sell", amount, price)
+        try:
+            order = self.c.create_order(*args, {**self._protect(sl, tp), "postOnly": True})
+        except ccxt.ExchangeError as e:  # Bitget meldet das je nach Fall unterschiedlich
+            log.info("%s Post-Only abgelehnt (%s) - normale Limit-Order", symbol, e)
+            order = self.c.create_order(*args, self._protect(sl, tp))
         return str(order["id"])
 
     def place_tp_limit(self, symbol: str, side: str, amount: float, price: float) -> str:
@@ -188,9 +193,15 @@ class BitgetExchange:
 
     def closed_pnl(self, symbol: str, since_ms: int) -> float | None:
         try:
-            hist = self.c.fetch_positions_history([symbol], since_ms)
+            # Die Position wurde evtl. schon etwas VOR der Registrierung im Bot eroeffnet
+            # (Limit-Order ausgefuehrt) -> mit Vorlauf suchen, aber nur Positionen nehmen,
+            # die NACH der Registrierung geschlossen wurden.
+            def closed_at(h):
+                return h.get("lastUpdateTimestamp") or h.get("timestamp") or 0
+            hist = [h for h in self.c.fetch_positions_history([symbol], since_ms - 86_400_000)
+                    if h.get("symbol") in (None, symbol) and closed_at(h) >= since_ms]
             if hist:
-                return float(hist[-1].get("realizedPnl") or 0)
+                return float(max(hist, key=closed_at).get("realizedPnl") or 0)
         except Exception as e:  # noqa: BLE001
             log.debug("PnL-Historie %s: %s", symbol, e)
         return None
@@ -319,8 +330,12 @@ class PaperExchange:
             hit_sl = price <= p["sl"] if p["side"] == "long" else price >= p["sl"]
             tp = p.get("tp")
             hit_tp = tp is not None and (price >= tp if p["side"] == "long" else price <= tp)
-            if hit_sl or hit_tp:
-                self._exit(sym, p["sl"] if hit_sl else tp, maker=hit_tp and not hit_sl and p.get("tp_maker", False))
+            if hit_sl:
+                # Stop ist eine Markt-Order: bei einer Luecke wird zum schlechteren Kurs ausgefuehrt
+                fill = min(p["sl"], price) if p["side"] == "long" else max(p["sl"], price)
+                self._exit(sym, fill)
+            elif hit_tp:
+                self._exit(sym, tp, maker=p.get("tp_maker", False))
 
     def _exit(self, sym, price, maker=False):
         p = self.pos.pop(sym)

@@ -25,6 +25,7 @@ log = logging.getLogger("bot")
 STATE_FILE = ROOT / "state.json"
 STOP_FILE = ROOT / "STOP"
 CHART_BARS = 150
+CANDLES = 1000   # so viele Kerzen je Zeiteinheit laden (lange EMAs rechnen wie im Backtest)
 
 
 def state_file(mode: str = "paper"):
@@ -79,6 +80,7 @@ class Bot:
         self.tf_stats: dict = {}
         self._sig_cache: dict = {}
         self.manual_close: list[str] = []      # Schliessen-Knopf in der Oberflaeche
+        self.last_error: dict | None = None
         self.model = None
         self._model_trained_on = -1
         self._train_model()
@@ -129,11 +131,15 @@ class Bot:
                 raise
             except Exception as e:  # noqa: BLE001 - Bot soll bei Netzfehlern weiterlaufen
                 log.exception("Fehler im Durchlauf: %s", e)
-                self.status["error"] = str(e)
+                self._set_error(str(e))
             if hasattr(self.ex, "dump"):
                 self.state["paper"] = self.ex.dump()
             save_state(self.state, self.cfg["mode"])
             time.sleep(self.cfg["loop_seconds"])
+
+    def _set_error(self, msg: str) -> None:
+        self.last_error = {"at": datetime.now(timezone.utc).isoformat(), "msg": msg[:300]}
+        self.status["last_error"] = self.last_error
 
     def _heartbeat(self) -> None:
         """Einmal pro Stunde ins Log: Bot lebt, so viele Signale, so viele gehandelt, haeufigste Gruende."""
@@ -170,7 +176,13 @@ class Bot:
 
         views = {}
         for sym in self.ex.symbols:
-            views[sym] = self._analyze(sym)
+            try:
+                views[sym] = self._analyze(sym)
+            except Exception as e:  # noqa: BLE001 - Markt voruebergehend nicht abrufbar
+                log.warning("%s Analyse fehlgeschlagen: %s", sym, e)
+                self._set_error(f"{sym}: {e}")
+                if sym in self.views:
+                    views[sym] = self.views[sym]  # letzte bekannte Daten weiter anzeigen
         self.views = views
         if self.multi:
             self.tf_stats = self._tf_stats(views)
@@ -180,6 +192,9 @@ class Bot:
         block, risk_factor = self._global_block(equity, now)
         reasons = {}
         for sym in self.ex.symbols:
+            if sym not in views:
+                reasons[sym] = "Keine Kursdaten (siehe Log)"
+                continue
             if sym in positions:
                 reasons[sym] = "Position offen"
                 continue
@@ -189,7 +204,12 @@ class Bot:
             if block:
                 reasons[sym] = block
                 continue
-            reasons[sym] = self._enter_any(sym, equity, positions, views[sym], risk_factor, now)
+            try:
+                reasons[sym] = self._enter_any(sym, equity, positions, views[sym], risk_factor, now)
+            except Exception as e:  # noqa: BLE001 - ein Markt mit Fehler darf die anderen nicht blockieren
+                log.exception("%s Einstieg: %s", sym, e)
+                reasons[sym] = f"Fehler: {e}"
+                self._set_error(f"{sym}: {e}")
         self._update_status(now, equity, positions, views, reasons, block)
 
     def request_close(self, sym: str) -> str:
@@ -213,6 +233,7 @@ class Bot:
                 o = self.state["pending"].pop(sym, None)
                 if o:
                     self.ex.cancel(sym, o["order_id"])
+                    positions = self.ex.positions()  # evtl. kurz vor dem Storno ausgefuehrt
                 p = positions.get(sym)
                 if p:
                     m = self.state["meta"].get(sym, {})
@@ -232,7 +253,7 @@ class Bot:
             if not self.state.get("dd_alarm"):
                 self.state["dd_alarm"] = True
                 self.notify.send("ALARM: Maximaler Gesamtverlust erreicht - Bot eroeffnet keine Trades mehr. "
-                                 "Zum Fortsetzen state.json loeschen.")
+                                 f"Zum Fortsetzen {state_file(self.cfg['mode']).name} loeschen.")
             return "Max. Gesamtverlust erreicht", 0.0
         ok, why, factor = self.ctx.check(now)
         if not ok:
@@ -254,7 +275,17 @@ class Bot:
                     positions[sym] = p
                 else:
                     del self.state["pending"][sym]
-                    log.info("%s Limit-Order nicht ausgefuehrt - storniert", sym)
+                    # ausgefuehrt UND schon wieder geschlossen (z. B. Stop in wenigen Sekunden)?
+                    pnl = self.ex.closed_pnl(sym, o.get("placed_ms", o["expires_ms"] - 86_400_000))
+                    if pnl is None:
+                        log.info("%s Limit-Order nicht ausgefuehrt - storniert", sym)
+                    else:
+                        log.info("%s Limit-Order ausgefuehrt und sofort wieder geschlossen: %+.2f USDT", sym, pnl)
+                        self.guard.on_open()
+                        m = {"side": o["side"], "entry": o["price"], "amount": o["amount"], "sl_init": o["sl"],
+                             "tp": o["tp"], "score": o.get("score"), "opened_ms": o.get("placed_ms", now_ms),
+                             **(o.get("info") or {})}
+                        self._add_history(sym, m, self.ex.last_price(sym), pnl, now)
                     continue
             if sym in positions:
                 del self.state["pending"][sym]
@@ -313,10 +344,11 @@ class Bot:
         at, scores = self.__dict__.get("_macro_cache", (0, None))
         if time.time() - at > 6 * 3600:
             try:
-                scores = fetch_macro(400)
+                scores = fetch_macro(400) or scores
             except Exception as e:  # noqa: BLE001
                 log.warning("Makro-Daten: %s", e)
-            self._macro_cache = (time.time(), scores)
+            # ohne Daten in 30 Minuten erneut versuchen statt erst in 6 Stunden
+            self._macro_cache = (time.time() if scores is not None else time.time() - 5.5 * 3600, scores)
         return macro_latest(scores, is_metal(sym), int(time.time() * 1000))
 
     def _funding_rank(self, sym: str, current: float | None) -> float | None:
@@ -333,21 +365,31 @@ class Bot:
             cache[sym] = (time.time(), hist)
         return live_rank(hist, current)
 
-    def _cached_candles(self, sym: str, tf: str, limit: int = 300):
+    def _cached_candles(self, sym: str, tf: str, limit: int = CANDLES):
         """Kerzen erst neu laden, wenn ein Bar abgeschlossen ist (spaetestens alle 5 Min)."""
         key, now = (sym, tf), time.time()
         hit = self._candle_cache.get(key)
         if hit and now - hit[0] < 300 and len(hit[1]):
             if now * 1000 < int(hit[1]["ts"].iloc[-1]) + TF_MS[tf] + 2000:
                 return hit[1]
-        df = self.ex.candles(sym, tf, limit)
+        df = self._candles(sym, tf, limit)
         self._candle_cache[key] = (now, df)
         return df
 
+    def _candles(self, sym: str, tf: str, limit: int = CANDLES):
+        """Kerzen laden; lehnt die Boerse die Menge ab, mit 300 erneut versuchen."""
+        try:
+            return self.ex.candles(sym, tf, limit)
+        except Exception as e:  # noqa: BLE001
+            if limit <= 300:
+                raise
+            log.debug("%s %s: %d Kerzen abgelehnt (%s) - nehme 300", sym, tf, limit, e)
+            return self.ex.candles(sym, tf, 300)
+
     def _analyze(self, sym: str) -> dict:
         tf, ttf = self.cfg["timeframe"], self.cfg["trend_timeframe"]
-        df = self.ex.candles(sym, tf, 300)
-        tdf = self.ex.candles(sym, ttf, 300)
+        df = self._candles(sym, tf)              # jede Runde frisch (Chart, offener Bar)
+        tdf = self._cached_candles(sym, ttf)     # Trend-Zeiteinheit aendert sich nur bei Bar-Schluss
         mtf = {}
         for h in higher_tfs(tf):
             try:
@@ -467,16 +509,21 @@ class Bot:
             if pnl is None:  # Schaetzung ueber letzten Kurs
                 sign = 1 if m["side"] == "long" else -1
                 pnl = sign * (price - m["entry"]) * m["amount"]
-            self.guard.on_close(pnl, now)
-            self.state["history"].append({
-                "symbol": sym, "side": m["side"], "entry": m["entry"], "exit": price,
-                "amount": m["amount"], "sl": m["sl_init"], "tp": m["tp"], "pnl": pnl,
-                "score": m.get("score"), "opened_ms": m["opened_ms"], "tf": m.get("tf"), "closed_ms": int(now.timestamp() * 1000),
-                "strategy": m.get("strategy"), "regime": m.get("regime"), "flow": m.get("flow"),
-                "x": m.get("x"), "ml_prob": m.get("ml_prob"),
-            })
-            self.state["history"] = self.state["history"][-300:]
-            self.notify.send(f"{'GEWINN' if pnl >= 0 else 'VERLUST'} {sym} {m['side']} geschlossen: {pnl:+.2f} USDT")
+            self._add_history(sym, m, price, pnl, now)
+
+    def _add_history(self, sym: str, m: dict, price: float, pnl: float, now: datetime) -> None:
+        """Abgeschlossenen Trade verbuchen (Risiko-Zaehler, Historie, Nachricht)."""
+        self.guard.on_close(pnl, now)
+        self.state["history"].append({
+            "symbol": sym, "side": m["side"], "entry": m["entry"], "exit": price,
+            "amount": m["amount"], "sl": m["sl_init"], "tp": m["tp"], "pnl": pnl,
+            "score": m.get("score"), "opened_ms": m["opened_ms"], "tf": m.get("tf"),
+            "closed_ms": int(now.timestamp() * 1000),
+            "strategy": m.get("strategy"), "regime": m.get("regime"), "flow": m.get("flow"),
+            "x": m.get("x"), "ml_prob": m.get("ml_prob"),
+        })
+        self.state["history"] = self.state["history"][-300:]
+        self.notify.send(f"{'GEWINN' if pnl >= 0 else 'VERLUST'} {sym} {m['side']} geschlossen: {pnl:+.2f} USDT")
 
     def _manage_open(self, positions: dict, views: dict, now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)
@@ -484,22 +531,27 @@ class Bot:
             m = self.state["meta"].get(sym)
             if not m or sym not in views:
                 continue
-            sig_df = views[sym].get("tfs", {}).get(m.get("tf"), views[sym])["sig_df"]
-            price = self.ex.last_price(sym)
-            if self._time_stop(sym, p, m, price, now):
-                continue
-            if self._partial_take_profit(sym, p, m, price):
-                continue
-            atr_now = float(sig_df["atr"].iloc[-1])
-            new_sl = trail_stop(p["side"], m["entry"], m["sl_init"], m["sl"], price, atr_now, self.s, self.fee)
-            if new_sl is None:
-                continue
             try:
-                self.ex.set_stop(sym, p["side"], new_sl, self._exchange_tp(m))
-                log.info("%s Stop nachgezogen: %.6g -> %.6g", sym, m["sl"], new_sl)
-                m["sl"] = new_sl
-            except Exception as e:  # noqa: BLE001
-                log.warning("%s Stop nachziehen fehlgeschlagen: %s", sym, e)
+                self._manage_one(sym, p, m, views, now)
+            except Exception as e:  # noqa: BLE001 - z. B. Position gerade vom Stop geschlossen
+                log.warning("%s Positionsverwaltung: %s", sym, e)
+
+    def _manage_one(self, sym: str, p: dict, m: dict, views: dict, now: datetime) -> None:
+        """Zeit-Stop, Teilverkauf und Trailing-Stop fuer eine offene Position."""
+        sig_df = views[sym].get("tfs", {}).get(m.get("tf"), views[sym])["sig_df"]
+        price = self.ex.last_price(sym)
+        if self._time_stop(sym, p, m, price, now) or self._partial_take_profit(sym, p, m, price):
+            return
+        atr_now = float(sig_df["atr"].iloc[-1])
+        new_sl = trail_stop(p["side"], m["entry"], m["sl_init"], m["sl"], price, atr_now, self.s, self.fee)
+        if new_sl is None:
+            return
+        try:
+            self.ex.set_stop(sym, p["side"], new_sl, self._exchange_tp(m))
+            log.info("%s Stop nachgezogen: %.6g -> %.6g", sym, m["sl"], new_sl)
+            m["sl"] = new_sl
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s Stop nachziehen fehlgeschlagen: %s", sym, e)
 
     def _time_stop(self, sym: str, p: dict, m: dict, price: float, now: datetime) -> bool:
         """Trade kommt nicht vom Fleck -> schliessen (wie im Backtest)."""
@@ -582,7 +634,8 @@ class Bot:
         ok, why = self.guard.can_open(equity, len(positions) + len(self.state["pending"]), now)
         if not ok:
             return why
-        same_dir = sum(1 for p in positions.values() if p["side"] == sig.side)
+        same_dir = sum(1 for p in positions.values() if p["side"] == sig.side) + sum(
+            1 for k, o in self.state["pending"].items() if o["side"] == sig.side and k not in positions)
         if same_dir >= self.r["max_same_direction"]:
             return f"Schon {same_dir} Positionen {sig.side}"
         if is_metal(sym) and not self.cfg["filters"]["metals_trade_weekend"] and now.weekday() >= 5:
@@ -651,11 +704,19 @@ class Bot:
         if amount <= 0:
             return "Konto zu klein fuer Mindestmenge"
 
+        try:
+            return self._place_entry(sym, sig, amount, info, positions, tf)
+        except Exception as e:  # noqa: BLE001 - z. B. zu wenig Guthaben, Boerse lehnt ab
+            log.warning("%s Order abgelehnt: %s", sym, e)
+            return f"Order von der Boerse abgelehnt: {e}"
+
+    def _place_entry(self, sym, sig, amount, info, positions, tf) -> str:
         if self.cfg["fees"].get("entry_order", "market") == "limit":
             order_id = self.ex.place_limit(sym, sig.side, amount, sig.price, sig.sl,
                                            None if self.limit_tp else sig.tp)
             self.state["pending"][sym] = {
                 "order_id": order_id, "side": sig.side, "price": sig.price, "amount": amount,
+                "placed_ms": int(time.time() * 1000),
                 "sl": sig.sl, "tp": sig.tp, "score": sig.score, "info": info,
                 # gueltig bis zum Ende des Bars nach dem Signal-Bar (wie im Backtest)
                 "expires_ms": sig.ts + 2 * TF_MS[tf],
@@ -797,6 +858,7 @@ class Bot:
             "paused": STOP_FILE.exists(),
             "signal_log": self.state.get("signal_log", [])[-40:],
             "sleep_warning": self.status.get("sleep_warning"),
+            "last_error": self.last_error,
             "fear_greed": fng,
             "calendar_ok": self.ctx.cal_ok,
             "next_events": [

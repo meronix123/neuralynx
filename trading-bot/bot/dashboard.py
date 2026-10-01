@@ -131,6 +131,9 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None)
                 self._json(200, bot.status)
             elif self.path.startswith("/api/account"):
                 self._json(200, account.view() if account else {"connected": False, "error": "nicht verfuegbar"})
+            elif self.path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
             elif self.path == "/lightweight-charts.js":
                 self._send(200, CHART_JS.read_bytes(), "application/javascript")
             elif self.path in ("/", "/index.html"):

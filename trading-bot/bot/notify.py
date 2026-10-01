@@ -20,4 +20,5 @@ class Notifier:
                 timeout=10,
             )
         except requests.RequestException as e:
-            log.warning("Telegram fehlgeschlagen: %s", e)
+            # nicht die ganze Meldung loggen - die URL enthaelt den Telegram-Schluessel
+            log.warning("Telegram fehlgeschlagen: %s", type(e).__name__)

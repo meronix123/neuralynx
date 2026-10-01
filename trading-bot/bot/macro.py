@@ -47,7 +47,7 @@ def _dvol(http, days: int) -> pd.Series:
     end = int(time.time() * 1000)
     start = end - days * DAY_MS
     out = {}
-    while True:
+    for _ in range(100):  # Sicherheitsgrenze, falls die API nie "fertig" meldet
         r = http.get(DVOL_URL, params={"currency": "BTC", "start_timestamp": start, "end_timestamp": end,
                                        "resolution": "1D"}, timeout=30).json()["result"]
         for ts, _o, _h, _l, c in r.get("data", []):

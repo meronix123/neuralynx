@@ -1151,3 +1151,166 @@ def test_signal_log_explains_decisions(tmp_path, monkeypatch):
     assert bot.status["signal_log"]
     bot._hb = 0
     bot._heartbeat()                                    # darf nicht abstuerzen
+
+
+class FakeBitgetExchange(FakeClient):
+    """Simulierte Bitget-Boerse fuer den Test- und Echtkonto-Weg (Orders, Stops, Ausfuehrung)."""
+
+    def __init__(self, df):
+        super().__init__(df)
+        self.cash = 35.0
+        self.pos = None          # {"side", "contracts", "entryPrice", "sl", "tp"}
+        self.orders = {}         # id -> order
+        self.hist = []
+        self.n = 0
+        self.log = []
+
+    def milliseconds(self):
+        import time
+        return int(time.time() * 1000)   # echte Uhr wie bei Bitget (Ausfuehrung kurz VOR der Registrierung)
+
+    def _px(self):
+        return float(self.df.iloc[self.i - 1]["close"])
+
+    def _settle(self):
+        px = self._px()
+        for oid, o in list(self.orders.items()):
+            hit = px <= o["price"] if o["side"] == "buy" else px >= o["price"]
+            if hit:
+                del self.orders[oid]
+                self._fill(o["side"], o["amount"], o["price"], o, reduce=o.get("reduceOnly"))
+        if self.pos:
+            p = self.pos
+            long = p["side"] == "long"
+            if p.get("sl") and (px <= p["sl"] if long else px >= p["sl"]):
+                self._close(px)
+            elif p.get("tp") and (px >= p["tp"] if long else px <= p["tp"]):
+                self._close(p["tp"])
+
+    def _fill(self, side, amount, price, params, reduce=False):
+        if reduce or (self.pos and ((side == "sell") == (self.pos["side"] == "long"))):
+            if self.pos:
+                if amount >= self.pos["contracts"] - 1e-12:
+                    self._close(price)
+                else:
+                    self.pos["contracts"] -= amount
+            return
+        self.pos = {"side": "long" if side == "buy" else "short", "contracts": amount, "entryPrice": price,
+                    "sl": (params.get("stopLoss") or {}).get("triggerPrice"),
+                    "tp": (params.get("takeProfit") or {}).get("triggerPrice"), "ts": self.milliseconds()}
+
+    def _close(self, price):
+        p = self.pos
+        sign = 1 if p["side"] == "long" else -1
+        pnl = sign * (price - p["entryPrice"]) * p["contracts"]
+        self.cash += pnl
+        self.hist.append({"symbol": "AAA/USDT:USDT", "realizedPnl": pnl, "timestamp": p["ts"],
+                          "lastUpdateTimestamp": self.milliseconds()})
+        self.pos = None
+        for oid in [k for k, o in self.orders.items() if o.get("reduceOnly")]:
+            del self.orders[oid]
+
+    # --- ccxt-Schnittstelle ---
+    def fetch_balance(self, params=None):
+        return {"USDT": {"total": self.cash, "free": self.cash, "used": 0.0}}
+
+    def fetch_positions(self, symbols=None):
+        self._settle()
+        if not self.pos:
+            return []
+        return [{"symbol": "AAA/USDT:USDT", "side": self.pos["side"], "contracts": self.pos["contracts"],
+                 "entryPrice": self.pos["entryPrice"]}]
+
+    def create_order(self, symbol, type_, side, amount, price=None, params=None):
+        params = params or {}
+        self.n += 1
+        oid = str(self.n)
+        self.log.append((type_, side, amount, price, dict(params)))
+        px = self._px()
+        if type_ == "market":
+            self._fill(side, amount, px, params, reduce=params.get("reduceOnly"))
+            return {"id": oid, "average": px}
+        crosses = px <= price if side == "buy" else px >= price
+        if params.get("postOnly") and crosses:
+            import ccxt
+            raise ccxt.InvalidOrder("bitget post only order would be filled immediately")
+        if crosses:
+            self._fill(side, amount, price, params, reduce=params.get("reduceOnly"))
+        else:
+            self.orders[oid] = {"side": side, "amount": amount, "price": price, **params}
+        return {"id": oid}
+
+    def cancel_order(self, oid, symbol=None, params=None):
+        if oid not in self.orders:
+            raise RuntimeError("order not found")
+        del self.orders[oid]
+
+    def fetch_positions_history(self, symbols=None, since=None, limit=None):
+        return [h for h in self.hist if since is None or h["timestamp"] >= since]
+
+    def set_position_mode(self, *a, **k):
+        pass
+
+    def set_margin_mode(self, *a, **k):
+        pass
+
+    def set_leverage(self, *a, **k):
+        pass
+
+    def handle_product_type_and_params(self, market, params):
+        return "USDT-FUTURES", params
+
+    def price_to_precision(self, sym, v):
+        return str(v)
+
+    def privateMixPostV2MixOrderPlacePosTpsl(self, req):  # noqa: N802 - Name von ccxt
+        if self.pos:
+            if req.get("stopLossTriggerPrice"):
+                self.pos["sl"] = float(req["stopLossTriggerPrice"])
+            if req.get("stopSurplusTriggerPrice"):
+                self.pos["tp"] = float(req["stopSurplusTriggerPrice"])
+
+
+def test_demo_mode_against_fake_bitget(tmp_path, monkeypatch):
+    """Kompletter Test-/Echtkonto-Weg: Limit-Einstieg (Post-Only, sonst normal), Stop auf der Boerse,
+    TP als Limit-Order, Schliessen, Ergebnis aus der Boersen-Historie - ohne einen Fehler im Log."""
+    import logging
+
+    from bot import exchange as exmod
+
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    fake = FakeBitgetExchange(synthetic(2600, 3))
+    monkeypatch.setattr(exmod, "make_client", lambda api=None, demo=False: fake)
+    cfg = copy.deepcopy(CFG)
+    cfg["mode"] = "demo"
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    cfg["fees"].update(entry_order="limit", tp_order="limit")
+    # kurze Trend-EMAs: die Testdaten reichen sonst nicht fuer den 200er-Trend
+    cfg["strategy"].update(strategies=["trend", "range", "breakout"], trend_ema_fast=20, trend_ema_slow=50)
+    ex = exmod.BitgetExchange(cfg)
+    bot = engine.Bot(cfg, ex, FakeContext())
+    problems = []
+
+    class Catch(logging.Handler):
+        def emit(self, r):
+            if r.levelno >= logging.WARNING:
+                problems.append(r.getMessage())
+
+    h = Catch()
+    logging.getLogger("bot").addHandler(h)
+    try:
+        for i in range(400, 2600):
+            fake.i = i
+            bot.step()
+            assert set(bot.state["meta"]) <= {"AAA/USDT:USDT"}
+            if fake.pos and "AAA/USDT:USDT" in bot.state["meta"]:
+                assert fake.pos["sl"] is not None          # jede Position hat einen Stop auf der Boerse
+    finally:
+        logging.getLogger("bot").removeHandler(h)
+    hist = bot.state["history"]
+    assert len(hist) >= 3, (len(fake.log), fake.log[:3], bot.state.get("signal_log", [])[:5])
+    assert any(o[0] == "limit" and o[4].get("postOnly") for o in fake.log)      # Maker-Einstieg versucht
+    assert any(o[0] == "limit" and o[4].get("reduceOnly") for o in fake.log)    # TP als Limit-Order
+    assert sum(t["pnl"] for t in hist) == pytest.approx(fake.cash - 35.0, abs=1e-6) or fake.pos
+    assert not [p for p in problems if "Fehler" in p or "Traceback" in p], problems[:5]
