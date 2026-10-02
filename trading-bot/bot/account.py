@@ -24,7 +24,7 @@ PROFILE_KEYS = {
 }
 PROFILE_NAMES = {"live": "Echtkonto", "demo": "Testkonto"}
 HISTORY_DAYS = 30
-PROT_V = 3          # Version der Stop/Ziel-Auftraege; aeltere werden automatisch neu gesetzt
+PROT_V = 4          # Version der Stop/Ziel-Auftraege; aeltere werden automatisch neu gesetzt
 REFRESH_S = 5
 MIN_NOTIONAL = 5.0   # Bitget: jede Order mind. 5 USDT Positionswert
 
@@ -655,10 +655,26 @@ class Account:
                 tk.update(status="open", exit=None, pnl=None, why=None, closed_ms=None)
                 tks.save()
                 log.info("Einzel-Position #%s wieder geoeffnet (Stop/Ziel liegen noch auf Bitget)", tk["id"])
+        # Uebrig gebliebene Auftraege geschlossener Einzel-Positionen sofort stornieren
+        for tk in tks.items:
+            if tk["status"] != "closed":
+                continue
+            for k in ("sl", "tp"):
+                oid = tk.get(f"{k}_id")
+                if oid and oid in open_ids:
+                    try:
+                        cancel_plan(c, tk["symbol"], oid)
+                        open_ids = open_ids - {oid}
+                        log.info("Einzel-Position #%s: uebrig gebliebenen %s %s storniert", tk["id"], k.upper(), oid)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("Einzel-Position #%s: %s %s stornieren: %s", tk["id"], k.upper(), oid, e)
         # Stops/Ziele aelterer Versionen einmal neu setzen (alte Bitget-TP/SL-Art wirkte teils auf die ganze
         # Position; Auftraege ohne passenden Margin-Modus kauften bei isolierter Position NACH statt zu schliessen)
         for tk in tks.open():
-            wrong = tk.get("tp_id") in triggers or tk.get("sl_id") in old_style    # falsche Auftragsart
+            # Stop/Ziel muessen Bitget-TP/SL-Auftraege sein (an die Position gebunden) - Ausloese-/Limit-Orders
+            # aelterer Versionen konnten bei Bitget NACHKAUFEN statt zu schliessen
+            others = open_ids - old_style
+            wrong = any(tk.get(f"{k}_id") in others for k in ("sl", "tp"))
             if (tk.get("prot_v") == PROT_V and not wrong) or size.get((tk["symbol"], tk["side"]), 0) <= 0:
                 continue
             for kind, plan in (("sl", "loss_plan"), ("tp", "profit_plan")):

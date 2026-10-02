@@ -904,6 +904,23 @@ class FakeBitget:
         self.calls.append(("plan", kind, params["triggerPrice"], amount))
         return {"id": oid}
 
+    def privateMixPostV2MixOrderPlaceTpslOrder(self, req):  # noqa: N802 - Bitget-Teil-TP/SL
+        assert "executePrice" not in req                       # executePrice 0 -> Bitget-Fehler 43011
+        self.plans = getattr(self, "plans", {})
+        self.n_plans = getattr(self, "n_plans", 0) + 1
+        oid = f"p{self.n_plans}"
+        sym = req["symbol"][:-4] + "/USDT:USDT"
+        self.plans[oid] = {**req, "sym": sym, "kind": "tpsl", "side": req["holdSide"]}
+        self.calls.append(("plan", req["planType"], req["triggerPrice"], req["size"]))
+        return {"data": {"orderId": oid}}
+
+    def privateMixPostV2MixOrderCancelPlanOrder(self, req):  # noqa: N802
+        oid = req["orderIdList"][0]["orderId"]
+        if oid not in getattr(self, "plans", {}):
+            raise RuntimeError('bitget {"code":"43025","msg":"Plan order does not exist"}')
+        self.plans.pop(oid)
+        self.calls.append(("cancel_plan", oid))
+
     def _plan_cancel(self, oid, params):
         if not (params or {}).get("trigger") or oid not in getattr(self, "plans", {}):
             return False
@@ -913,22 +930,21 @@ class FakeBitget:
 
     def _plan_list(self, sym, params):
         p = params or {}
-        if p.get("planType"):
+        if p.get("planType") not in (None, "profit_loss"):
             return None
-        want = "plan" if p.get("trigger") else "normal"
+        want = "tpsl" if p.get("planType") else "plan" if p.get("trigger") else "normal"
         return [{"id": k, "symbol": v["sym"], "type": "market", "side": v["side"], "triggerPrice": float(v["triggerPrice"]),
                  "amount": float(v["size"]), "reduceOnly": True}
                 for k, v in getattr(self, "plans", {}).items()
                 if v["kind"] == want and (sym is None or v["sym"] == sym)]
 
     def fetch_open_orders(self, sym, since=None, limit=None, params=None):
-        lst = self._plan_list(sym, params)
-        if lst is not None:
-            return lst
-        if (params or {}).get("planType") == "profit_loss" and sym in (None, "BTC/USDT:USDT"):
-            return [{"id": "77", "symbol": "BTC/USDT:USDT", "type": "market", "side": "sell", "triggerPrice": 59000,
-                     "amount": 0.004, "filled": 0, "reduceOnly": True, "timestamp": 1_790_000_000_000}]
-        return []
+        lst = self._plan_list(sym, params) or []
+        if (params or {}).get("planType") == "profit_loss" and sym in (None, "BTC/USDT:USDT") \
+                and "77" not in getattr(self, "gone", ()):
+            lst = lst + [{"id": "77", "symbol": "BTC/USDT:USDT", "type": "market", "side": "sell", "triggerPrice": 59000,
+                          "amount": 0.004, "filled": 0, "reduceOnly": True, "timestamp": 1_790_000_000_000}]
+        return lst
 
     def fetch_positions_history(self, symbols=None, since=None, limit=None):
         return [{"symbol": "ETH/USDT:USDT", "side": "short", "entryPrice": 3000, "contracts": 0.1,
@@ -1564,7 +1580,7 @@ def test_hedge_mode_account_orders(tmp_path, monkeypatch):
     acc.quick_order("BTC/USDT:USDT", "short", 5.75, 10, 10, 20)   # Gegenrichtung zur offenen Long-Position erlaubt
     order = [x for x in c.calls if x[0] == "create_order"][-1]
     assert order[3] == "sell" and order[6]["hedged"] is True
-    assert {p["side"] for p in c.plans.values()} == {"buy"} and all(p["reduceOnly"] for p in c.plans.values())
+    assert {p["holdSide"] for p in c.plans.values()} == {"short"}          # Bitget-TP/SL im Hedge-Modus
 
 
 def test_limit_quick_order_breakeven_and_close_all(tmp_path, monkeypatch):
@@ -1712,22 +1728,6 @@ def test_position_mode_auto_retry_on_40774():
     assert c.sent[-1] == ("order", False) and not is_hedged(c)
     c.close_position("ETH/USDT:USDT", "long")                 # One-Way: Schliessen ohne holdSide (kein 40017)
     assert c.sent[-1] == ("close", None)
-    # Bitget lehnt die TP/SL-Schreibweise ab (43011) -> andere Variante, danach direkt die funktionierende
-    tries = []
-
-    def picky(req):
-        tries.append(req["holdSide"])
-        if req["holdSide"] != "long":
-            raise RuntimeError('bitget {"code":"43011","msg":"The parameter does not meet the specification d delegateType is error"}')
-        return {"data": {"orderId": "9"}}
-    c2 = Raw()
-    c2.mode_hedge, c2.privateMixPostV2MixOrderPlaceTpslOrder = False, picky
-    mode_safe(c2)
-    c2._bot_hedged = False
-    assert c2.privateMixPostV2MixOrderPlaceTpslOrder({"holdSide": "long", "executePrice": "0"})["data"]["orderId"] == "9"
-    assert tries == ["buy", "long"]
-    c2.privateMixPostV2MixOrderPlaceTpslOrder({"holdSide": "long", "executePrice": "0"})
-    assert tries[-1] == "long" and len(tries) == 3
     c._bot_hedged = True                                      # falsch erkannt -> 40017 -> ohne holdSide wiederholt
     c.close_position("ETH/USDT:USDT", "long")
     assert c.sent[-2:] == [("close", "long"), ("close", None)]
@@ -1777,9 +1777,9 @@ def test_position_margin_from_bitget_margin_size():
     assert row["margin"] == 5.0 and row["pnl_pct"] == pytest.approx(20.0)
 
 
-def test_old_ticket_stops_are_migrated_to_reduce_only_triggers(tmp_path, monkeypatch):
-    """Alte Bitget-TP/SL-Auftraege (wirkten teils auf die ganze Position) werden gegen nur-reduzierende
-    Ausloese-Auftraege mit genau der Ticket-Menge getauscht."""
+def test_ticket_stops_are_bitget_tpsl_and_leftovers_are_cancelled(tmp_path, monkeypatch):
+    """Stop/Ziel = Bitget-Teil-TP/SL (an die Position gebunden, kann nie nachkaufen). Ausloese-/Limit-Orders
+    aelterer Versionen werden ersetzt, uebrig gebliebene Auftraege geschlossener Tickets storniert."""
     from bot.account import PROFILE_KEYS, Account
 
     for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
@@ -1791,26 +1791,26 @@ def test_old_ticket_stops_are_migrated_to_reduce_only_triggers(tmp_path, monkeyp
                   env_path=tmp_path / ".env")
     acc.connect("k", "s", "p")
     c = box["c"]
+    c.gone = {"77"}
+    # alte Version: Stop als Ausloese-Auftrag (konnte nachkaufen)
+    old = c.create_order("BTC/USDT:USDT", "market", "sell", 0.001, None,
+                         {"triggerPrice": 59000.0, "reduceOnly": True, "triggerType": "mark_price"})["id"]
     acc.tickets().add(symbol="BTC/USDT:USDT", side="long", amount=0.001, entry=60000.0, leverage=10,
-                      sl=59000.0, tp=63000.0, sl_id="77", tp_id="", opened_ms=0)
+                      sl=59000.0, tp=63000.0, sl_id=old, tp_id="", opened_ms=0, prot_v=3)
+    # geschlossenes Ticket, dessen Stop noch liegt
+    left = c.create_order("BTC/USDT:USDT", "market", "sell", 0.001, None,
+                          {"triggerPrice": 58000.0, "reduceOnly": True, "triggerType": "mark_price"})["id"]
+    acc.tickets().add(symbol="BTC/USDT:USDT", side="long", amount=0.001, entry=60000.0, leverage=10,
+                      sl=58000.0, tp=64000.0, sl_id=left, tp_id="", status="closed", why="Ziel erreicht")
     acc.refresh(force=True)
     tk = acc.tickets().open()[0]
-    assert tk["sl_id"] != "77" and tk["sl_id"] in c.plans
-    p = c.plans[tk["sl_id"]]
-    assert p["side"] == "sell" and p["size"] == 0.001 and p["reduceOnly"] and float(p["triggerPrice"]) == 59000.0
-    assert ("cancel_order", "77", "BTC/USDT:USDT", {"trigger": True, "planType": "normal_plan"}) in c.calls
-    assert p["kind"] == "plan"                                        # Stop = Ausloese-Auftrag
-    # Margin-Modus der echten Position (isoliert) - sonst kauft Bitget nach statt zu schliessen
-    assert all(x["marginMode"] == "isolated" for x in c.plans.values())
-    # Ziel, das noch als Ausloese-Auftrag liegt (feuerte bei Bitget sofort) -> wird zur Limit-Order
-    c.plans["t9"] = {"symbol": "BTCUSDT", "sym": "BTC/USDT:USDT", "planType": "profit_plan", "side": "sell",
-                     "kind": "plan", "triggerPrice": 63000.0, "size": 0.001, "reduceOnly": True}
-    tk["tp_id"] = "t9"
-    acc.tickets().save()
-    acc.refresh(force=True)
-    tk = acc.tickets().open()[0]
-    assert tk["tp_id"] != "t9" and "t9" not in c.plans and c.plans[tk["tp_id"]]["kind"] == "normal"
-    assert c.plans[tk["tp_id"]]["side"] == "sell" and float(c.plans[tk["tp_id"]]["triggerPrice"]) == 63000.0
+    assert old not in c.plans and left not in c.plans                  # alter Stop ersetzt, Rest storniert
+    sl, tp = c.plans[tk["sl_id"]], c.plans[tk["tp_id"]]
+    assert sl["kind"] == tp["kind"] == "tpsl" and sl["planType"] == "loss_plan" and tp["planType"] == "profit_plan"
+    assert sl["holdSide"] == "buy" and sl["size"] == "0.001" and float(sl["triggerPrice"]) == 59000.0  # One-Way Long
+    assert tk["prot_v"] == 4
+    acc.refresh(force=True)                                            # nichts doppelt
+    assert len(c.plans) == 2
 
 
 def test_quick_order_refused_where_bot_trades(tmp_path):

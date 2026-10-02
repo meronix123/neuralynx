@@ -76,39 +76,17 @@ def mode_safe(client) -> None:
 
     def with_hold(raw, name):
         def call(req, *a, **k):
+            # Nur die Schreibweise an den Positionsmodus anpassen (One-Way buy/sell, Hedge long/short).
+            # Keine "anderen Varianten" probieren - eine falsche Variante kann Bitget anders auslegen.
             pos_side = {"buy": "long", "sell": "short"}.get(req.get("holdSide"), req.get("holdSide"))
-            alt = {"long": "buy", "short": "sell"}.get(pos_side)
-            flipped = False
-            while True:
-                h = pos_side if is_hedged(client) else alt
-                # Varianten: (holdSide, executePrice mitsenden?) - die zuletzt erfolgreiche zuerst
-                variants = [(h, True), (alt if h == pos_side else pos_side, True), (h, False),
-                            (alt if h == pos_side else pos_side, False)]
-                memo = client.__dict__.setdefault("_bot_tpsl_variant", {})
-                good = memo.get(name)
-                if good is not None:
-                    want = (pos_side if good[0] == "pos" else alt, good[1])
-                    variants = [want] + [v for v in variants if v != want]
-                last = None
-                for hs, with_exec in variants:
-                    r = {**req, "holdSide": hs}
-                    if not with_exec:
-                        r.pop("executePrice", None)
-                    try:
-                        out = raw(r, *a, **k)
-                        memo[name] = ("pos" if hs == pos_side else "alt", with_exec)
-                        return out
-                    except Exception as e:  # noqa: BLE001
-                        last = e
-                        if MODE_ERR in str(e) and not flipped:
-                            break
-                        if not _hold_err(e):
-                            raise
-                        log.info("Bitget lehnt TP/SL-Variante ab (%s, executePrice=%s): %s", hs, with_exec, e)
-                else:
-                    raise last
-                _flip_mode(client)
-                flipped = True
+            for attempt in (0, 1):
+                h = pos_side if is_hedged(client) else {"long": "buy", "short": "sell"}.get(pos_side)
+                try:
+                    return raw({**req, "holdSide": h}, *a, **k)
+                except Exception as e:  # noqa: BLE001
+                    if MODE_ERR not in str(e) or attempt:
+                        raise
+                    _flip_mode(client)
         return call
 
     client.create_order, client.close_position = create_order, close_position
@@ -153,19 +131,21 @@ def is_hedged(client) -> bool:
     cached = getattr(client, "_bot_hedged", None)
     if cached is not None:
         return cached
-    hedged = False
+    hedged, known = False, False
     try:
         client.load_markets()
         product_type, _ = client.handle_product_type_and_params(client.market("BTC/USDT:USDT"), {})
         r = client.privateMixGetV2MixAccountAccounts({"productType": product_type})
         hedged = any(a.get("posMode") == "hedge_mode" for a in (r.get("data") or []))
+        known = True
     except Exception as e:  # noqa: BLE001 - im Zweifel One-Way (Standard des Bots)
-        log.debug("Positionsmodus: %s", e)
+        log.warning("Positionsmodus nicht abfragbar (%s) - nehme One-Way an", e)
     try:
         client._bot_hedged = hedged
     except AttributeError:
         pass
-    log.info("Bitget Positionsmodus: %s", "Hedge (Long/Short getrennt)" if hedged else "One-Way")
+    log.info("Bitget Positionsmodus: %s%s", "Hedge (Long/Short getrennt)" if hedged else "One-Way",
+             "" if known else " (angenommen)")
     return hedged
 
 
@@ -198,43 +178,44 @@ def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, s
                     margin_mode: str = "isolated") -> str:
     """Take-Profit (plan='profit_plan') oder Stop-Loss ('loss_plan') fuer GENAU `size` der Position.
 
-    Ziel: nur-reduzierende LIMIT-Order zum Zielpreis (liegt im Orderbuch, eindeutig, Maker-Gebuehr).
-    Stop: nur-reduzierender Ausloese-Auftrag (Plan-Order, Markt bei Ausloesung) - liegt immer auf der
-    Verlustseite, die Ausloese-Richtung ist damit eindeutig. Beide schliessen hoechstens `size`."""
-    close_side = "sell" if side == "long" else "buy"
-    # marginMode MUSS zur Position passen: ohne Angabe nimmt ccxt "cross" - bei einer isolierten
-    # Position ist das fuer Bitget eine ANDERE Position, der Auftrag wuerde nachkaufen statt schliessen.
-    mm = {"reduceOnly": True, "marginMode": margin_mode or "isolated"}
-    qty = float(client.amount_to_precision(symbol, size))
-    px = float(client.price_to_precision(symbol, trigger))
+    Bitgets eigener Teil-TP/SL (place-tpsl-order mit size): an die Position gebunden, kann nie eine
+    neue Position eroeffnen, verschwindet mit der Position und steht in der App als TP/SL.
+    Ausfuehrung zum Marktpreis = KEIN executePrice senden (executePrice 0 -> Bitget-Fehler 43011)."""
+    market = client.market(symbol)
+    product_type, _ = client.handle_product_type_and_params(market, {})
+    req = {"symbol": market["id"], "productType": product_type, "marginCoin": "USDT", "planType": plan,
+           "triggerPrice": client.price_to_precision(symbol, trigger),
+           "triggerType": "mark_price" if plan == "loss_plan" else "fill_price",
+           "size": client.amount_to_precision(symbol, size), "holdSide": hold_side(client, side)}
     try:
-        if plan == "profit_plan":
-            o = client.create_order(symbol, "limit", close_side, qty, px, dict(mm))
-        else:
-            o = client.create_order(symbol, "market", close_side, qty, None,
-                                    {**mm, "triggerPrice": px, "triggerType": "mark_price"})
-        return str(o.get("id") or "")
+        r = client.privateMixPostV2MixOrderPlaceTpslOrder(req)
+        oid = str((r.get("data") or {}).get("orderId") or "")
+        if not oid:
+            raise RuntimeError(f"keine Auftragsnummer von Bitget: {r}")
+        return oid
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {e}") from e
 
 
 def cancel_plan(client, symbol: str, order_id: str) -> None:
-    """Stop/Ziel stornieren - egal ob Ausloese-Auftrag, Limit-Order oder alter Bitget-TP/SL-Auftrag."""
+    """Stop/Ziel stornieren: Bitget-TP/SL-Auftrag, sonst Ausloese-Auftrag oder Limit-Order (aeltere Versionen)."""
+    market = client.market(symbol)
+    product_type, _ = client.handle_product_type_and_params(market, {})
     errs = []
+    try:
+        client.privateMixPostV2MixOrderCancelPlanOrder({
+            "symbol": market["id"], "productType": product_type, "marginCoin": "USDT",
+            "orderIdList": [{"orderId": order_id}], "planType": "profit_loss"})
+        return
+    except Exception as e:  # noqa: BLE001
+        errs.append(str(e))
     for params in ({"trigger": True, "planType": "normal_plan"}, {}):
         try:
             client.cancel_order(order_id, symbol, params)
             return
         except Exception as e:  # noqa: BLE001
             errs.append(str(e))
-    market = client.market(symbol)
-    product_type, _ = client.handle_product_type_and_params(market, {})
-    try:
-        client.privateMixPostV2MixOrderCancelPlanOrder({
-            "symbol": market["id"], "productType": product_type, "marginCoin": "USDT",
-            "orderIdList": [{"orderId": order_id}], "planType": "profit_loss"})
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Storno {order_id}: {' / '.join(errs)} / {e}") from e
+    raise RuntimeError(f"Storno {order_id}: {' / '.join(errs)}")
 
 
 class BitgetExchange:
