@@ -11,6 +11,13 @@
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; }
   header { display:flex; flex-wrap:wrap; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); align-items:center; }
+  .ovgrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:8px; width:100%; }
+  .ov { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+  .ovt { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; }
+  .ovr { display:flex; justify-content:space-between; gap:8px; font-size:13px; line-height:1.7; }
+  .ovr span { color:var(--dim); } .ovr b { font-weight:700; text-align:right; } .ovr small { color:var(--dim); font-weight:400; }
+  .ovbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; width:100%; margin-top:6px; }
+  .ovbar small.sub { margin-right:auto; }
   .kpi { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
   .kpi b { display:block; font-size:16px; }
   .kpi span { color:var(--dim); font-size:12px; }
@@ -878,19 +885,35 @@ function renderAcc() {
     document.getElementById("acc-err").textContent = a.error || "";
     return;
   }
-  const b = a.balance || {};
+  const b = a.balance || {}, st = a.stats || {}, d1 = st.d1 || {}, d7 = st.d7 || {}, d30 = st.d30 || {};
+  const pc = v => v == null ? "" : ` <small class="${v >= 0 ? "up" : "down"}">(${v >= 0 ? "+" : ""}${fmt(v)} %)</small>`;
+  const q = v => v == null ? "-" : Math.round(v * 100) + " %";
+  const card = (title, rows) => `<div class="ov"><div class="ovt">${title}</div>${rows.map(([k, v]) =>
+    `<div class="ovr"><span>${k}</span><b>${v}</b></div>`).join("")}</div>`;
   document.getElementById("acc-head").innerHTML = `
-    <span class="badge ${a.demo ? "demo" : "live"}">${a.demo ? "DEMO-KONTO" : "ECHTES KONTO"}</span>
-    <div class="kpi"><span>Gesamt (USDT)</span><b>${fmt(b.total)}</b></div>
-    <div class="kpi"><span>Verfuegbar</span><b>${fmt(b.free)}</b></div>
-    <div class="kpi"><span>In Positionen / Orders</span><b>${fmt(b.used)}</b></div>
-    <div class="kpi"><span>Unrealisiert</span><b>${usd(a.unrealized)}</b></div>
-    <div class="kpi"><span>Bot handelt im Modus</span><b>${(a.bot_mode || "-").toUpperCase()}</b></div>
-    <div class="kpi"><span>Stand</span><b>${a.updated_ms ? time(a.updated_ms) : "-"}</b></div>
-    <button class="btn" onclick="act('/api/account/refresh')">Aktualisieren</button>
-    <button class="btn red" onclick="act('/api/account/close_all', {}, '${a.demo ? "TESTKONTO" : "ECHTES KONTO"}: ALLE offenen Positionen jetzt zum Marktpreis schliessen?')">Alle Positionen schliessen</button>
-    <button class="btn" onclick="act('/api/account/disconnect', {forget:false})">Trennen</button>
-    <button class="btn red" onclick="act('/api/account/disconnect', {forget:true}, 'Schluessel aus der .env loeschen?')">Schluessel loeschen</button>
+    <div class="ovgrid">
+      ${card(`<span class="badge ${a.demo ? "demo" : "live"}">${a.demo ? "DEMO" : "ECHT"}</span> Konto`, [
+        ["Gesamt", `${fmt(b.total)} USDT`], ["Verfuegbar", `${fmt(b.free)} USDT`],
+        ["Gebunden", `${fmt(st.margin ?? b.used)} USDT${st.margin_pct != null ? ` <small>(${fmt(st.margin_pct)} %)</small>` : ""}`]])}
+      ${card("Offen jetzt", [
+        ["Positionen", `${st.open_positions ?? 0} <small>(${st.longs ?? 0} Long / ${st.shorts ?? 0} Short)</small>`],
+        ["Positionswert", `${fmt(st.exposure ?? 0)} USDT`],
+        ["Nicht realisiert", `${usd(st.unrealized ?? a.unrealized)} USDT${pc(st.unrealized_pct)}`]])}
+      ${card("Ergebnis (realisiert)", [
+        ["24 Stunden", `${usd(d1.pnl)} USDT <small>${d1.trades ?? 0} Trades</small>`],
+        ["7 Tage", `${usd(d7.pnl)} USDT <small>${d7.trades ?? 0} Trades</small>`],
+        ["30 Tage", `${usd(d30.pnl)} USDT <small>${d30.trades ?? 0} Trades</small>`]])}
+      ${card("30 Tage im Detail", [
+        ["Gewinner", `${d30.wins ?? 0} von ${d30.trades ?? 0} <small>(${q(d30.hit)})</small>`],
+        ["Profit-Faktor", d30.pf == null ? "-" : fmt(d30.pf)],
+        ["Bester / schlechtester", `${usd(d30.best)} / ${usd(d30.worst)}`],
+        ["Gebuehren", `${fmt(d30.fees ?? 0)} USDT`]])}
+    </div>
+    <div class="ovbar"><small class="sub">Stand ${a.updated_ms ? time(a.updated_ms) : "-"} &middot; Bot: ${(a.bot_mode || "-").toUpperCase()}</small>
+    <button class="btn sm" onclick="act('/api/account/refresh')">Aktualisieren</button>
+    <button class="btn sm red" onclick="act('/api/account/close_all', {}, '${a.demo ? "TESTKONTO" : "ECHTES KONTO"}: ALLE offenen Positionen jetzt zum Marktpreis schliessen?')">Alle Positionen schliessen</button>
+    <button class="btn sm" onclick="act('/api/account/disconnect', {forget:false})">Trennen</button>
+    <button class="btn sm red" onclick="act('/api/account/disconnect', {forget:true}, 'Schluessel aus der .env loeschen?')">Schluessel loeschen</button></div>
     ${a.error ? `<div class="down" style="flex-basis:100%">${a.error}</div>` : ""}`;
   const pos = a.positions || [];
   paint("acc-pos", `<tr><th>Markt</th><th>Richtung</th><th>Hebel</th><th>Menge</th><th>Wert</th><th>Einstieg</th><th>Mark-Preis</th><th>Liquidation</th><th>Margin</th><th>Unrealisiert</th><th>%</th><th>Stop-Loss</th><th>Take-Profit</th><th>seit</th><th></th></tr>` +

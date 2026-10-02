@@ -1920,3 +1920,37 @@ def test_diagnose_compares_each_filter():
         assert res.iloc[1]["test_trades"] > res.iloc[0]["test_trades"]   # Filter aus -> mehr Trades
     finally:
         optimize.DIAG_VARIANTS = saved
+
+
+def test_account_stats_and_history_paging(tmp_path, monkeypatch):
+    import time as _t
+    from bot.account import PROFILE_KEYS, Account, account_stats
+
+    now = 1_790_000_000_000
+    hist = [{"closed_ms": now - 3_600_000, "pnl": 2.0, "fees": -0.1},
+            {"closed_ms": now - 3 * 86_400_000, "pnl": -1.0, "fees": -0.1},
+            {"closed_ms": now - 20 * 86_400_000, "pnl": 0.5, "fees": -0.05}]
+    pos = [{"side": "long", "margin": 5.0, "pnl": 0.5, "value": 50.0}, {"side": "short", "margin": 5.0, "pnl": -0.2, "value": 49.0}]
+    st = account_stats({"total": 40.0}, pos, [{"kind": "normal"}, {"kind": "tpsl"}], hist, now)
+    assert st["open_positions"] == 2 and st["longs"] == 1 and st["margin"] == 10.0 and st["margin_pct"] == 25.0
+    assert st["unrealized"] == pytest.approx(0.3) and st["unrealized_pct"] == pytest.approx(3.0) and st["open_orders"] == 1
+    assert st["d1"]["trades"] == 1 and st["d1"]["pnl"] == 2.0
+    assert st["d7"]["trades"] == 2 and st["d7"]["pnl"] == 1.0 and st["d7"]["pf"] == 2.0
+    assert st["d30"]["trades"] == 3 and st["d30"]["wins"] == 2 and st["d30"]["fees"] == pytest.approx(0.25)
+
+    for n in (*PROFILE_KEYS["live"], *PROFILE_KEYS["demo"], "BITGET_DEMO"):
+        monkeypatch.delenv(n, raising=False)
+
+    class FP(FakeBitget):
+        def fetch_positions_history(self, symbols=None, since=None, limit=None, params=None):
+            until = (params or {}).get("until") or int(_t.time() * 1000)
+            rows = [{"symbol": "BTC/USDT:USDT", "realizedPnl": 1.0, "lastUpdateTimestamp": until - i * 600_000,
+                     "info": {"positionId": str(until - i * 600_000)}} for i in range(100)]
+            return [r for r in rows if r["lastUpdateTimestamp"] >= since][:limit]
+
+    cfg = copy.deepcopy(CFG)
+    cfg["api"] = {"key": "", "secret": "", "password": ""}
+    acc = Account(cfg, ["BTC/USDT:USDT"], factory=lambda api, demo=False: FP(api, demo), env_path=tmp_path / ".env")
+    acc.connect("k", "s", "p")
+    v = acc.view()
+    assert len(v["history"]) > 100 and v["stats"]["d1"]["trades"] > 100       # mehr als eine Seite

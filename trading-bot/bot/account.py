@@ -193,6 +193,7 @@ class Account:
                 "history": self._history_cached(c),
                 "updated_ms": int(time.time() * 1000),
             }
+            data["stats"] = account_stats(data["balance"], positions, data["orders"], data["history"])
             try:
                 with self.trade_lock:
                     self._sync_tickets(positions, data["orders"])
@@ -276,11 +277,24 @@ class Account:
 
     def _history(self, c) -> list[dict]:
         since = int(time.time() * 1000) - HISTORY_DAYS * 86_400_000
-        try:
-            rows = c.fetch_positions_history(None, since, 100)
-        except Exception as e:  # noqa: BLE001
-            log.debug("Positions-Historie: %s", e)
-            return []
+        rows, seen, until = [], set(), None
+        for _ in range(10):                  # Bitget liefert hoechstens 100 je Abruf -> weiter zurueck blaettern
+            try:
+                page = (c.fetch_positions_history(None, since, 100, {"until": until}) if until
+                        else c.fetch_positions_history(None, since, 100))
+            except Exception as e:  # noqa: BLE001
+                log.debug("Positions-Historie: %s", e)
+                break
+            new = [h for h in page if (h.get("info") or {}).get("positionId", id(h)) not in seen]
+            for h in new:
+                seen.add((h.get("info") or {}).get("positionId", id(h)))
+            rows += new
+            if len(page) < 100 or not new:
+                break
+            oldest = min((h.get("lastUpdateTimestamp") or h.get("timestamp") or 0) for h in page)
+            if not oldest or oldest <= since:
+                break
+            until = oldest - 1
         out = []
         for h in rows:
             info = h.get("info") or {}
@@ -800,6 +814,37 @@ class Account:
                            "buy" if side == "long" else "sell", qty, price if order_type == "limit" else None, params)
         self.after_action()
         return f"Order {o.get('id')} {side} {qty:g} {symbol} gesendet"
+
+
+def account_stats(balance: dict, positions: list[dict], orders: list[dict], history: list[dict],
+                  now_ms: int | None = None) -> dict:
+    """Kennzahlen fuer die Konto-Uebersicht: offen, gebunden, Ergebnis 24 h / 7 / 30 Tage."""
+    now_ms = now_ms or int(time.time() * 1000)
+
+    def period(days):
+        rows = [h for h in history if (h.get("closed_ms") or 0) >= now_ms - days * 86_400_000]
+        pnl = [h.get("pnl") or 0.0 for h in rows]
+        wins = [x for x in pnl if x > 0]
+        loss = -sum(x for x in pnl if x < 0)
+        return {"trades": len(rows), "pnl": round(sum(pnl), 4), "wins": len(wins),
+                "hit": round(len(wins) / len(rows), 3) if rows else None,
+                "pf": round(sum(wins) / loss, 2) if loss > 0 else (None if not wins else 99.0),
+                "fees": round(sum(abs(h.get("fees") or 0) for h in rows), 4),
+                "best": round(max(pnl), 4) if pnl else None, "worst": round(min(pnl), 4) if pnl else None}
+
+    margin = sum(p.get("margin") or 0 for p in positions)
+    unreal = sum(p.get("pnl") or 0 for p in positions)
+    total = balance.get("total") or 0
+    return {
+        "open_positions": len(positions),
+        "longs": sum(1 for p in positions if p.get("side") == "long"),
+        "shorts": sum(1 for p in positions if p.get("side") == "short"),
+        "margin": round(margin, 4), "margin_pct": round(margin / total * 100, 1) if total else None,
+        "exposure": round(sum(abs(p.get("value") or 0) for p in positions), 2),
+        "unrealized": round(unreal, 4), "unrealized_pct": round(unreal / margin * 100, 2) if margin else None,
+        "open_orders": sum(1 for o in orders if o.get("kind") == "normal"),
+        "d1": period(1), "d7": period(7), "d30": period(30),
+    }
 
 
 class Tickets:
