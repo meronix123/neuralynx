@@ -238,7 +238,14 @@ def main() -> None:
         account = Account(cfg, ex.symbols, async_refresh=True)   # echtes Bitget-Konto (Schluessel in der Oberflaeche)
         refresher(account)
         pw_hash = os.getenv("DASHBOARD_PASSWORD_HASH") if os.getenv("DASHBOARD_REMOTE") == "1" else None
-        start_dashboard(bot, cfg["dashboard"]["port"], account, remote_pw_hash=pw_hash or None)
+        try:
+            start_dashboard(bot, cfg["dashboard"]["port"], account, remote_pw_hash=pw_hash or None)
+        except OSError as e:
+            if getattr(e, "errno", None) in (98, 48, 10048):     # Port belegt (Linux / Mac / Windows)
+                sys.exit(f"\nDer Bot laeuft schon (Port {cfg['dashboard']['port']} ist belegt) - zwei Bots wuerden doppelt "
+                         "handeln.\nAlten Bot beenden:  pkill -f \"run.py bot\"   (oder im anderen Fenster Strg+C)\n"
+                         "Danach neu starten.")
+            raise
         print(f"Oberflaeche im Browser oeffnen: http://localhost:{cfg['dashboard']['port']}")
         if pw_hash:
             ip = _tailscale_ip()
