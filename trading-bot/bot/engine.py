@@ -886,6 +886,18 @@ class Bot:
 
     CHART_TFS = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
 
+    def forecast(self, sym: str) -> dict:
+        """KI-Prognose der naechsten 30 Minuten fuer einen Markt (siehe forecast.py)."""
+        from .forecast import Forecaster
+        known = sym in self.ex.symbols or (sym in (getattr(self.ex.c, "markets", None) or {})
+                                           and self.ex.c.markets[sym].get("swap"))
+        if not known:
+            raise ValueError("Markt unbekannt")
+        if getattr(self, "_forecaster", None) is None:
+            self._forecaster = Forecaster(self._candles, ROOT / "data" / f"forecast_{self.cfg['mode']}.json")
+        with self.__dict__.setdefault("_fc_lock", __import__("threading").Lock()):
+            return self._forecaster.get(sym)
+
     def chart_data(self, sym: str, tf: str, bars: int = 300) -> dict:
         """Chart fuer die Oberflaeche in beliebiger Zeiteinheit: Kerzen, EMAs, VWAP, Order Blocks."""
         from .indicators import atr, ema, vwap_daily

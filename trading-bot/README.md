@@ -107,6 +107,20 @@ Achtung: Diese Knoepfe wirken auf das ECHTE Konto (bzw. Demokonto bei "Demo-Schl
 auch wenn der Bot selbst im Paper-Modus laeuft. Die Oberflaeche ist nur auf diesem PC
 erreichbar. API-Schluessel immer OHNE Auszahlungsrecht anlegen.
 
+## KI-Prognose (30 Minuten)
+
+In beiden Charts zeigt eine tuerkise, gestrichelte Linie, wohin der Kurs in den naechsten
+30 Minuten laufen koennte, dazu gepunktet ein 80-%-Band (dort sollte der Kurs in 8 von 10 Faellen
+landen). Gelernt wird je Markt aus den letzten ~1000 5-Minuten-Kerzen (Renditen, RSI, EMAs, Bollinger,
+MACD, Volumen, Volatilitaet, Tageszeit), alle 5 Minuten neu.
+
+Ehrlich: Kurzfristige Kurse sind zum grossen Teil Zufall. Das Modell wird deshalb nur mit den
+aelteren 80 % der Daten gelernt und an den neuesten 20 % geprueft. Ist es dort nicht besser als
+"Kurs bleibt gleich", ist die Linie **grau** und es steht "keine echte Vorhersagekraft" dabei.
+Unter dem Chart steht ausserdem die **Live-Trefferquote**: Jede Prognose wird nach 30 Minuten mit
+dem echten Kurs verglichen. Erst wenn die ueber viele Prognosen deutlich ueber 50 % liegt, hat
+die Prognose einen Wert. Der Bot handelt NICHT nach dieser Prognose. Abschalten: Haken "KI-Prognose" im Chart.
+
 ## Vom Handy aus ansehen (Fernzugriff)
 
 1. Auf dem PC: `python run.py fernzugriff` - Passwort festlegen (mind. 10 Zeichen, wird nur als Hash gespeichert).

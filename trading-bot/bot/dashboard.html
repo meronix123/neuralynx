@@ -99,6 +99,8 @@
   #toast { position:fixed; right:16px; bottom:16px; max-width:420px; padding:10px 14px; border-radius:8px; background:#1d2230; border:1px solid var(--line); display:none; z-index:9; }
   .note { color:var(--dim); font-size:12px; margin:6px 0; }
   [hidden] { display:none !important; }
+  .fcinfo { font-size:12px; color:var(--dim); margin-top:4px; line-height:1.5; }
+  .fcinfo b.up { color:#22c55e; } .fcinfo b.down { color:#ef4444; }
   .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
 </style>
 </head>
@@ -167,6 +169,8 @@
         </div>
         <div id="acc-tfbar" class="tfbar"></div>
         <div style="position:relative"><div id="acc-chart" style="height:420px"></div><canvas id="acc-obcanvas" class="obc"></canvas></div>
+        <div class="legend"><label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#22d3ee"></i>KI-Prognose 30 min</label></div>
+        <div id="acc-fc-info" class="fcinfo"></div>
       </div>
       <div class="quick">
         <h3>Schnell-Order (jede Order = eigene Position)</h3>
@@ -246,7 +250,9 @@
       <span>gestrichelt = Plan, falls jetzt eingestiegen wuerde</span>
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-ob" onchange="toggleShow('ob')"> <i style="background:#22c55e;opacity:.6"></i><i style="background:#ef4444;opacity:.6"></i>Order Blocks (Ober-/Unterkante)</label>
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-walls" onchange="toggleShow('walls')"> <i style="background:#38bdf8"></i><i style="background:#fb923c"></i>Orderbuch-Waende</label>
+      <label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#22d3ee"></i>KI-Prognose 30 min</label>
     </div>
+    <div id="fc-info" class="fcinfo"></div>
   </section>
   <section class="panel">
     <h3>Was der Bot denkt</h3>
@@ -358,11 +364,20 @@ const emaF = chart.addLineSeries({ color:"#f59e0b", lineWidth:1, priceLineVisibl
 const emaS = chart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisible:false, lastValueVisible:false });
 const vwap = chart.addLineSeries({ color:"#64748b", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false });
 new ResizeObserver(() => chart.applyOptions({ width: document.getElementById("chart").clientWidth })).observe(document.getElementById("chart"));
+function fcSeries(ch) {
+  // KI-Prognose: Mitte gestrichelt, 80-%-Band gepunktet
+  const o = { lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+  return { mid: ch.addLineSeries({ ...o, lineWidth: 2, lineStyle: 2, color: "#22d3ee", lastValueVisible: true, title: "KI 30m" }),
+           hi: ch.addLineSeries({ ...o, lineStyle: 3, color: "rgba(34,211,238,0.55)" }),
+           lo: ch.addLineSeries({ ...o, lineStyle: 3, color: "rgba(34,211,238,0.55)" }) };
+}
+const fcBot = fcSeries(chart);
+let fcData = {}, accFc = null;
 
 function zline(price, color, title, style, width) {
   lines.push(candles.createPriceLine({ price, color, title, lineWidth: width || 1, lineStyle: style, axisLabelVisible: !!title }));
 }
-let show = { ob: true, walls: true };
+let show = { ob: true, walls: true, fc: true };
 try { show = { ...show, ...JSON.parse(localStorage.getItem("chart_show") || "{}") }; } catch (e) { /* ohne Speicher */ }
 function toggleShow(k) {
   show[k] = !show[k];
@@ -780,6 +795,8 @@ function render() {
 
   lines.forEach(l => candles.removePriceLine(l)); lines = [];
   document.getElementById("cb-ob").checked = show.ob; document.getElementById("cb-walls").checked = show.walls;
+  document.querySelectorAll(".cb-fc").forEach(cb => cb.checked = show.fc);
+  drawForecast();
   const p = s.position, plan = s.snapshot.plan;
   if (p) {
     const q = Number(p.amount).toLocaleString("de-DE", { maximumFractionDigits: 6 });
@@ -1078,6 +1095,7 @@ function ensureAccChart() {
     s: accChart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisible:false, lastValueVisible:false }),
     v: accChart.addLineSeries({ color:"#64748b", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false }),
   };
+  accFc = fcSeries(accChart);
   new ResizeObserver(() => accChart.applyOptions({ width: document.getElementById("acc-chart").clientWidth })).observe(document.getElementById("acc-chart"));
   accChart.timeScale().subscribeVisibleTimeRangeChange(() => drawBoxes());
   new ResizeObserver(() => setTimeout(drawBoxes, 0)).observe(document.getElementById("acc-chart"));
@@ -1112,6 +1130,7 @@ async function pollAccChart() {
   setTimeout(drawBoxes, 0);
   document.getElementById("acc-chart-title").textContent = `${accSym.split(":")[0]} - ${TF_NAME[accTf] || accTf}`;
   drawAccLines();
+  drawForecast();
   renderTerminal(acc || {});
 }
 function accountLines(sym) {
@@ -1201,6 +1220,54 @@ function initDrag() {
   window.addEventListener("touchend", end);
 }
 setInterval(pollAccChart, 5000);
+
+async function pollForecast() {
+  const syms = new Set();
+  if (view === "bot" && selected) syms.add(selected);
+  if (view === "acc" && accSym) syms.add(accSym);
+  if (!show.fc) return drawForecast();
+  for (const sym of syms) {
+    try {
+      const r = await fetch(`/api/forecast?symbol=${encodeURIComponent(sym)}`);
+      fcData[sym] = await r.json();
+    } catch (e) { /* Bot kurz nicht erreichbar */ }
+  }
+  drawForecast();
+}
+setInterval(pollForecast, 20000);
+setTimeout(pollForecast, 1500);
+function applyForecast(ser, d, last, tfSec, infoId) {
+  const info = document.getElementById(infoId);
+  if (!ser) return;
+  const clear = () => { ser.mid.setData([]); ser.hi.setData([]); ser.lo.setData([]); };
+  if (!show.fc) { clear(); if (info) info.innerHTML = ""; return; }
+  if (!d || !d.ok || !last) { clear(); if (info) info.innerHTML = d && d.msg ? `KI-Prognose: ${d.msg}` : "KI-Prognose wird berechnet ..."; return; }
+  // Prognose-Punkte auf das Raster dieses Charts legen (Start = letzte Kerze)
+  const step = Math.max(tfSec || 300, 60), byT = new Map();
+  for (const p of d.points) {
+    const k = Math.ceil((p.time - d.time) / step);
+    byT.set(last.time + k * step, k === 0 ? { ...p, mid: last.close, lo: last.close, hi: last.close } : p);
+  }
+  const pts = [...byT.entries()].sort((a, b) => a[0] - b[0]);
+  const col = d.useful ? "#22d3ee" : "#64748b", band = d.useful ? "rgba(34,211,238,0.55)" : "rgba(100,116,139,0.6)";
+  ser.mid.applyOptions({ color: col }); ser.hi.applyOptions({ color: band }); ser.lo.applyOptions({ color: band });
+  ser.mid.setData(pts.map(([t, p]) => ({ time: t, value: p.mid })));
+  ser.hi.setData(pts.map(([t, p]) => ({ time: t, value: p.hi })));
+  ser.lo.setData(pts.map(([t, p]) => ({ time: t, value: p.lo })));
+  if (!info) return;
+  const pct = v => (v > 0 ? "+" : "") + Number(v).toLocaleString("de-DE", { maximumFractionDigits: 2 }) + " %";
+  const q = v => v == null ? "-" : Math.round(v * 100) + " %";
+  const arrow = d.direction === "hoch" ? '<b class="up">&#9650; hoch</b>' : d.direction === "runter" ? '<b class="down">&#9660; runter</b>' : "<b>&#9644; seitwaerts</b>";
+  const end = d.points[d.points.length - 1];
+  info.innerHTML = `<b>KI-Prognose 30 min:</b> ${arrow} ${pct(d.change_pct)} &rarr; ${px(end.mid)} ` +
+    `(80 %-Band ${px(end.lo)} - ${px(end.hi)}) &middot; Treffer Richtung im Test: ${q(d.hit_30m)} &middot; ` +
+    `live: ${q(d.live && d.live.hit)} (${(d.live && d.live.n) || 0} geprueft, im Band ${q(d.live && d.live.in_band)})` +
+    (d.useful ? "" : ' &middot; <span style="color:#f59e0b">derzeit keine echte Vorhersagekraft - nicht danach handeln</span>');
+}
+function drawForecast() {
+  applyForecast(fcBot, fcData[selected], lastBar, lastTfSec, "fc-info");
+  if (accFc) applyForecast(accFc, fcData[accSym], accLast, (accChartData || {}).tf_seconds, "acc-fc-info");
+}
 
 
 async function pollAcc() {

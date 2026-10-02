@@ -1828,3 +1828,41 @@ def test_quick_order_refused_where_bot_trades(tmp_path):
     with pytest.raises(RuntimeError, match="zusammenlegen"):
         handle_action(B(), A(), "/api/account/quick", {"symbol": "BTC/USDT:USDT", "side": "long"}, tmp_path / "S")
     assert handle_action(B(), A(), "/api/account/quick", {"symbol": "ETH/USDT:USDT", "side": "long"}, tmp_path / "S") == "ok"
+
+
+def _fc_frame(n, phi, seed):
+    """5-Minuten-Kerzen; phi > 0 = Schwung (Rendite folgt der vorigen) -> vorhersagbar."""
+    rng = np.random.default_rng(seed)
+    r = np.zeros(n)
+    for i in range(1, n):
+        r[i] = phi * r[i - 1] + rng.normal(0, 0.002)
+    close = 100 * np.exp(np.cumsum(r))
+    ts = 1_700_000_000_000 + np.arange(n) * 300_000
+    return pd.DataFrame({"ts": ts, "open": np.r_[close[0], close[:-1]], "high": close * 1.001,
+                         "low": close * 0.999, "close": close, "volume": 1000 + rng.random(n) * 100})
+
+
+def test_forecast_learns_real_patterns_and_admits_randomness():
+    from bot.forecast import build
+
+    fc = build(_fc_frame(1000, 0.6, 1))
+    assert fc["useful"] and fc["skill"] > 0.01 and fc["hit_30m"] > 0.55
+    assert len(fc["points"]) == 7 and fc["points"][-1]["time"] - fc["points"][0]["time"] == 30 * 60
+    assert all(p["lo"] <= p["mid"] <= p["hi"] for p in fc["points"])
+    noise = build(_fc_frame(1000, 0.0, 2))
+    assert not noise["useful"]                                  # Zufall wird als "keine Vorhersagekraft" erkannt
+    assert build(_fc_frame(200, 0.6, 3)) is None                # zu wenig Daten
+
+
+def test_forecast_log_checks_predictions_after_30_minutes(tmp_path):
+    from bot.forecast import ForecastLog
+
+    lg = ForecastLog(tmp_path / "fc.json")
+    t0 = 1_700_000_000
+    fc = {"time": t0, "price": 100.0, "points": [{"mid": 100.0, "lo": 100.0, "hi": 100.0},
+                                                 {"mid": 101.0, "lo": 99.5, "hi": 102.0}]}
+    lg.add("X", fc)
+    lg.add("X", fc)                                             # gleiche Kerze nur einmal
+    lg.resolve("X", pd.DataFrame({"ts": [(t0 + 25 * 60) * 1000], "close": [100.8]}))
+    assert lg.stats("X") == {"n": 1, "hit": 1.0, "in_band": 1.0}
+    assert ForecastLog(tmp_path / "fc.json").stats("X")["n"] == 1   # ueberlebt Neustart
