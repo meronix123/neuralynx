@@ -15,6 +15,7 @@ Je Markt (ohne Zusatzpakete):
 import json
 import logging
 import math
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -23,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from .indicators import atr, bollinger, ema, macd_hist, rsi
+from .orderblocks import detect as ob_detect
 
 log = logging.getLogger(__name__)
 
@@ -32,9 +34,14 @@ MAX_HISTORY = 20_000                     # gespeicherte 5-Minuten-Kerzen je Mark
 HALF_LIFE = 3_000                        # Gewicht neuerer Kerzen: halbiert sich alle ~10 Tage
 L2 = 2.0
 BAND_Z = 1.28                            # 80-%-Band
+MIN_BOOK_BARS = 800                      # Orderbuch-Druck erst ab ~3 Tagen Aufzeichnung als Merkmal
+BACKFILL_DAYS = 70                       # beim ersten Start so viel Vergangenheit von Bitget laden
+GRID = [(0.5, 1500), (2.0, 1500), (2.0, 6000), (8.0, 6000), (8.0, 20000)]   # (L2, Halbwertszeit in Kerzen)
 
 
-def make_features(df: pd.DataFrame, leader: pd.DataFrame | None = None) -> pd.DataFrame:
+def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = None,
+                  macro: pd.DataFrame | None = None, gold: bool = False) -> pd.DataFrame:
+    """leader: DataFrame (BTC) oder {Name: DataFrame} (z. B. BTC und ETH); funding: Spalten ts, rate."""
     """Merkmale je Kerze (nur Vergangenheit bis einschliesslich dieser Kerze)."""
     c, h, lo, o = (df[k].astype(float) for k in ("close", "high", "low", "open"))
     a = atr(df, 14).replace(0, np.nan)
@@ -42,6 +49,8 @@ def make_features(df: pd.DataFrame, leader: pd.DataFrame | None = None) -> pd.Da
     f = pd.DataFrame(index=df.index)
     for n in (1, 3, 6, 12, 24, 48, 96, 288):          # 5 min ... 1 Tag
         f[f"r{n}"] = (lr - lr.shift(n)) * 100
+    for k in (1, 2):                                   # die einzelnen vorigen Kerzen (fuer Wechselwirkungen)
+        f[f"r1_lag{k}"] = f["r1"].shift(k)
     f["rsi"] = (rsi(c, 14) - 50) / 50
     f["rsi_1h"] = (rsi(c, 168) - 50) / 50
     for span, name in ((20, "e20"), (50, "e50"), (600, "e1h50"), (2400, "e4h50")):
@@ -65,12 +74,54 @@ def make_features(df: pd.DataFrame, leader: pd.DataFrame | None = None) -> pd.Da
     t = pd.to_datetime(df["ts"], unit="ms", utc=True)
     hours = t.dt.hour + t.dt.minute / 60
     f["hour_sin"], f["hour_cos"] = np.sin(2 * np.pi * hours / 24), np.cos(2 * np.pi * hours / 24)
-    if leader is not None and len(leader):
-        lc = pd.Series(leader["close"].astype(float).to_numpy(), index=leader["ts"].to_numpy())
+    leaders = {"btc": leader} if isinstance(leader, pd.DataFrame) else (leader or {})
+    for name, ld in leaders.items():
+        if ld is None or not len(ld):
+            continue
+        lc = pd.Series(ld["close"].astype(float).to_numpy(), index=ld["ts"].to_numpy())
         lc = lc[~lc.index.duplicated()].reindex(df["ts"].to_numpy()).ffill()
         llr = np.log(lc.to_numpy())
         for n in (1, 3, 12, 48):
-            f[f"btc_r{n}"] = (llr - np.r_[np.full(n, np.nan), llr[:-n]]) * 100
+            f[f"{name}_r{n}"] = (llr - np.r_[np.full(n, np.nan), llr[:-n]]) * 100
+    if funding is not None and len(funding):
+        fr = pd.Series(funding["rate"].astype(float).to_numpy(), index=funding["ts"].astype("int64").to_numpy())
+        fr = fr[~fr.index.duplicated()].sort_index()
+        pos = np.searchsorted(fr.index.to_numpy(), df["ts"].to_numpy(), side="right") - 1
+        vals = np.where(pos >= 0, fr.to_numpy()[np.clip(pos, 0, None)], np.nan)
+        f["funding"] = vals * 1e4                                     # in Basispunkten
+        f["funding_chg"] = f["funding"] - f["funding"].shift(96)
+    # Order Blocks wie im Chart: Abstand zur naechsten Gegen-/Stuetz-Zone (in ATR) und Antests
+    o_, h_, l_, c_ = (df[k].astype(float).to_numpy() for k in ("open", "high", "low", "close"))
+    above, below, sup, _ = ob_detect(o_, h_, l_, c_, a.to_numpy(), 1.0, 3)
+    av = a.to_numpy()
+    f["ob_up"] = np.where(np.isnan(above), 10.0, (above - c_) / av)
+    f["ob_dn"] = np.where(np.isnan(below), 10.0, (c_ - below) / av)
+    f["ob_sup"] = sup.astype(float)
+    if len(df) > 400:                                                  # Order Blocks der 1h-Zeitebene
+        t1 = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        g = df.set_index(t1).resample("1h", label="left", closed="left").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+        if len(g) > 30:
+            a1 = atr(g.reset_index(drop=True), 14).to_numpy()
+            ab1, be1, su1, _ = ob_detect(*(g[k].to_numpy(float) for k in ("open", "high", "low", "close")), a1, 1.5, 3)
+            known = (g.index + pd.Timedelta(hours=1)).as_unit("ns").asi8 // 1_000_000   # erst nach Kerzenschluss bekannt
+            pos = np.searchsorted(known, df["ts"].to_numpy(), side="right") - 1
+            okp = pos >= 0
+            pc = np.clip(pos, 0, None)
+            f["ob1h_up"] = np.where(okp & ~np.isnan(ab1[pc]), (ab1[pc] - c_) / av, 10.0)
+            f["ob1h_dn"] = np.where(okp & ~np.isnan(be1[pc]), (c_ - be1[pc]) / av, 10.0)
+            f["ob1h_sup"] = np.where(okp, su1[pc], 0).astype(float)
+    if macro is not None and len(macro):
+        from .macro import merge_macro
+        f["macro"] = np.asarray(merge_macro(df, macro, gold=gold), dtype=float)
+    for col, name in (("wall_bid", "wall_bid"), ("wall_ask", "wall_ask")):          # Orderbuch-Waende (live)
+        if col in df and df[col].notna().sum() >= MIN_BOOK_BARS:
+            f[name] = df[col].astype(float).fillna(5.0)
+    if "book_imb" in df:                                              # live aufgezeichneter Orderbuch-Druck
+        has = df["book_imb"].notna()
+        if has.sum() >= MIN_BOOK_BARS:
+            f["book_imb"] = df["book_imb"].astype(float).fillna(0.0) * 3
+            f["book_has"] = has.astype(float)
     return f.replace([np.inf, -np.inf], np.nan).clip(-10, 10)
 
 
@@ -110,70 +161,195 @@ def _calibrate(p: float, live: dict) -> tuple[float, str]:
     return 0.5 + (p - 0.5) * trust, note
 
 
-def build(df: pd.DataFrame, leader: pd.DataFrame | None = None, test_share: float = 0.2,
-          live: dict | None = None) -> dict | None:
+class Boost:
+    """Gradient Boosting mit kleinen Entscheidungsbaeumen (Tiefe 2) - findet Zusammenhaenge, die eine
+    lineare Regression nicht sieht (z. B. "hoher RSI nur bei fallendem Volumen gefaehrlich").
+    Merkmale werden in Stufen (Quantile) eingeteilt, damit es auch ohne Zusatzpakete schnell geht."""
+
+    def __init__(self, rounds: int = 80, lr: float = 0.1, bins: int = 16, min_leaf: float = 0.02, lam: float = 5.0):
+        self.rounds, self.lr, self.bins, self.min_leaf, self.lam = rounds, lr, bins, min_leaf, lam
+        self.edges, self.trees, self.f0 = [], [], 0.0
+
+    def _bin(self, X):
+        return np.stack([np.searchsorted(e, X[:, j]) for j, e in enumerate(self.edges)], 1).astype(np.int16)
+
+    def _best(self, Xb, g, h, rows):
+        """Bester Schnitt (Merkmal, Stufe) fuer die Zeilen `rows` - oder None."""
+        G, H = g[rows].sum(), h[rows].sum()
+        best, min_h = None, self.min_leaf * h.sum()
+        base = G * G / (H + self.lam)
+        for j in range(Xb.shape[1]):
+            xb = Xb[rows, j]
+            gl = np.cumsum(np.bincount(xb, g[rows], self.bins + 1))[:-1]
+            hl = np.cumsum(np.bincount(xb, h[rows], self.bins + 1))[:-1]
+            ok = (hl >= min_h) & (H - hl >= min_h)
+            if not ok.any():
+                continue
+            gain = np.where(ok, gl ** 2 / (hl + self.lam) + (G - gl) ** 2 / (H - hl + self.lam) - base, -1)
+            k = int(gain.argmax())
+            if gain[k] > 0 and (best is None or gain[k] > best[0]):
+                best = (gain[k], j, k)
+        return best
+
+    def fit(self, X, y, w):
+        self.edges = [np.unique(np.quantile(X[:, j], np.linspace(0, 1, self.bins + 1)[1:-1])) for j in range(X.shape[1])]
+        Xb = self._bin(X)
+        w = w / w.mean()
+        m = float(np.clip(np.average(y, weights=w), 0.01, 0.99))
+        self.f0 = math.log(m / (1 - m))
+        F = np.full(len(y), self.f0)
+        self.trees = []
+        for _ in range(self.rounds):
+            p = 1 / (1 + np.exp(-F))
+            g, h = (p - y) * w, p * (1 - p) * w
+            allr = np.arange(len(y))
+            root = self._best(Xb, g, h, allr)
+            if root is None:
+                break
+            _, j, k = root
+            tree = {"j": j, "k": k, "kids": []}
+            for side in (Xb[:, j] <= k, Xb[:, j] > k):
+                rows = allr[side]
+                sub = self._best(Xb, g, h, rows)
+                if sub is None:
+                    v = -g[rows].sum() / (h[rows].sum() + self.lam) * self.lr
+                    tree["kids"].append({"leaf": (v, v), "j": 0, "k": self.bins})
+                    F[rows] += v
+                    continue
+                _, j2, k2 = sub
+                left = rows[Xb[rows, j2] <= k2]
+                right = rows[Xb[rows, j2] > k2]
+                vl = -g[left].sum() / (h[left].sum() + self.lam) * self.lr
+                vr = -g[right].sum() / (h[right].sum() + self.lam) * self.lr
+                F[left] += vl
+                F[right] += vr
+                tree["kids"].append({"leaf": (vl, vr), "j": j2, "k": k2})
+            self.trees.append(tree)
+        return self
+
+    def proba(self, X):
+        Xb = self._bin(X)
+        F = np.full(len(X), self.f0)
+        for t in self.trees:
+            side = Xb[:, t["j"]] > t["k"]
+            for s_, kid in ((~side, t["kids"][0]), (side, t["kids"][1])):
+                go_right = Xb[:, kid["j"]] > kid["k"]
+                F += np.where(s_, np.where(go_right, kid["leaf"][1], kid["leaf"][0]), 0.0)
+        return 1 / (1 + np.exp(-F))
+
+
+def _logloss(p, y):
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | None = None,
+          funding: pd.DataFrame | None = None, macro: pd.DataFrame | None = None, gold: bool = False,
+          boost: bool = True) -> dict | None:
     """Modell aus 5-Minuten-Kerzen (ts, open, high, low, close, volume; die letzte darf offen sein).
+
+    Drei Abschnitte: Lernen (erste 70 %), Auswahl (naechste 10 %: Einstellungen + Mischung linear/Baeume),
+    Test (letzte 20 %: nur zum ehrlichen Messen). Danach wird mit allen Daten fuer die Live-Prognose gelernt.
     Rueckgabe: Entscheidung, Pfad, Band und Guete - oder None bei zu wenig Daten."""
     df = df.reset_index(drop=True)
     n_closed = len(df) - 1                        # offene Kerze nicht zum Lernen
     if n_closed < 300:
         return None
-    X_all = make_features(df, leader).to_numpy(float)
+    feats = make_features(df, leader, funding, macro, gold)
+    X_all = feats.to_numpy(float)
     keep = ~np.isnan(X_all[:-1]).all(0)           # Merkmale ohne Daten weglassen
+    names = [n for n, k in zip(feats.columns, keep) if k]
     X_all = np.nan_to_num(X_all[:, keep], nan=0.0)
     lr = np.log(df["close"].astype(float).to_numpy())
     age = np.arange(len(df))[::-1].astype(float)
-    weight = 0.5 ** (age / HALF_LIFE)
-    warm = 60                                      # die ersten Kerzen haben unvollstaendige Indikatoren
+    warm = min(300, n_closed // 5)                 # die ersten Kerzen haben unvollstaendige Indikatoren
+    H = HORIZONS[-1]
+    idx30 = np.arange(warm, n_closed - H)
+    if len(idx30) < 200:
+        return None
+    n = len(idx30)
+    a_end, v_end = int(n * (1 - test_share - 0.1)), int(n * (1 - test_share))
+
+    def cut(idx, h):          # Abschnitte mit Abstand h, damit sich Ziel-Zeitraeume nicht ueberlappen
+        return idx[:a_end - h], idx[a_end:v_end - h], idx[v_end:]
+
+    # 1) Einstellungen (Regularisierung, wie stark neuere Daten zaehlen) an der 30-min-Prognose waehlen
+    y30_all = ((lr[idx30 + H] - lr[idx30]) > 0).astype(float)
+    tr, va, te = cut(np.arange(n), H)
+    best = None
+    for l2, hl in GRID:
+        wgt = 0.5 ** (age / hl)
+        m = _logit_fit(X_all[idx30[tr]], y30_all[tr], wgt[idx30[tr]], l2)
+        ll = _logloss(_logit_p(m, X_all[idx30[va]]), y30_all[va])
+        if best is None or ll < best[0]:
+            best = (ll, l2, hl)
+    _, L2_, HL_ = best
+    weight = 0.5 ** (age / HL_)
+    # 2) Baeume dazu? Mischung an der Auswahl-Strecke waehlen (0 = nur linear, 1 = nur Baeume)
+    mix = 0.0
+    if boost and len(tr) >= 1000:
+        lin = _logit_fit(X_all[idx30[tr]], y30_all[tr], weight[idx30[tr]], L2_)
+        bst = Boost().fit(X_all[idx30[tr]], y30_all[tr], weight[idx30[tr]])
+        pl, pb = _logit_p(lin, X_all[idx30[va]]), bst.proba(X_all[idx30[va]])
+        mix = min((0.0, 0.5, 1.0), key=lambda a_: _logloss((1 - a_) * pl + a_ * pb, y30_all[va]))
+
     probs, raw, moves, quality = [], [], [], []
     for h in HORIZONS:
-        idx = np.arange(warm, n_closed - h)
-        if len(idx) < 200:
-            return None
+        idx = idx30 if h == H else np.arange(warm, n_closed - h)
         ret = (lr[idx + h] - lr[idx]) * 100
         y = (ret > 0).astype(float)
-        split = int(len(idx) * (1 - test_share))
-        tr, te = idx[:split], idx[split:]
-        m = _logit_fit(X_all[tr], y[:split], weight[tr])
-        p_te = _logit_p(m, X_all[te])
-        hit = float(((p_te >= 0.5) == (y[split:] == 1)).mean())
-        base = max(y[:split].mean(), 1 - y[:split].mean())   # "immer die haeufigere Richtung"
-        brier = float(np.mean((p_te - y[split:]) ** 2))
-        brier0 = float(np.mean((y[:split].mean() - y[split:]) ** 2))
+        nn = len(idx)
+        t_end = int(nn * (1 - test_share))
+        tr_i, te_i = np.arange(t_end - h), np.arange(t_end, nn)
+        m = _logit_fit(X_all[idx[tr_i]], y[tr_i], weight[idx[tr_i]], L2_)
+        p_te = _logit_p(m, X_all[idx[te_i]])
+        final = _logit_fit(X_all[idx], y, weight[idx], L2_)
+        p_now = float(_logit_p(final, X_all[n_closed - 1:n_closed])[0])     # letzte ABGESCHLOSSENE Kerze
+        if h == H and mix > 0:
+            b_te = Boost().fit(X_all[idx[tr_i]], y[tr_i], weight[idx[tr_i]]).proba(X_all[idx[te_i]])
+            p_te = (1 - mix) * p_te + mix * b_te
+            b_now = float(Boost().fit(X_all[idx], y, weight[idx]).proba(X_all[n_closed - 1:n_closed])[0])
+            p_now = (1 - mix) * p_now + mix * b_now
+        yt = y[te_i]
+        hit = float(((p_te >= 0.5) == (yt == 1)).mean())
+        base = max(y[tr_i].mean(), 1 - y[tr_i].mean())   # "immer die haeufigere Richtung"
+        brier = float(np.mean((p_te - yt) ** 2))
+        brier0 = float(np.mean((y[tr_i].mean() - yt) ** 2))
+        # nur so sicher, wie die KI an ungesehenen Daten NACHWEISLICH besser als der Zufall war:
+        # Vorsprung gegen den Zufall in Standardfehlern (sich ueberlappende Zeitraeume zaehlen weniger)
+        n_eff = max(1.0, len(te_i) / h)
+        z = (hit - max(0.5, float(base))) / math.sqrt(0.25 / n_eff)
+        trust = max(0.0, min(1.0, (z - 1.0) / 2.0))
         quality.append({"min": h * STEP_MIN, "hit": round(hit, 3), "base": round(float(base), 3),
-                        "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0, "n_test": int(len(te))})
-        final = _logit_fit(X_all[idx], y, weight[idx])
-        p_now = float(_logit_p(final, X_all[n_closed - 1:n_closed])[0])          # letzte ABGESCHLOSSENE Kerze
-        # nur so sicher, wie die KI an ungesehenen Daten wirklich besser als der Zufall war
-        trust = max(0.0, min(1.0, (hit - max(0.5, float(base))) / 0.05))
-        quality[-1]["trust"] = round(trust, 2)
+                        "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0, "n_test": int(len(te_i)),
+                        "trust": round(trust, 2), "z": round(z, 2)})
         probs.append(0.5 + (p_now - 0.5) * trust)
         raw.append(p_now)
-        recent = np.abs(ret[-2000:])
-        moves.append((float(np.mean(recent)), float(np.std(ret[-2000:]))))
+        moves.append((float(np.mean(np.abs(ret[-2000:]))), float(np.std(ret[-2000:]))))
     live = live or {}
     p30, note = _calibrate(probs[-1], live)
     lean = p30 if abs(p30 - 0.5) > 1e-9 else raw[-1]       # ohne Vorsprung: Richtung des Rohmodells
     decision = "LONG" if lean >= 0.5 else "SHORT"
-    # Pfad: erwartete Bewegung je Abstand = (2p-1) x uebliche Bewegung; Band = uebliche Schwankung
     anchor_ts = int(df["ts"].iloc[n_closed]) // 1000          # Beginn der offenen Kerze
-    nodes = [(0, 0.0, 0.0)]
     # Pfad = Meinung des Modells (roh) in Richtung der Entscheidung; wie sehr man ihr trauen kann,
     # sagt die (kalibrierte) Sicherheit
+    nodes = [(0, 0.0, 0.0)]
     sign = 1 if decision == "LONG" else -1
     for h, p, (mabs, sd) in zip(HORIZONS, raw, moves):
         nodes.append((h * STEP_MIN * 60, sign * abs(2 * p - 1) * mabs, sd * BAND_Z))
     q30 = quality[-1]
-    useful = q30["hit"] > max(0.52, q30["base"] + 0.01) and q30["skill"] > 0
+    useful = q30["z"] >= 2.0 and q30["skill"] > 0          # deutlich (2 Standardfehler) besser als Zufall
     rng = (df["high"] - df["low"]).astype(float).to_numpy()[-300:-1] / df["close"].astype(float).to_numpy()[-300:-1]
     return {
         "time": anchor_ts, "decision": decision,
         "confidence": round(max(p30, 1 - p30), 3), "p_up": round(p30, 3), "p_up_raw": round(raw[-1], 3),
-        "nodes": [{"sec": s, "ret": round(r, 4), "band": round(b, 4)} for s, r, b in nodes],
+        "nodes": [{"sec": s_, "ret": round(r, 4), "band": round(b_, 4)} for s_, r, b_ in nodes],
         "change_pct": round(nodes[-1][1], 3), "band_pct": round(nodes[-1][2], 3),
         "candle_range_pct": round(float(np.median(rng)) * 100, 4),
         "quality": quality, "hit_30m": q30["hit"], "base_30m": q30["base"], "useful": bool(useful),
-        "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]),
+        "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]), "feature_names": names,
+        "model": {"l2": L2_, "half_life_days": round(HL_ * STEP_MIN / 1440, 1), "trees": mix,
+                  "kind": "linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume"},
     }
 
 
@@ -260,14 +436,42 @@ class ForecastLog:
 
 
 class CandleMemory:
-    """Gedaechtnis: abgeschlossene 5-Minuten-Kerzen je Markt sammeln (waechst mit jeder Kerze)."""
+    """Gedaechtnis: abgeschlossene 5-Minuten-Kerzen je Markt (waechst mit jeder Kerze) plus live
+    aufgezeichnete Orderbuch-Werte je Kerze (Druck, Abstand zur naechsten Kauf-/Verkaufs-Wand)."""
 
     def __init__(self, folder: Path | None):
         self.folder = folder
         self.mem: dict[str, pd.DataFrame] = {}
+        self.book_acc: dict[str, dict[int, list[float]]] = {}
+        self.meta = {}
+        if folder is not None and (folder / "lernen.json").exists():
+            try:
+                self.meta = json.loads((folder / "lernen.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self.meta = {}
 
     def _file(self, sym: str) -> Path | None:
         return self.folder / f"kerzen_{sym.split(':')[0].replace('/', '')}_5m.csv" if self.folder else None
+
+    def save_meta(self) -> None:
+        if self.folder is None:
+            return
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            (self.folder / "lernen.json").write_text(json.dumps(self.meta), encoding="utf-8")
+        except OSError as e:
+            log.debug("KI-Meta: %s", e)
+
+    def record_book(self, sym: str, bar_ts: int, imb: float | None, wall_bid: float | None, wall_ask: float | None):
+        """Orderbuch-Werte waehrend einer Kerze sammeln (Mittelwert wird beim Kerzenschluss gespeichert)."""
+        acc = self.book_acc.setdefault(sym, {})
+        x = acc.setdefault(int(bar_ts), [0.0, 0, 0.0, 0, 0.0, 0])
+        for i, v in ((0, imb), (2, wall_bid), (4, wall_ask)):
+            if v is not None and v == v:
+                x[i] += float(v)
+                x[i + 1] += 1
+        for t in [t for t in acc if t < bar_ts - 3_600_000]:
+            del acc[t]
 
     def merge(self, sym: str, fresh: pd.DataFrame) -> pd.DataFrame:
         """Gespeicherte + frische Kerzen; die letzte (offene) Kerze bleibt am Ende, wird aber nicht gespeichert."""
@@ -278,64 +482,214 @@ class CandleMemory:
                 old = pd.read_csv(f)
             except (OSError, ValueError):
                 old = None
-        closed = fresh.iloc[:-1]
-        allc = pd.concat([old, closed]) if old is not None else closed
-        allc = allc.drop_duplicates("ts", keep="last").sort_values("ts").tail(MAX_HISTORY).reset_index(drop=True)
-        # nur lueckenlose Daten verwenden (nach laengerer Pause beginnt das Gedaechtnis neu)
-        gaps = np.where(np.diff(allc["ts"].to_numpy()) > STEP_MIN * 60_000 * 1.5)[0]
+        closed = fresh.iloc[:-1].copy()
+        acc = self.book_acc.get(sym, {})
+        for col, i in (("book_imb", 0), ("wall_bid", 2), ("wall_ask", 4)):
+            closed[col] = [acc[t][i] / acc[t][i + 1] if t in acc and acc[t][i + 1] else np.nan
+                           for t in closed["ts"].astype("int64")]
+        if old is not None and len(old):
+            # neue Kurse gewinnen, aufgezeichnete Orderbuch-Werte der alten Zeilen bleiben erhalten
+            allc = closed.set_index("ts").combine_first(old.set_index("ts")).reset_index()
+        else:
+            allc = closed
+        allc = allc.sort_values("ts").tail(MAX_HISTORY).reset_index(drop=True)
+        # nur lueckenlose Daten verwenden (nach laengerer Pause, > 2 h, beginnt das Gedaechtnis dort neu)
+        gaps = np.where(np.diff(allc["ts"].to_numpy()) > 2 * 3_600_000)[0]
         if len(gaps):
             allc = allc.iloc[gaps[-1] + 1:].reset_index(drop=True)
         if len(allc) < len(closed):
             allc = closed.reset_index(drop=True)
         self.mem[sym] = allc
-        if f is not None and (old is None or len(allc) != len(old)):
+        m = self.meta.setdefault(sym, {})
+        m.setdefault("since", int(time.time()))
+        if f is not None and (old is None or len(allc) != len(old) or not m.get("saved")):
+            try:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                allc.to_csv(f, index=False)
+                m["saved"] = 1
+            except OSError as e:
+                log.debug("Kerzen-Gedaechtnis %s: %s", sym, e)
+        out = pd.concat([allc, fresh.iloc[-1:]]).reset_index(drop=True)
+        return out
+
+    def backfill(self, sym: str, ohlcv_fn, days: int = BACKFILL_DAYS, ref_ms: int | None = None) -> int:
+        """Vergangenheit von Bitget nachladen (einmalig), damit die KI nicht bei null anfaengt.
+        ref_ms: Zeit der neuesten Bitget-Kerze (unabhaengig von der PC-Uhr)."""
+        have = self.mem.get(sym)
+        ref = ref_ms or int(time.time() * 1000)
+        start = ref - days * 86_400_000
+        if have is not None and len(have) and int(have["ts"].iloc[0]) <= start + 86_400_000:
+            return 0
+        rows, since = [], start
+        end = int(have["ts"].iloc[0]) if have is not None and len(have) else ref
+        while since < end:
+            batch = ohlcv_fn(sym, "5m", since, 200)
+            if not batch:
+                since += 200 * STEP_MIN * 60_000
+                continue
+            rows += batch
+            nxt = batch[-1][0] + STEP_MIN * 60_000
+            if nxt <= since:
+                break
+            since = nxt
+        if not rows:
+            return 0
+        hist = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+        hist = hist.drop_duplicates("ts").sort_values("ts")
+        base = self.mem.get(sym)
+        allc = hist.set_index("ts").combine_first(base.set_index("ts")).reset_index() if base is not None else hist
+        allc = allc.sort_values("ts").tail(MAX_HISTORY).reset_index(drop=True)
+        self.mem[sym] = allc
+        f = self._file(sym)
+        if f is not None:
             try:
                 f.parent.mkdir(parents=True, exist_ok=True)
                 allc.to_csv(f, index=False)
             except OSError as e:
                 log.debug("Kerzen-Gedaechtnis %s: %s", sym, e)
-        return pd.concat([allc, fresh.iloc[-1:]]).reset_index(drop=True)
+        return len(hist)
 
 
 class Forecaster:
-    """Entscheidung je Markt, neu gelernt bei jeder neuen 5-Minuten-Kerze."""
+    """KI je Markt: lernt im Hintergrund bei jeder neuen 5-Minuten-Kerze neu (die Oberflaeche wartet nie)."""
 
     def __init__(self, candles_fn, folder: Path | None = None, mode: str = "paper", leader: str | None = None,
-                 price_fn=None):
+                 price_fn=None, ohlcv_fn=None, book_fn=None, funding_fn=None, macro_fn=None,
+                 leaders: list[str] | None = None, background: bool = True):
         self.candles_fn, self.price_fn, self.leader = candles_fn, price_fn, leader
+        self.ohlcv_fn, self.book_fn, self.funding_fn, self.macro_fn = ohlcv_fn, book_fn, funding_fn, macro_fn
+        self.leaders = [x for x in (leaders or ([leader] if leader else [])) if x]
+        self.background = background
         self.memory = CandleMemory(folder / "ki" if folder else None)
         self.log = ForecastLog(folder / f"ki_entscheidungen_{mode}.json" if folder else None)
         self.models: dict[str, tuple[int, dict]] = {}
         self.fresh: dict[str, tuple[float, pd.DataFrame]] = {}
+        self.busy: set[str] = set()
+        self.filled: set[str] = set()
+        self.lock = threading.Lock()
+        self.cache: dict[str, tuple[float, object]] = {}
+
+    def _cached(self, key: str, ttl: float, fn):
+        hit = self.cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        try:
+            val = fn()
+        except Exception as e:  # noqa: BLE001 - Zusatzdaten sind optional
+            log.debug("KI %s: %s", key, e)
+            val = hit[1] if hit else None
+        self.cache[key] = (time.time(), val)
+        return val
+
+    def _record_book(self, sym: str, bar_ts: int) -> None:
+        if not self.book_fn:
+            return
+        book = self._cached(f"book|{sym}", 10, lambda: self.book_fn(sym))
+        if not book or not book.get("bids") or not book.get("asks"):
+            return
+        from .flow import book_imbalance, book_walls
+        mid = (float(book["bids"][0][0]) + float(book["asks"][0][0])) / 2
+        w = book_walls(book)
+        wb = min((abs(mid - x["price"]) / mid * 100 for x in w.get("bids") or []), default=None)
+        wa = min((abs(x["price"] - mid) / mid * 100 for x in w.get("asks") or []), default=None)
+        self.memory.record_book(sym, bar_ts, book_imbalance(book), wb, wa)
 
     def _candles(self, sym: str) -> pd.DataFrame:
         hit = self.fresh.get(sym)
-        if hit and time.time() - hit[0] < 15:
+        if hit and time.time() - hit[0] < 10:
             return hit[1]
-        df = self.memory.merge(sym, self.candles_fn(sym, "5m", 1000).reset_index(drop=True))
+        raw = self.candles_fn(sym, "5m", 1000).reset_index(drop=True)
+        self._record_book(sym, int(raw["ts"].iloc[-1]))
+        if self.ohlcv_fn and sym not in self.filled:          # einmalig Vergangenheit nachladen
+            self.filled.add(sym)
+            self._spawn(self._backfill, sym, int(raw["ts"].iloc[0]))
+        df = self.memory.merge(sym, raw)
         self.fresh[sym] = (time.time(), df)
         return df
+
+    def _spawn(self, fn, *args):
+        if self.background:
+            threading.Thread(target=fn, args=args, daemon=True).start()
+        else:
+            fn(*args)
+
+    def _backfill(self, sym: str, ref_ms: int | None = None) -> None:
+        try:
+            n = self.memory.backfill(sym, self.ohlcv_fn, ref_ms=ref_ms)
+            if n:
+                log.info("KI %s: %d Kerzen Vergangenheit nachgeladen (%d Tage)", sym, n, BACKFILL_DAYS)
+                self.fresh.pop(sym, None)
+                self.models.pop(sym, None)                    # mit mehr Daten neu lernen
+        except Exception as e:  # noqa: BLE001
+            log.warning("KI %s: Vergangenheit nicht ladbar (%s)", sym, e)
+
+    def _train(self, sym: str, df: pd.DataFrame, bar: int) -> None:
+        try:
+            lead = {}
+            if "XAU" not in sym and "XAG" not in sym:
+                for ls in self.leaders:
+                    if ls != sym:
+                        try:
+                            lead[ls.split("/")[0].lower()] = self._candles(ls)
+                        except Exception as e:  # noqa: BLE001 - ohne Leitwaehrung weiter
+                            log.debug("KI: %s fehlt (%s)", ls, e)
+            funding = self._cached(f"funding|{sym}", 3600, lambda: self.funding_fn(sym)) if self.funding_fn else None
+            macro = self._cached("macro", 6 * 3600, self.macro_fn) if self.macro_fn else None
+            t0 = time.time()
+            fc = build(df, lead, live=self.log.stats(sym), funding=funding, macro=macro,
+                       gold="XAU" in sym or "XAG" in sym)
+            if fc:
+                fc["learn_s"] = round(time.time() - t0, 1)
+                self.log.add(sym, fc, float(df["close"].iloc[-1]))
+                m = self.memory.meta.setdefault(sym, {"since": int(time.time())})
+                m["retrains"] = m.get("retrains", 0) + 1
+                day = time.strftime("%Y-%m-%d")
+                hist = m.setdefault("test_hit", {})
+                hist[day] = fc["hit_30m"]                       # Entwicklung der Test-Trefferquote je Tag
+                m["test_hit"] = dict(list(hist.items())[-60:])
+                self.memory.save_meta()
+            self.models[sym] = (bar, fc)
+        except Exception as e:  # noqa: BLE001
+            log.warning("KI %s lernen: %s", sym, e)
+            self.models.setdefault(sym, (bar, None))
+        finally:
+            self.busy.discard(sym)
+
+    def info(self, sym: str, df: pd.DataFrame) -> dict:
+        """Wie lange und womit die KI schon lernt."""
+        m = self.memory.meta.get(sym, {})
+        stats = self.log.stats(sym)
+        days = (int(df["ts"].iloc[-1]) - int(df["ts"].iloc[0])) / 86_400_000 if len(df) > 1 else 0
+        book_bars = int(df["book_imb"].notna().sum()) if "book_imb" in df else 0
+        weekly = {}
+        for x in self.log.items:
+            if x["sym"] == sym and x["actual"] is not None and x["actual"] != x["price"]:
+                wk = time.strftime("%d.%m.", time.localtime(x["time"] - (x["time"] % (7 * 86400))))
+                ok = (x["actual"] > x["price"]) == (x["decision"] == "LONG")
+                w = weekly.setdefault(wk, [0, 0])
+                w[0] += ok
+                w[1] += 1
+        return {"since": m.get("since"), "retrains": m.get("retrains", 0), "bars": int(len(df) - 1),
+                "data_days": round(days, 1), "book_bars": book_bars, "book_needed": MIN_BOOK_BARS,
+                "checked": stats["n"], "weeks": [{"week": k, "hit": round(v[0] / v[1], 3), "n": v[1]}
+                                                 for k, v in list(weekly.items())[-8:]]}
 
     def get(self, sym: str) -> dict:
         df = self._candles(sym)
         bar = int(df["ts"].iloc[-1]) // 1000
         self.log.resolve(sym, df.iloc[:-1])
         cached = self.models.get(sym)
-        if not cached or cached[0] != bar:                 # neue 5-Minuten-Kerze -> neu lernen
-            lead = None
-            if self.leader and sym != self.leader and "XAU" not in sym and "XAG" not in sym:
-                try:
-                    lead = self._candles(self.leader)
-                except Exception as e:  # noqa: BLE001 - ohne BTC weiter
-                    log.debug("KI: BTC-Daten fehlen (%s)", e)
-            fc = build(df, lead, live=self.log.stats(sym))
-            cached = (bar, fc)
-            self.models[sym] = cached
-            if fc:
-                self.log.add(sym, fc, float(df["close"].iloc[-1]))
-        fc = cached[1]
+        with self.lock:
+            stale = not cached or cached[0] != bar
+            if stale and sym not in self.busy:              # neue 5-Minuten-Kerze -> im Hintergrund neu lernen
+                self.busy.add(sym)
+                self._spawn(self._train, sym, df, bar)
+        cached = self.models.get(sym)
+        info = self.info(sym, df)
+        fc = cached[1] if cached else None
         if fc is None:
-            return {"symbol": sym, "ok": False, "msg": "Zu wenig Kursdaten - die KI sammelt noch"}
+            return {"symbol": sym, "ok": False, "learning": info,
+                    "msg": "KI lernt gerade ..." if sym in self.busy else "Zu wenig Kursdaten - die KI sammelt noch"}
         price = float(df["close"].iloc[-1])
         if self.price_fn:
             try:
@@ -344,11 +698,12 @@ class Forecaster:
                 pass
         now = int(time.time())
         seed = zlib.crc32(f"{sym}|{fc['time']}".encode())
-        return {"symbol": sym, "ok": True, **fc, "price": price, "now": now,
+        start = min(max(now, fc["time"]), fc["time"] + STEP_MIN * 60 - 1)
+        out = {k: v for k, v in fc.items() if k != "feature_names"}
+        return {"symbol": sym, "ok": True, **out, "price": price, "now": now,
                 # Start innerhalb der aktuellen 5-Minuten-Kerze (robust gegen Uhr-Abweichungen)
-                "path": path(fc, price, min(max(now, fc["time"]), fc["time"] + STEP_MIN * 60 - 1), seed),
-                "live": self.log.stats(sym),
-                "valid_until": fc["time"] + STEP_MIN * 60}
+                "path": path(fc, price, start, seed), "live": self.log.stats(sym), "learning": info,
+                "relearning": sym in self.busy, "valid_until": fc["time"] + STEP_MIN * 60}
 
 
 def ki_active(fc: dict | None, s: dict) -> tuple[bool, str]:

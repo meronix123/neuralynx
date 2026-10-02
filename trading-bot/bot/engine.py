@@ -939,7 +939,17 @@ class Bot:
 
             def price(s):
                 return (self.live_prices() or {}).get(s) if s in self.ex.symbols else None
-            self._forecaster = Forecaster(self._candles, ROOT / "data", self.cfg["mode"], leader, price)
+
+            def macro():
+                self._macro_score(self.ex.symbols[0])        # laedt/teilt den Makro-Speicher des Bots
+                return self.__dict__.get("_macro_cache", (0, None))[1]
+            eth = next((k for k in self.ex.symbols if k.startswith("ETH/")), None)
+            self._forecaster = Forecaster(
+                self._candles, ROOT / "data", self.cfg["mode"], leader, price,
+                ohlcv_fn=lambda s, tf, since, limit: self.ex.c.fetch_ohlcv(s, tf, since=since, limit=limit),
+                book_fn=lambda s: self.ex.c.fetch_order_book(s, 100),
+                funding_fn=lambda s: fetch_funding_history(self.ex.c, s, 75),
+                macro_fn=macro, leaders=[x for x in (leader, eth) if x])
         from .forecast import ki_active
         with self.__dict__.setdefault("_fc_lock", __import__("threading").Lock()):
             fc = self._forecaster.get(sym)

@@ -1846,10 +1846,10 @@ def _fc_frame(n, phi, seed):
 def test_forecast_learns_real_patterns_and_admits_randomness():
     from bot.forecast import build, path
 
-    fc = build(_fc_frame(3000, 0.6, 1))
+    fc = build(_fc_frame(6000, 0.6, 1))
     assert fc["useful"] and fc["hit_30m"] > 0.55 and fc["decision"] in ("LONG", "SHORT")
     assert fc["confidence"] > 0.5 and len(fc["nodes"]) == 7 and fc["nodes"][-1]["sec"] == 30 * 60
-    noise = build(_fc_frame(3000, 0.0, 2))
+    noise = build(_fc_frame(6000, 0.0, 9))
     assert not noise["useful"] and noise["confidence"] == 0.5     # Zufall: keine vorgetaeuschte Sicherheit
     assert noise["decision"] in ("LONG", "SHORT")                  # entscheidet sich trotzdem
     assert build(_fc_frame(200, 0.6, 3)) is None                   # zu wenig Daten
@@ -1870,8 +1870,9 @@ def test_forecast_follows_btc_for_altcoins():
     alt["close"] = 50 * np.exp(np.cumsum(r_alt))
     alt["open"], alt["high"], alt["low"] = np.r_[alt["close"].iloc[0], alt["close"].to_numpy()[:-1]], \
         alt["close"] * 1.001, alt["close"] * 0.999
-    assert not build(alt)["useful"]                  # ohne BTC: nicht vorhersagbar
-    assert build(alt, btc)["useful"]                 # mit BTC: Muster gefunden
+    z5 = lambda fc: fc["quality"][0]["z"]           # Wirkung zeigt sich in den naechsten 5 Minuten
+    assert z5(build(alt)) < 2                        # ohne BTC: nicht vorhersagbar
+    assert z5(build(alt, btc)) > 4                   # mit BTC: Muster deutlich gefunden
 
 
 def test_forecast_memory_log_and_bot_filter(tmp_path):
@@ -2087,3 +2088,49 @@ def test_speed_bitget_broker_orders():
     c.orders_[prot["tp_id"]].update(status="closed", average=60200.0)
     assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) == ("ziel", 60200.0, True)
     assert prot["sl_id"] not in c.plans                               # Stop nach dem Ziel storniert
+
+
+def test_boost_learns_interactions_linear_cannot():
+    from bot.forecast import Boost, _logit_fit, _logit_p
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(6000, 4))
+    y = ((X[:, 0] > 0) ^ (X[:, 1] > 0)).astype(float)          # Wechselwirkung (XOR)
+    flip = rng.random(6000) < 0.15
+    y[flip] = 1 - y[flip]
+    w = np.ones(6000)
+    tr, te = slice(0, 4500), slice(4500, None)
+    lin = (_logit_p(_logit_fit(X[tr], y[tr], w[tr]), X[te]) >= 0.5) == (y[te] == 1)
+    bst = (Boost().fit(X[tr], y[tr], w[tr]).proba(X[te]) >= 0.5) == (y[te] == 1)
+    assert lin.mean() < 0.6 and bst.mean() > 0.75
+
+
+def test_forecaster_learns_backfills_and_records_book(tmp_path):
+    from bot.forecast import CandleMemory, Forecaster
+
+    full = _fc_frame(4000, 0.6, 21)
+    state = {"n": 3000}
+
+    def candles(sym, tf, limit):
+        return full.iloc[state["n"] - min(limit, 1000):state["n"]].reset_index(drop=True)
+
+    def ohlcv(sym, tf, since, limit):                     # Bitget-Vergangenheit seitenweise
+        part = full[(full["ts"] >= since) & (full["ts"] < full["ts"].iloc[state["n"] - 1000])].head(limit)
+        return part.values.tolist()
+
+    book = {"bids": [[99.95, 5.0], [99.9, 5.0]], "asks": [[100.05, 1.0], [100.1, 1.0]]}
+    fx = Forecaster(candles, tmp_path, "paper", ohlcv_fn=ohlcv, book_fn=lambda s: book,
+                    background=False)
+    fx.memory.backfill = lambda sym, fn, days=70, ref_ms=None, _b=fx.memory.backfill: _b(sym, fn, 11, ref_ms)
+    out = fx.get("BTC/USDT:USDT")
+    assert out["ok"] and out["learning"]["bars"] > 2900               # 1000 frisch + Vergangenheit nachgeladen
+    assert out["learning"]["retrains"] == 1 and out["learning"]["since"]
+    assert out["model"]["kind"] in ("linear", "Baeume", "linear + Baeume")
+    state["n"] += 1                                                     # neue Kerze -> Orderbuch der alten gespeichert
+    fx.fresh.clear()
+    out2 = fx.get("BTC/USDT:USDT")
+    assert out2["learning"]["retrains"] == 2 and out2["learning"]["book_bars"] == 1
+    mem = CandleMemory(tmp_path / "ki")                                 # Neustart: Gedaechtnis + Orderbuch bleiben
+    df = mem.merge("BTC/USDT:USDT", full.iloc[state["n"] - 1000:state["n"] + 1].reset_index(drop=True))
+    assert df["book_imb"].notna().sum() == 1 and len(df) > 2900
+    assert mem.meta["BTC/USDT:USDT"]["retrains"] == 2

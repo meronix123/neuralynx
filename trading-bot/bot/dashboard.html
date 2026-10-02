@@ -1359,12 +1359,25 @@ function ghostCandles(d, last, step) {
   }
   return { out, band };
 }
+function learnLine(L, d) {
+  // Wie lange und womit die KI schon lernt
+  if (!L) return "";
+  const since = L.since ? Math.max(0, Date.now() / 1000 - L.since) : 0;
+  const dur = since >= 86400 ? `${Math.floor(since / 86400)} T ${Math.floor(since % 86400 / 3600)} Std` : `${Math.floor(since / 3600)} Std ${Math.floor(since % 3600 / 60)} min`;
+  const n = v => Number(v || 0).toLocaleString("de-DE");
+  const weeks = (L.weeks || []).map(w => `${w.week}: ${Math.round(w.hit * 100)} %`).join(", ");
+  const m = d && d.model ? ` &middot; Modell: ${d.model.kind}, ${d.features} Merkmale` : "";
+  const book = L.book_bars >= L.book_needed ? "Orderbuch: aktiv" : `Orderbuch: sammelt ${n(L.book_bars)}/${n(L.book_needed)}`;
+  return `<div class="sub" style="margin-top:2px">&#129504; Lernt seit <b>${dur}</b> &middot; Gedaechtnis <b>${n(L.bars)}</b> Kerzen (${String(L.data_days).replace(".", ",")} Tage)` +
+    `${m} &middot; ${n(L.retrains)}x neu gelernt &middot; ${n(L.checked)} Entscheidungen geprueft &middot; ${book}` +
+    `${weeks ? " &middot; Treffer je Woche: " + weeks : ""}${d && d.relearning ? " &middot; lernt gerade neu ..." : ""}</div>`;
+}
 function applyForecast(ser, d, last, tfSec, infoId) {
   const info = document.getElementById(infoId);
   if (!ser) return;
   const clear = () => { ser.ghost.setData([]); ser.hi.setData([]); ser.lo.setData([]); };
   if (!show.fc) { clear(); if (info) info.innerHTML = ""; return; }
-  if (!d || !d.ok || !last) { clear(); if (info) info.innerHTML = d && d.msg ? `KI: ${d.msg}` : "KI rechnet ..."; return; }
+  if (!d || !d.ok || !last) { clear(); if (info) info.innerHTML = (d && d.msg ? `KI: ${d.msg}` : "KI rechnet ...") + learnLine(d && d.learning); return; }
   const { out, band } = ghostCandles(d, last, Math.max(tfSec || 300, 60));
   ser.ghost.setData(out);
   ser.hi.setData([{ time: last.time, value: last.close }, ...band.map(b => ({ time: b.time, value: b.hi }))]);
@@ -1379,7 +1392,7 @@ function applyForecast(ser, d, last, tfSec, infoId) {
     `Treffer live ${q(lv.hit)} (${lv.n || 0}) &middot; Test ${q(d.hit_30m)} &middot; ` +
     `<span title="${d.bot_note || ""}">Bot: ${d.bot_uses ? "nutzt KI" : "noch nicht"}</span>` +
     (d.note ? ` &middot; <span style="color:#f59e0b">${d.note}</span>` : "") +
-    (!d.useful ? ' &middot; <span style="color:#f59e0b">keine klare Vorhersagekraft</span>' : "");
+    (!d.useful ? ' &middot; <span style="color:#f59e0b">keine klare Vorhersagekraft</span>' : "") + learnLine(d.learning, d);
 }
 function drawForecast() {
   applyForecast(fcBot, fcData[selected], lastBar, lastTfSec, "fc-info");
