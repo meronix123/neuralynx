@@ -133,7 +133,8 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
                 f[f"{name}_{col}"] = np.where(okp, pg[col].to_numpy()[pc], 0.0)
     if macro is not None and len(macro):
         from .macro import merge_macro
-        f["macro"] = np.asarray(merge_macro(df, macro, gold=gold), dtype=float)
+        bars = pd.DataFrame({"avail": df["ts"].astype("int64").to_numpy() + STEP_MIN * 60_000}, index=df.index)
+        f["macro"] = np.asarray(merge_macro(bars, macro, gold=gold), dtype=float)   # bekannt ab Kerzenschluss
     for col, name in (("wall_bid", "wall_bid"), ("wall_ask", "wall_ask")):          # Orderbuch-Waende (live)
         if col in df and df[col].notna().sum() >= MIN_BOOK_BARS:
             f[name] = df[col].astype(float).fillna(5.0)
@@ -588,6 +589,7 @@ class Forecaster:
         self.models: dict[str, tuple[int, dict]] = {}
         self.fresh: dict[str, tuple[float, pd.DataFrame]] = {}
         self.busy: set[str] = set()
+        self.errors: dict[str, str] = {}
         self.filled: set[str] = set()
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[float, object]] = {}
@@ -672,8 +674,10 @@ class Forecaster:
                 m["test_hit"] = dict(list(hist.items())[-60:])
                 self.memory.save_meta()
             self.models[sym] = (bar, fc)
+            self.errors.pop(sym, None)
         except Exception as e:  # noqa: BLE001
-            log.warning("KI %s lernen: %s", sym, e)
+            log.warning("KI %s lernen: %s", sym, e, exc_info=True)
+            self.errors[sym] = f"{type(e).__name__}: {e}"
             self.models.setdefault(sym, (bar, None))
         finally:
             self.busy.discard(sym)
@@ -711,8 +715,10 @@ class Forecaster:
         info = self.info(sym, df)
         fc = cached[1] if cached else None
         if fc is None:
-            return {"symbol": sym, "ok": False, "learning": info,
-                    "msg": "KI lernt gerade ..." if sym in self.busy else "Zu wenig Kursdaten - die KI sammelt noch"}
+            msg = ("KI lernt gerade ..." if sym in self.busy else
+                   f"Fehler beim Lernen ({self.errors[sym]}) - bitte melden" if sym in self.errors else
+                   "Zu wenig Kursdaten - die KI sammelt noch")
+            return {"symbol": sym, "ok": False, "learning": info, "msg": msg}
         price = float(df["close"].iloc[-1])
         if self.price_fn:
             try:

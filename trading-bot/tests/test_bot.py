@@ -2252,3 +2252,19 @@ def test_pattern_detection_is_causal_and_filters():
     assert pattern_blocks("long", -0.6, s) and not pattern_blocks("long", -0.4, s) and not pattern_blocks("short", -0.6, s)
     assert pattern_blocks("long", 0.1, {**s, "pattern_filter": "confirm"}) and not pattern_blocks("long", 0.4, {**s, "pattern_filter": "confirm"})
     assert not pattern_blocks("long", -1.0, {"pattern_filter": False})       # YAML: off = False
+
+
+def test_forecast_with_all_data_sources():
+    """KI lernt auch mit Funding, Makro-Ampel, Leitwaehrungen und Orderbuch-Spalten (wie live)."""
+    from bot.forecast import build
+
+    df = _fc_frame(3000, 0.6, 31)
+    df["book_imb"] = np.where(np.arange(len(df)) > 1500, 0.2, np.nan)
+    df["wall_bid"], df["wall_ask"] = 0.5, 0.8
+    funding = pd.DataFrame({"ts": df["ts"].iloc[::96].to_numpy(), "rate": 0.0001})
+    days = pd.date_range(pd.to_datetime(df["ts"].iloc[0], unit="ms") - pd.Timedelta(days=5), periods=30, freq="D")
+    macro = pd.DataFrame({"crypto": np.linspace(-0.5, 0.5, 30), "gold": 0.1}, index=days)
+    macro["avail"] = (macro.index - pd.Timestamp(0)) // pd.Timedelta(milliseconds=1)
+    fc = build(df, {"btc": df, "eth": df}, funding=funding, macro=macro)
+    assert fc is not None and fc["decision"] in ("LONG", "SHORT")
+    assert {"macro", "funding", "book_imb", "wall_bid", "btc_r1", "eth_r1", "m5_pattern_score"} <= set(fc["feature_names"])
