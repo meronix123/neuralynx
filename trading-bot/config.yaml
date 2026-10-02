@@ -161,6 +161,15 @@ fees:
 paper:
   start_equity: 35  # Startkapital in USDT fuer die Simulation
 
+speed:                 # Speed-Trading (Start in der Oberflaeche, Reiter Bot unter dem Chart)
+  entry_timeout_s: 20    # Limit-Einstieg nach 20 s ohne Ausfuehrung stornieren
+  max_hold_s: 300        # Speed-Position spaetestens nach 5 min schliessen
+  max_trades: 60         # hoechstens so viele Trades je Sitzung
+  max_loss_pct: 5.0      # Sitzung endet bei 5 % Verlust (vom Startkapital)
+  tp_atr: 1.0            # Ziel = 1 x 1-Minuten-ATR ...
+  sl_atr: 1.0            # Stop = 1 x 1-Minuten-ATR
+  min_tp_fee_x: 3.0      # ... aber mind. 3 x die Gebuehren
+  loop_s: 1.5            # alle 1,5 s pruefen
 dashboard:
   enabled: true
   port: 8050        # im Browser: http://localhost:8050

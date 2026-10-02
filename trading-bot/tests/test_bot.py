@@ -1,4 +1,5 @@
 import copy
+import time
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -1954,3 +1955,135 @@ def test_account_stats_and_history_paging(tmp_path, monkeypatch):
     acc.connect("k", "s", "p")
     v = acc.view()
     assert len(v["history"]) > 100 and v["stats"]["d1"]["trades"] > 100       # mehr als eine Seite
+
+
+def _speed_df(n, drift, seed=0, start=100.0):
+    rng = np.random.default_rng(seed)
+    close = start * np.exp(np.cumsum(drift + rng.normal(0, 0.0002, n)))
+    ts = 1_700_000_000_000 + np.arange(n) * 60_000
+    return pd.DataFrame({"ts": ts, "open": np.r_[close[0], close[:-1]], "high": close * 1.0005,
+                         "low": close * 0.9995, "close": close, "volume": np.full(n, 1000.0)})
+
+
+def test_speed_signal_follows_all_timeframes_and_book():
+    from bot.speed import levels, micro_signal
+
+    book_up = {"bids": [[99.9, 50]] * 20, "asks": [[100.1, 10]] * 20}
+    book_dn = {"bids": [[99.9, 10]] * 20, "asks": [[100.1, 50]] * 20}
+    up, dn = _speed_df(120, 0.0008), _speed_df(120, -0.0008)
+    assert micro_signal(up, book_up, 3)[0] == 1
+    assert micro_signal(dn, book_dn, 3)[0] == -1
+    assert micro_signal(up, book_dn, 1)[0] == 0          # vorsichtig: Orderbuch dagegen -> nichts
+    assert micro_signal(up.head(20), book_up)[0] == 0    # zu wenig Daten
+    p = {"maker": 0.0002, "tp_atr": 1.0, "sl_atr": 1.0, "min_tp_fee_x": 3.0}
+    sl, tp = levels(up, 100.0, 1, p)
+    assert sl < 100.0 < tp and (tp - 100.0) >= 3 * 100.0 * 0.0004 - 1e-9   # Ziel deckt Gebuehren mehrfach
+
+
+def test_speed_session_in_simulation():
+    from bot.speed import PaperBroker, SpeedTrader
+
+    feed = {"df": _speed_df(120, 0.0008), "last": 100.0}
+    book = {"bids": [[99.99, 50]] * 20, "asks": [[100.01, 10]] * 20}
+
+    def data(sym):
+        last = feed["last"]
+        return feed["df"], book, {"last": last, "bid": last - 0.01, "ask": last + 0.01}
+
+    sp = SpeedTrader(data, {"loop_s": 0.0})
+    broker = PaperBroker(lambda s: sp.market[s], sp.p)
+    sp.cur, sp.broker = {**sp.p, "margin_usdt": 5, "leverage": 10}, broker
+    sp.session = {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 300, "equity0": 35.0}
+    sp.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    sp.step("BTC/USDT:USDT")
+    s = sp.slots["BTC/USDT:USDT"]
+    assert s["state"] == "pending" and s["side"] == 1 and s["price"] == pytest.approx(99.99)
+    sp.step("BTC/USDT:USDT")
+    assert s["state"] == "pending"                       # Kurs noch nicht durch die Limit-Order gelaufen
+    feed["last"] = 99.98
+    sp.step("BTC/USDT:USDT")
+    assert s["state"] == "open" and s["entry"] == pytest.approx(99.99)
+    feed["last"] = s["tp"] + 0.01                        # Ziel durchlaufen
+    sp.step("BTC/USDT:USDT")
+    t = sp.trades[-1]
+    assert t["why"] == "ziel" and t["gross"] > 0 and t["net"] == pytest.approx(t["gross"] - t["fees"], abs=1e-5)
+    assert t["fees"] == pytest.approx((t["entry"] + t["exit"]) * t["qty"] * 0.0002, abs=1e-5)   # beide Seiten Maker
+    assert t["net"] > 0                                  # Ziel ist groesser als die Gebuehren
+    # zweiter Trade: Stop
+    feed["last"] = 100.5
+    sp.step("BTC/USDT:USDT")
+    feed["last"] = s["price"] - 0.01
+    sp.step("BTC/USDT:USDT")
+    feed["last"] = s["sl"] - 0.05
+    sp.step("BTC/USDT:USDT")
+    assert sp.trades[-1]["why"] == "stop" and sp.trades[-1]["net"] < 0
+    st = sp.status()
+    assert st["trades"] == 2 and st["wins"] == 1 and st["net"] == pytest.approx(sum(x["net"] for x in sp.trades), abs=1e-4)
+
+
+def test_speed_start_stop_and_wind_down():
+    from bot.speed import PaperBroker, SpeedTrader
+
+    feed = {"last": 100.0}
+    df = _speed_df(120, 0.0008)
+    book = {"bids": [[99.99, 50]] * 20, "asks": [[100.01, 10]] * 20}
+    sp = SpeedTrader(lambda s: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01,
+                                           "ask": feed["last"] + 0.01}), {"loop_s": 0.05})
+    broker = PaperBroker(lambda s: sp.market[s], sp.p)
+    with pytest.raises(ValueError, match="Bitget-Minimum"):
+        sp.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=0.2, leverage=10)
+    with pytest.raises(ValueError, match="mehr als verfuegbar"):
+        sp.start(["BTC/USDT:USDT"], broker, 3.0, "Simulation", margin_usdt=5, leverage=10)
+    sp.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=5, leverage=10, minutes=1)
+    assert sp.busy("BTC/USDT:USDT") and not sp.busy("ETH/USDT:USDT")
+    with pytest.raises(RuntimeError, match="laeuft bereits"):
+        sp.start(["ETH/USDT:USDT"], broker, 35.0, "Simulation")
+    time.sleep(0.3)
+    feed["last"] = 99.9                                  # Einstieg ausgefuehrt
+    time.sleep(0.3)
+    sp.stop()
+    sp.thread.join(5)
+    st = sp.status()
+    assert not st["active"] and st["trades"] == 1 and sp.trades[0]["why"] == "Sitzungsende"
+    assert sp.slots["BTC/USDT:USDT"]["state"] == "idle"
+
+
+def test_speed_bitget_broker_orders():
+    from bot.speed import DEFAULTS, BitgetBroker
+
+    class FS(FakeBitget):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.orders_ = {}
+
+        def create_order(self, sym, typ, side, amount, price=None, params=None):
+            oid = f"o{len(self.orders_) + 1}"
+            self.orders_[oid] = {"status": "open", "filled": 0, "price": price, "average": None}
+            self.calls.append(("create_order", sym, typ, side, amount, price, params))
+            return {"id": oid}
+
+        def fetch_order(self, oid, sym):
+            return self.orders_[oid]
+
+        def cancel_order(self, oid, sym, params=None):
+            if self._plan_cancel(oid, params):
+                return
+            self.orders_[oid]["status"] = "canceled"
+
+    c = FS()
+    b = BitgetBroker(c, DEFAULTS, "isolated")
+    oid = b.place_entry("BTC/USDT:USDT", 1, 0.001, 60000.0)
+    entry = c.calls[-1]
+    assert entry[2] == "limit" and entry[3] == "buy" and entry[6] == {"postOnly": True, "marginMode": "isolated"}
+    assert b.entry_status("BTC/USDT:USDT", oid)[0] == "open"
+    c.orders_[oid].update(status="closed", filled=0.001, average=60000.0)
+    assert b.entry_status("BTC/USDT:USDT", oid) == ("filled", 60000.0, 0.001)
+    prot = b.protect("BTC/USDT:USDT", 1, 0.001, 59900.0, 60200.0)
+    sl = c.plans[prot["sl_id"]]
+    assert sl["planType"] == "loss_plan" and sl["holdSide"] == "buy" and sl["size"] == "0.001"   # an die Position gebunden
+    tp = c.calls[-1]
+    assert tp[2] == "limit" and tp[3] == "sell" and tp[6] == {"reduceOnly": True, "marginMode": "isolated"}
+    assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) is None     # Position (0,004) noch da, Ziel offen
+    c.orders_[prot["tp_id"]].update(status="closed", average=60200.0)
+    assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) == ("ziel", 60200.0, True)
+    assert prot["sl_id"] not in c.plans                               # Stop nach dem Ziel storniert

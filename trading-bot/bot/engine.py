@@ -69,6 +69,11 @@ class Bot:
         self.notify = Notifier(cfg["telegram"]["token"], cfg["telegram"]["chat_id"])
         self.flow_cfg = cfg.get("flow", {})
         self.flow = FlowMonitor(self.flow_cfg)
+        from .speed import SpeedTrader
+        self.speed = SpeedTrader(self.speed_data, {**cfg.get("speed", {}),
+                                                   "maker": cfg["fees"].get("maker", cfg["fees"]["taker"]),
+                                                   "taker": cfg["fees"]["taker"], "slippage": cfg["fees"]["slippage"],
+                                                   "min_notional": cfg["fees"].get("min_notional", 5.0)})
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
         self.views: dict = {}
@@ -222,6 +227,9 @@ class Bot:
                 continue
             if sym in positions:
                 reasons[sym] = "Position offen"
+                continue
+            if self.speed.busy(sym):
+                reasons[sym] = "Speed-Trading laeuft in diesem Markt"
                 continue
             if sym in self.state["pending"]:
                 reasons[sym] = "Limit-Order wartet auf Ausfuehrung"
@@ -901,6 +909,24 @@ class Bot:
 
     CHART_TFS = ("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w")
 
+    def speed_data(self, sym: str):
+        """Fuer Speed-Trading: 1-Minuten-Kerzen (5 s zwischengespeichert), Orderbuch und Kurs - frisch."""
+        from .exchange import to_df
+        cache = self.__dict__.setdefault("_speed_c", {})
+        hit = cache.get(sym)
+        if not hit or time.time() - hit[0] > 5:
+            hit = (time.time(), to_df(self.ex.c.fetch_ohlcv(sym, "1m", limit=120)))
+            cache[sym] = hit
+        book = self.ex.c.fetch_order_book(sym, 50)
+        bid, ask = float(book["bids"][0][0]), float(book["asks"][0][0])
+        tk = self.ex.c.fetch_ticker(sym)
+        last = float(tk.get("last") or (bid + ask) / 2)
+        df = hit[1].copy()
+        df.loc[df.index[-1], ["close"]] = last                  # offene Kerze mit dem aktuellen Kurs
+        df.loc[df.index[-1], "high"] = max(float(df["high"].iloc[-1]), last)
+        df.loc[df.index[-1], "low"] = min(float(df["low"].iloc[-1]), last)
+        return df, book, {"last": last, "bid": bid, "ask": ask}
+
     def forecast(self, sym: str) -> dict:
         """KI-Prognose der naechsten 30 Minuten fuer einen Markt (siehe forecast.py)."""
         from .forecast import Forecaster
@@ -994,6 +1020,7 @@ class Bot:
             "block": block,
             "paused": STOP_FILE.exists(),
             "modes_ready": self._modes_ready(),
+            "speed": self.speed.status(),
             "signal_log": self.state.get("signal_log", [])[-40:],
             "sleep_warning": self.status.get("sleep_warning"),
             "last_error": self.last_error,

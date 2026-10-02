@@ -96,6 +96,45 @@ def switch_mode(bot, body: dict, restart=True, env_path=None) -> str:
     return f"Modus {MODE_NAMES[mode]} gespeichert - Bot startet neu (ca. 5 s), Seite laedt dann neu"
 
 
+def speed_start(bot, account, body: dict) -> str:
+    """Speed-Trading starten: Simulation oder verbundenes Bitget-Konto (Echtgeld nur mit JA)."""
+    from .speed import BitgetBroker, PaperBroker
+    syms = [s for s in body.get("symbols") or [] if s]
+    opts = {k: _num(body.get(k)) for k in ("minutes", "margin_usdt", "leverage", "aggressiveness")}
+    opts = {k: (int(v) if k in ("minutes", "leverage", "aggressiveness") else float(v)) for k, v in opts.items() if v}
+    sp = bot.speed
+    if body.get("target") == "account":
+        if not account or not account.connected:
+            raise RuntimeError("Erst im Reiter Bitget-Konto ein Konto verbinden")
+        if not account.demo and body.get("confirm") != "JA":
+            raise RuntimeError("Speed-Trading mit ECHTEM Geld nur mit Bestaetigung JA")
+        v = account.view()
+        busy = {p["symbol"] for p in v.get("positions") or []} | {t["symbol"] for t in account.tickets().active()}
+        busy |= set((getattr(bot, "state", None) or {}).get("meta", {}))
+        clash = [s for s in syms if s in busy]
+        if clash:
+            raise RuntimeError(f"In {', '.join(x.split(':')[0] for x in clash)} ist schon eine Position offen - "
+                               "Speed-Trading nur in freien Maerkten (sonst legt Bitget die Positionen zusammen)")
+        broker = BitgetBroker(account.client, sp.p, bot.cfg.get("margin_mode", "isolated"))
+        for s in syms:          # Hebel/Margin-Modus fuer die Speed-Maerkte setzen
+            for fn in (lambda: account.client.set_margin_mode(broker.mm, s, {"marginCoin": "USDT"}),
+                       lambda: account.client.set_leverage(opts.get("leverage", sp.p["leverage"]), s,
+                                                           {"holdSide": "long", "marginMode": broker.mm}),
+                       lambda: account.client.set_leverage(opts.get("leverage", sp.p["leverage"]), s,
+                                                           {"holdSide": "short", "marginMode": broker.mm})):
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001 - schon gesetzt
+                    pass
+        equity = float((v.get("balance") or {}).get("free") or 0)
+        label = "Testkonto" if account.demo else "ECHTES KONTO"
+    else:
+        broker = PaperBroker(lambda s: sp.market.get(s) or bot.speed_data(s)[2], sp.p)
+        equity = float(bot.cfg.get("paper", {}).get("start_equity", 35))
+        label = "Simulation"
+    return sp.start(syms, broker, equity, label, **opts)
+
+
 def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     """Alle Knoepfe der Oberflaeche. Rueckgabe: Meldung fuer den Nutzer (Fehler -> Exception)."""
     if path == "/api/bot/pause":
@@ -132,7 +171,13 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
         return account.cancel(str(body["id"]), body["symbol"], body.get("kind", "normal"))
     if path == "/api/account/tpsl":
         return account.set_tpsl(body["symbol"], _num(body.get("sl")), _num(body.get("tp")))
+    if path == "/api/speed/start":
+        return speed_start(bot, account, body)
+    if path == "/api/speed/stop":
+        return bot.speed.stop()
     if path == "/api/account/quick":
+        if getattr(bot, "speed", None) is not None and bot.speed.busy(body.get("symbol")):
+            raise RuntimeError("In diesem Markt laeuft gerade Speed-Trading - bitte warten oder Speed-Trading stoppen")
         st = getattr(bot, "state", None) or {}
         if (bot.cfg.get("mode") == account.active and
                 (body.get("symbol") in st.get("meta", {}) or body.get("symbol") in st.get("pending", {}))):
@@ -253,6 +298,8 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
                     self._json(200, bot.chart_data(q.get("symbol", [""])[0], q.get("tf", [""])[0]))
                 except Exception as e:  # noqa: BLE001 - z. B. Netz kurz weg
                     self._json(400, {"ok": False, "msg": str(e)})
+            elif self.path.startswith("/api/speed"):
+                self._json(200, bot.speed.status())
             elif self.path.startswith("/api/forecast"):
                 from urllib.parse import parse_qs, urlparse
                 q = parse_qs(urlparse(self.path).query)

@@ -121,6 +121,16 @@ Unter dem Chart steht ausserdem die **Live-Trefferquote**: Jede Prognose wird na
 dem echten Kurs verglichen. Erst wenn die ueber viele Prognosen deutlich ueber 50 % liegt, hat
 die Prognose einen Wert. Der Bot handelt NICHT nach dieser Prognose. Abschalten: Haken "KI-Prognose" im Chart.
 
+## Speed-Trading
+
+Im Reiter Bot unter dem Chart: Maerkte, Dauer (1-30 min), Einsatz, Hebel, Tempo und Konto
+(Simulation oder das im Reiter Bitget-Konto verbundene Konto) waehlen, Start. Der Bot handelt dann
+kleine Bewegungen: Signal aus 1/2/3/5-Minuten-Chart und Orderbuch, Einstieg per Post-Only-Limit-Order
+(Maker), Ziel als Limit-Order, Stop als an die Position gebundener Bitget-Stop, je Trade hoechstens
+5 Minuten. Nach Ablauf (oder "stoppen") werden offene Speed-Positionen geschlossen. Live-Anzeige mit
+Netto-Ergebnis NACH Gebuehren. Ehrlich: Bei so kleinen Bewegungen fressen Gebuehren viel - erst in
+der Simulation und auf dem Testkonto pruefen, ob netto etwas uebrig bleibt.
+
 ## Vom Handy aus ansehen (Fernzugriff)
 
 1. Auf dem PC: `python run.py fernzugriff` - Passwort festlegen (mind. 10 Zeichen, wird nur als Hash gespeichert).
