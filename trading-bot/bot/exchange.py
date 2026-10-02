@@ -194,21 +194,25 @@ def place_pos_tpsl(client, symbol: str, side: str, sl: float | None, tp: float |
         raise RuntimeError(f"Stop/Ziel konnte nicht gesetzt werden: {e}") from e
 
 
-def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, size: float) -> str:
+def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, size: float,
+                    margin_mode: str = "isolated") -> str:
     """Take-Profit (plan='profit_plan') oder Stop-Loss ('loss_plan') fuer GENAU `size` der Position.
 
     Ziel: nur-reduzierende LIMIT-Order zum Zielpreis (liegt im Orderbuch, eindeutig, Maker-Gebuehr).
     Stop: nur-reduzierender Ausloese-Auftrag (Plan-Order, Markt bei Ausloesung) - liegt immer auf der
     Verlustseite, die Ausloese-Richtung ist damit eindeutig. Beide schliessen hoechstens `size`."""
     close_side = "sell" if side == "long" else "buy"
+    # marginMode MUSS zur Position passen: ohne Angabe nimmt ccxt "cross" - bei einer isolierten
+    # Position ist das fuer Bitget eine ANDERE Position, der Auftrag wuerde nachkaufen statt schliessen.
+    mm = {"reduceOnly": True, "marginMode": margin_mode or "isolated"}
     qty = float(client.amount_to_precision(symbol, size))
     px = float(client.price_to_precision(symbol, trigger))
     try:
         if plan == "profit_plan":
-            o = client.create_order(symbol, "limit", close_side, qty, px, {"reduceOnly": True})
+            o = client.create_order(symbol, "limit", close_side, qty, px, dict(mm))
         else:
             o = client.create_order(symbol, "market", close_side, qty, None,
-                                    {"triggerPrice": px, "reduceOnly": True, "triggerType": "mark_price"})
+                                    {**mm, "triggerPrice": px, "triggerType": "mark_price"})
         return str(o.get("id") or "")
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {e}") from e

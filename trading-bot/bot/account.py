@@ -24,6 +24,7 @@ PROFILE_KEYS = {
 }
 PROFILE_NAMES = {"live": "Echtkonto", "demo": "Testkonto"}
 HISTORY_DAYS = 30
+PROT_V = 3          # Version der Stop/Ziel-Auftraege; aeltere werden automatisch neu gesetzt
 REFRESH_S = 5
 MIN_NOTIONAL = 5.0   # Bitget: jede Order mind. 5 USDT Positionswert
 
@@ -399,7 +400,7 @@ class Account:
         o = c.create_order(symbol, "limit" if limit else "market", "buy" if side == "long" else "sell", qty,
                            ref if limit else None, {"marginMode": mm, "hedged": is_hedged(c)})
         base = dict(symbol=symbol, side=side, amount=qty, leverage=lev, sl_pct=sl_pct, tp_pct=tp_pct,
-                    opened_ms=int(time.time() * 1000))
+                    opened_ms=int(time.time() * 1000), margin_mode=mm)
         if limit:
             sign = 1 if side == "long" else -1
             tk = self.tickets().add(**base, status="pending", order_id=str(o.get("id")), entry=ref,
@@ -430,6 +431,12 @@ class Account:
             log.debug("Hebel %s: %s", symbol, e)
         return None
 
+    def _tk_mm(self, tk: dict) -> str:
+        """Margin-Modus der echten Position (isolated/cross) - Stop/Ziel muessen genau dazu passen."""
+        mm = getattr(self, "_pos_mm", {}).get((tk["symbol"], tk["side"])) or tk.get("margin_mode") \
+            or self.cfg.get("margin_mode", "isolated")
+        return "cross" if str(mm).startswith("cross") else "isolated"
+
     def _protect_ticket(self, c, tk: dict) -> str:
         """Stop und Ziel fuer genau diese Einzel-Position setzen (ab dem echten Einstiegspreis)."""
         sign = 1 if tk["side"] == "long" else -1
@@ -438,11 +445,13 @@ class Account:
         err = []
         tk["sl_id"] = tk["tp_id"] = ""
         try:
-            tk["sl_id"] = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", tk["sl"], tk["amount"])
+            tk["sl_id"] = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", tk["sl"], tk["amount"],
+                                           self._tk_mm(tk))
         except Exception as e:  # noqa: BLE001
             err.append(str(e))
         try:
-            tk["tp_id"] = place_size_tpsl(c, tk["symbol"], tk["side"], "profit_plan", tk["tp"], tk["amount"])
+            tk["tp_id"] = place_size_tpsl(c, tk["symbol"], tk["side"], "profit_plan", tk["tp"], tk["amount"],
+                                           self._tk_mm(tk))
         except Exception as e:  # noqa: BLE001
             err.append(str(e))
         tickets = self.tickets()
@@ -459,6 +468,7 @@ class Account:
             tickets.close(tk, None, "Stop nicht setzbar - sofort geschlossen")
             raise RuntimeError("Stop-Loss konnte nicht gesetzt werden - Position sofort wieder geschlossen. " + "; ".join(err))
         tk["status"] = "open"
+        tk["prot_v"] = PROT_V
         tickets.save()
         msg = (f"#{tk['id']} {tk['side'].upper()} {tk['amount']:g} {tk['symbol'].split(':')[0]} @ ~{tk['entry']:.6g} "
                f"| Stop {tk['sl']:.6g} | Ziel {tk['tp']:.6g}")
@@ -546,7 +556,7 @@ class Account:
                 raise ValueError(f"Ziel {price:.6g} liegt schon hinter dem Kurs {last:.6g}")
             plan = "loss_plan" if kind == "sl" else "profit_plan"
             try:
-                new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, price, tk["amount"])
+                new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, price, tk["amount"], self._tk_mm(tk))
             except Exception as e:  # noqa: BLE001
                 raise RuntimeError(f"{e} - der bisherige {'Stop' if kind == 'sl' else 'Ziel'} "
                                    f"{tk[kind]:.6g} bleibt aktiv") from e
@@ -575,7 +585,7 @@ class Account:
         if (sign == 1 and last <= be) or (sign == -1 and last >= be):
             raise RuntimeError("Kurs ist noch nicht ueber dem Einstand - Stop dort wuerde sofort ausloesen")
         try:
-            new_id = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", be, tk["amount"])
+            new_id = place_size_tpsl(c, tk["symbol"], tk["side"], "loss_plan", be, tk["amount"], self._tk_mm(tk))
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"{e} - der bisherige Stop {tk['sl']:.6g} bleibt aktiv") from e
         if tk.get("sl_id"):
@@ -613,6 +623,7 @@ class Account:
         triggers = {o["id"] for o in orders if o.get("kind") == "plan"}
         open_ids = old_style | triggers | {o["id"] for o in orders if o.get("kind") == "normal"}
         size = {}
+        self._pos_mm = {(p["symbol"], p.get("side")): p.get("margin_mode") for p in positions if p.get("margin_mode")}
         for p in positions:
             k = (p["symbol"], p.get("side"))
             size[k] = size.get(k, 0) + (p["amount"] or 0)
@@ -644,22 +655,31 @@ class Account:
                 tk.update(status="open", exit=None, pnl=None, why=None, closed_ms=None)
                 tks.save()
                 log.info("Einzel-Position #%s wieder geoeffnet (Stop/Ziel liegen noch auf Bitget)", tk["id"])
-        # Alte Stops/Ziele (Bitget-TP/SL-Art, wirkte teils auf die ganze Position) gegen
-        # nur-reduzierende Ausloese-Auftraege mit genau der Ticket-Menge tauschen
+        # Stops/Ziele aelterer Versionen einmal neu setzen (alte Bitget-TP/SL-Art wirkte teils auf die ganze
+        # Position; Auftraege ohne passenden Margin-Modus kauften bei isolierter Position NACH statt zu schliessen)
         for tk in tks.open():
+            wrong = tk.get("tp_id") in triggers or tk.get("sl_id") in old_style    # falsche Auftragsart
+            if (tk.get("prot_v") == PROT_V and not wrong) or size.get((tk["symbol"], tk["side"]), 0) <= 0:
+                continue
             for kind, plan in (("sl", "loss_plan"), ("tp", "profit_plan")):
                 oid = tk.get(f"{kind}_id")
-                wrong = old_style | (triggers if kind == "tp" else set())   # Ziel als Ausloese-Auftrag = falsch
-                if oid and oid in wrong and size.get((tk["symbol"], tk["side"]), 0) > 0:
+                try:
+                    new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, tk[kind], tk["amount"], self._tk_mm(tk))
+                except Exception as e:  # noqa: BLE001 - alter Auftrag bleibt dann bestehen
+                    log.warning("Einzel-Position #%s %s neu setzen: %s", tk["id"], kind.upper(), e)
+                    break
+                if oid:
                     try:
-                        new_id = place_size_tpsl(c, tk["symbol"], tk["side"], plan, tk[kind], tk["amount"])
                         cancel_plan(c, tk["symbol"], oid)
-                        tk[f"{kind}_id"] = new_id
-                        open_ids = (open_ids - {oid}) | {new_id}
-                        tks.save()
-                        log.info("Einzel-Position #%s: %s auf Teil-Auftrag umgestellt", tk["id"], kind.upper())
-                    except Exception as e:  # noqa: BLE001 - alter Auftrag bleibt dann bestehen
-                        log.warning("Einzel-Position #%s %s umstellen: %s", tk["id"], kind.upper(), e)
+                    except Exception as e:  # noqa: BLE001 - evtl. schon weg
+                        log.info("Einzel-Position #%s alter %s %s: %s", tk["id"], kind.upper(), oid, e)
+                tk[f"{kind}_id"] = new_id
+                open_ids = (open_ids - {oid}) | {new_id}
+                log.info("Einzel-Position #%s: %s neu gesetzt (%s, nur reduzierend)", tk["id"], kind.upper(),
+                         self._tk_mm(tk))
+            else:
+                tk["prot_v"] = PROT_V
+            tks.save()
         need: dict = {}
         for tk in tks.open():
             k = (tk["symbol"], tk["side"])

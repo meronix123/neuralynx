@@ -899,7 +899,8 @@ class FakeBitget:
         kind = "loss_plan" if params.get("triggerType") == "mark_price" else "profit_plan"
         self.plans[oid] = {"symbol": sym.split("/")[0] + "USDT", "sym": sym, "planType": kind, "side": side,
                            "kind": "normal" if params.get("limit") else "plan",
-                           "triggerPrice": params["triggerPrice"], "size": amount, "reduceOnly": params.get("reduceOnly")}
+                           "triggerPrice": params["triggerPrice"], "size": amount, "reduceOnly": params.get("reduceOnly"),
+                           "marginMode": params.get("marginMode")}
         self.calls.append(("plan", kind, params["triggerPrice"], amount))
         return {"id": oid}
 
@@ -1799,6 +1800,8 @@ def test_old_ticket_stops_are_migrated_to_reduce_only_triggers(tmp_path, monkeyp
     assert p["side"] == "sell" and p["size"] == 0.001 and p["reduceOnly"] and float(p["triggerPrice"]) == 59000.0
     assert ("cancel_order", "77", "BTC/USDT:USDT", {"trigger": True, "planType": "normal_plan"}) in c.calls
     assert p["kind"] == "plan"                                        # Stop = Ausloese-Auftrag
+    # Margin-Modus der echten Position (isoliert) - sonst kauft Bitget nach statt zu schliessen
+    assert all(x["marginMode"] == "isolated" for x in c.plans.values())
     # Ziel, das noch als Ausloese-Auftrag liegt (feuerte bei Bitget sofort) -> wird zur Limit-Order
     c.plans["t9"] = {"symbol": "BTCUSDT", "sym": "BTC/USDT:USDT", "planType": "profit_plan", "side": "sell",
                      "kind": "plan", "triggerPrice": 63000.0, "size": 0.001, "reduceOnly": True}
