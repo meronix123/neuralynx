@@ -19,8 +19,8 @@ symbols:
 
 # Auf Wunsch 1h-Einstieg (Trend 4h, Orientierung bis 1 Woche). Achtung: Im Jahrestest lag 1h
 # im Schnitt leicht im Minus, 4h im Plus. Deshalb erst im Paper-Modus beobachten!
-timeframe: 1h          # feste Einstiegs-Zeiteinheit (bei tf_select: adaptive nur fuer den Chart)
-trend_timeframe: 4h    # Trendfilter
+timeframe: 2h          # Einstiegs-Zeiteinheit (Strategie-Tester 180 Tage: 2h Trend im Test PF 1,69)
+trend_timeframe: 1d    # Trendfilter (zu 2h gehoert der Tagestrend)
 
 # Automatische Wahl der Zeiteinheit:
 #   adaptive = der Bot beobachtet alle unten genannten Zeiteinheiten gleichzeitig, fuehrt fuer jede ein
@@ -29,7 +29,7 @@ trend_timeframe: 4h    # Trendfilter
 #   fixed    = nur "timeframe" oben
 # Je Markt immer nur EINE Position. Trend-Zeiteinheit: 5m/15m->1h, 30m/1h->4h, 2h-6h->1 Tag, 12h/1d->1 Woche.
 # Die RICHTUNG wird zusaetzlich immer auf allen Ebenen von 1 Minute bis 1 Woche geprueft.
-tf_select: adaptive
+tf_select: fixed       # fest 2h (Test 10/2026: 15m/30m/1h verloren, auto-Wahl blieb im Minus)
 timeframes: [15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d]   # 5m nur nach Test: python run.py optimize --alle-zeiten
 leverage: 10
 margin_mode: isolated  # isolated = maximaler Verlust pro Position begrenzt
@@ -48,15 +48,15 @@ risk:
 strategy:
   ema_fast: 21
   ema_slow: 50
-  trend_ema_fast: 50
-  trend_ema_slow: 200
+  trend_ema_fast: 20
+  trend_ema_slow: 50
   rsi_period: 14
   rsi_long_trigger: 40     # Ausloeser Long: RSI kreuzt nach Ruecksetzer ueber 40
   rsi_short_trigger: 60    # Ausloeser Short: RSI kreuzt nach Anstieg unter 60
   rsi_overbought: 70
   rsi_oversold: 30
   adx_min: 20              # Trendstaerke
-  min_score: 4             # Punkte (von 6) fuer einen Einstieg. 3 = mehr Trades, 5 = weniger
+  min_score: 5             # Punkte (von 6) fuer einen Einstieg (Test 10/2026: 5 besser als 4)
   atr_period: 14
   # Welche Strategien darf der Bot je nach Marktlage einsetzen?
   #   trend    = Trend-Ruecksetzer (bei klarem Trend)
@@ -151,7 +151,7 @@ context:
   fng_extreme_high: 85     # ... ueber 85 -> Risiko pro Trade halbieren
 
 fees:
-  tp_order: limit      # Take-Profit als liegende Limit-Order (Maker 0,02 %) statt Markt-Order (0,06 %)
+  tp_order: market     # Take-Profit als Markt-Order (so im Strategie-Tester geprueft)
   entry_order: limit   # market = sofort (Taker) | limit = Limit-Order zum Signalkurs (Maker, guenstiger)
   maker: 0.0002    # Bitget Futures Maker-Gebuehr (Limit-Orders)
   taker: 0.0006    # Bitget Futures Taker-Gebuehr
