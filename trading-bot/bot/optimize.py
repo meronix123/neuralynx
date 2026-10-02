@@ -411,3 +411,112 @@ def all_timeframes_cli(base: dict, days: int) -> None:
     for _, r in res.iterrows():
         print(f"  {r['zeiteinheiten']:<15} -> {r['test_je_zeiteinheit']}")
     print(f"\nAlle Ergebnisse: {out}")
+
+
+# ---------------------------------------------------------------------------
+# Diagnose: Warum handelt der Bot nicht? Jeden Filter einzeln abschalten und ehrlich vergleichen.
+DIAG_VARIANTS = {
+    "aktuell (config.yaml)": {},
+    "ohne BTC-Leitfilter": {"strategy": dict(leader_filter=False)},
+    "ohne Zeitebenen-Filter": {"strategy": dict(mtf_filter=False)},
+    "Zeitebenen-Filter lockerer (0,1)": {"strategy": dict(mtf_min=0.1)},
+    "ohne Funding-Filter": {"strategy": dict(funding_filter=False)},
+    "ohne Makro-Filter": {"strategy": dict(macro_filter=False)},
+    "ohne Order-Block-Filter": {"strategy": dict(ob_filter="off")},
+    "ohne Zeiteinheiten-Sperre": {"tf_select": "all"},
+    "Zeiteinheiten-Sperre PF 1,0": {"strategy": dict(tf_min_pf=1.0)},
+    "ohne Strategie-Gesundheit": {"strategy": dict(health_window=0)},
+    "Mindest-Punkte 3 statt 4": {"strategy": dict(min_score=3), "_prepare": True},
+    "Trend + Ausbruch": {"strategy": dict(strategies=["trend", "breakout"]), "_prepare": True},
+    "alle Zusatzfilter aus": {"strategy": dict(leader_filter=False, mtf_filter=False, funding_filter=False,
+                                               macro_filter=False, ob_filter="off", health_window=0),
+                              "tf_select": "all"},
+}
+SKIP_NAMES = {"leader": "BTC-Leitfilter", "mtf": "Zeitebenen", "funding": "Funding", "macro": "Makro",
+              "orderblock": "Order Block", "zeiteinheit": "Zeiteinheiten-Sperre", "health": "Strategie-Gesundheit",
+              "ml": "ML-Filter"}
+
+
+def _apply(base: dict, upd: dict) -> dict:
+    cfg = copy.deepcopy(base)
+    for k, v in upd.items():
+        if k == "_prepare":
+            continue
+        if isinstance(v, dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
+    return cfg
+
+
+def diagnose(base: dict, data: dict, rules: dict, base_tf: str, funding=None, macro=None,
+             recent_days: int = 14) -> tuple[pd.DataFrame, dict]:
+    all_ts = sorted(set().union(*[set(df["ts"]) for df in data.values()]))
+    split = all_ts[int(len(all_ts) * 2 / 3)]
+    recent = all_ts[-1] - recent_days * 86_400_000
+    prep0 = prepare_multi(base, data, base_tf, funding, macro)
+    rows, now = [], {}
+    for name, upd in DIAG_VARIANTS.items():
+        cfg = _apply(base, upd)
+        prep = prepare_multi(cfg, data, base_tf, funding, macro) if upd.get("_prepare") else prep0
+        train = simulate(cfg, prep, rules, end_ts=split)
+        test = simulate(cfg, prep, rules, start_ts=split)
+        last = simulate(cfg, prep, rules, start_ts=recent)
+        if not now:
+            now = {"signale": last["signals"], "trades": last["trades"], "aussortiert": last["skipped"],
+                   "tage": recent_days}
+        rows.append({
+            "variante": name,
+            "train_trades": train["trades"], "train_pf": round(train.get("profit_factor", 0), 2),
+            "test_trades": test["trades"], "test_pf": round(test.get("profit_factor", 0), 2),
+            "test_rendite_%": round(test.get("return_pct", 0), 1),
+            "test_max_rueckgang_%": round(test.get("max_drawdown_pct", 0), 1),
+            "test_trades_pro_tag": round(test.get("trades_per_day", 0), 2),
+            f"letzte_{recent_days}_tage_trades": last["trades"],
+        })
+        print(f"\r  Variante {len(rows)}/{len(DIAG_VARIANTS)}", end="", flush=True)
+    print()
+    return pd.DataFrame(rows), now
+
+
+def diagnose_cli(base: dict, days: int) -> None:
+    from .tfselect import active_tfs
+    base_tf = min(active_tfs(base), key=lambda t: TF_MS[t])
+    print(f"Diagnose: {days} Tage, Zeiteinheiten {', '.join(active_tfs(base))} - warum (k)ein Trade?")
+    client = make_client()
+    symbols = resolve_symbols(client, base["symbols"])
+    data, rules = {}, {}
+    for sym in symbols:
+        print(f"Lade {days} Tage {sym} ({base_tf}) ...")
+        data[sym] = fetch_history(client, sym, base_tf, days)
+        m = client.market(sym)
+        rules[sym] = (float(m["precision"]["amount"] or 0), float(m["limits"]["amount"]["min"] or 0))
+    data = usable(data)
+    res, now = diagnose(base, data, rules, base_tf, load_funding(client, list(data), days), load_macro(days))
+    DATA.mkdir(exist_ok=True)
+    out = DATA / "diagnose.csv"
+    res.to_csv(out, index=False, sep=";", decimal=",")
+    print(f"\n===== LETZTE {now['tage']} TAGE mit den aktuellen Einstellungen =====")
+    print(f"Signale der Strategie: {now['signale']}  ->  Trades: {now['trades']}")
+    blocked = sorted(((v, k) for k, v in now["aussortiert"].items() if v), reverse=True)
+    for v, k in blocked:
+        print(f"  aussortiert durch {SKIP_NAMES.get(k, k):<22} {v:>4}")
+    if not now["signale"]:
+        print("  -> Die Strategie selbst hat kein Signal geliefert (Mindest-Punkte, Trend, Volatilitaet, Volumen).")
+    pd.set_option("display.width", 250)
+    pd.set_option("display.max_columns", 30)
+    print("\n===== JEDEN FILTER EINZELN ABSCHALTEN (TEST = letztes Drittel, nie gesehen) =====")
+    print(res.to_string(index=False))
+    cur = res.iloc[0]
+    good = res[(res.index > 0) & (res.test_trades >= cur.test_trades * 1.3) & (res.test_pf >= max(1.1, cur.test_pf * 0.9))
+               & (res.train_pf >= 1.0)]
+    print("\nEmpfehlung:")
+    if len(good):
+        for _, r in good.sort_values("test_pf", ascending=False).iterrows():
+            print(f"  {r.variante}: {r.test_trades} statt {cur.test_trades} Trades im Test, PF {r.test_pf} "
+                  f"(aktuell {cur.test_pf})")
+        print("  -> Diese Aenderungen bringen mehr Trades, ohne dass das Ergebnis im Test deutlich schlechter wird.")
+    else:
+        print("  Kein einzelner Filter bringt mehr Trades, ohne das Ergebnis im Test zu verschlechtern.")
+        print("  Weniger Trades sind dann gewollt: Die Filter halten den Bot aus schlechten Marktphasen raus.")
+    print(f"\nAlle Ergebnisse: {out}  (mit Excel oeffnen)")

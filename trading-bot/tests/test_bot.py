@@ -1866,3 +1866,21 @@ def test_forecast_log_checks_predictions_after_30_minutes(tmp_path):
     lg.resolve("X", pd.DataFrame({"ts": [(t0 + 25 * 60) * 1000], "close": [100.8]}))
     assert lg.stats("X") == {"n": 1, "hit": 1.0, "in_band": 1.0}
     assert ForecastLog(tmp_path / "fc.json").stats("X")["n"] == 1   # ueberlebt Neustart
+
+
+def test_diagnose_compares_each_filter():
+    from bot import optimize
+
+    saved = optimize.DIAG_VARIANTS
+    try:
+        optimize.DIAG_VARIANTS = {k: saved[k] for k in ("aktuell (config.yaml)", "ohne Order-Block-Filter",
+                                                        "alle Zusatzfilter aus")}
+        cfg = copy.deepcopy(CFG)
+        cfg["strategy"].update(strategies=["trend", "range", "breakout"], ob_filter="confirm")
+        data = {"AAA/USDT:USDT": synthetic(6000, 1)}
+        res, now = optimize.diagnose(cfg, data, {"AAA/USDT:USDT": (0.0001, 0.0001)}, base_tf="5m", recent_days=7)
+        assert list(res.variante) == list(optimize.DIAG_VARIANTS)
+        assert now["signale"] >= now["trades"] and now["aussortiert"]["orderblock"] > 0
+        assert res.iloc[1]["test_trades"] > res.iloc[0]["test_trades"]   # Filter aus -> mehr Trades
+    finally:
+        optimize.DIAG_VARIANTS = saved

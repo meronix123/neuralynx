@@ -185,6 +185,16 @@ Vergleicht auf 365 Tagen (15m-Daten): fest 15m / 30m / 1h / 2h / 4h, alle gleich
 und die automatische Wahl (verschieden streng). Zeigt, wie viele Trades pro Tag jeder
 Modus macht und ob er im Test-Zeitraum Geld verdient. Ergebnisse in `data\zeiteinheiten.csv`.
 
+## Diagnose: Warum handelt der Bot nicht?
+
+```
+python run.py diagnose            # letzte 90 Tage (dauert einige Minuten)
+```
+Zeigt fuer die letzten 14 Tage, wie viele Signale die Strategie hatte und welcher Filter wie viele
+davon aussortiert hat. Danach wird jeder Filter einzeln abgeschaltet und ehrlich verglichen
+(Lernen mit den ersten 2/3, Pruefen am letzten Drittel): mehr Trades - aber auch noch profitabel?
+Am Ende steht eine Empfehlung. Ergebnis auch in `data/diagnose.csv`.
+
 ## Schritt 2: Paper-Modus (echte Kurse, Spielgeld)
 
 In `config.yaml` steht `mode: paper`. Starten:

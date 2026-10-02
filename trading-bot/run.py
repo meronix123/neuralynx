@@ -168,7 +168,7 @@ def signals(mode: str = "paper") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "optimize", "report", "signale", "fernzugriff", "modus", "check", "bot"])
+    ap.add_argument("command", choices=["backtest", "optimize", "diagnose", "report", "signale", "fernzugriff", "modus", "check", "bot"])
     ap.add_argument("option", nargs="?", default="")
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
@@ -196,6 +196,11 @@ def main() -> None:
             compare_cli(cfg, args.days or 365)
             return
         optimize_cli(cfg, args.days or (120 if args.fast else 365), fast=args.fast)
+        return
+
+    if args.command == "diagnose":
+        from bot.optimize import diagnose_cli
+        diagnose_cli(cfg, args.days or 90)
         return
 
     if args.command == "modus":

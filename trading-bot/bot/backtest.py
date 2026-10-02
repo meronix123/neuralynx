@@ -143,6 +143,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     model, examples, trained_at = SignalModel(), list(seed_examples or []), 0
     strat_pnls: dict[str, list[float]] = {}
     health_skips: dict[str, int] = {}
+    n_signals = 0
     skipped = {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "orderblock": 0, "zeiteinheit": 0,
                "health": 0, "ml": 0}
 
@@ -281,6 +282,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                     raise_stop(p, new_sl)
             # 4) neues Signal -> Filter -> Einstieg im naechsten Bar
             elif sig != 0 and sym not in pos and sym not in pending:
+                n_signals += 1
                 side = "long" if sig == 1 else "short"
                 strat = d["strategy"][i]
                 if use_leader and "leader_regime" in d and leader_blocks(side, d["leader_regime"][i]):
@@ -325,6 +327,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
 
     res = summarize(trades, curve, start_equity)
     res["skipped"] = skipped
+    res["signals"] = n_signals
     res["examples"] = examples
     days = (timeline[-1] - timeline[0]) / 86_400_000 if len(timeline) > 1 else 0
     res["trades_per_day"] = res["trades"] / days if days else 0.0
