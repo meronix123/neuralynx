@@ -114,6 +114,10 @@
   .speedform select, .speedform input { width:auto; padding:3px 6px; }
   .spsym { display:inline-flex; gap:3px; align-items:center; margin-right:4px; cursor:pointer; }
   .sprun { margin-top:8px; font-size:13px; line-height:1.6; } .sprun table { font-size:12px; }
+  .patwin { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
+  .patwin .pwhead { margin-bottom:4px; } .patwin .pwsum { font-size:13px; margin-bottom:6px; }
+  .patwin td { text-align:left; font-size:12px; } .patwin th { text-align:left; }
+  .patwin td:last-child { min-width:240px; }
   .kibadge { display:inline-block; padding:1px 8px; border-radius:6px; font-weight:800; border:1px solid; }
   .kibadge.up { color:#22c55e; border-color:#22c55e; } .kibadge.down { color:#ef4444; border-color:#ef4444; }
   .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
@@ -320,10 +324,9 @@
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-ob" onchange="toggleShow('ob')"> <i style="background:#22c55e;opacity:.6"></i><i style="background:#ef4444;opacity:.6"></i>Order Blocks (Ober-/Unterkante)</label>
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-walls" onchange="toggleShow('walls')"> <i style="background:#38bdf8"></i><i style="background:#fb923c"></i>Orderbuch-Waende</label>
       <label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#94a3b8"></i>KI-Prognose 30 min</label>
-      <label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-pat" onchange="toggleShow('pat')"> &#9679; Chart-/Kerzen-Muster</label>
     </div>
-    <div id="pat-info" class="fcinfo"></div>
     <div id="fc-info" class="fcinfo"></div>
+    <div id="pat-win" class="patwin"></div>
     <div class="speed">
       <div class="speedhead"><b>&#9889; Speed-Trading</b> <small class="sub">kleine Bewegungen auf 1/2/3/5 min, Limit-Orders (Maker) - laeuft, bis du Aus drueckst</small></div>
       <div class="speedform">
@@ -899,8 +902,7 @@ function render() {
   lines.forEach(l => candles.removePriceLine(l)); lines = [];
   document.getElementById("cb-ob").checked = show.ob; document.getElementById("cb-walls").checked = show.walls;
   document.querySelectorAll(".cb-fc").forEach(cb => cb.checked = show.fc);
-  document.querySelectorAll(".cb-pat").forEach(cb => cb.checked = show.pat);
-  patInfo("pat-info", src.patterns);
+  patWindow("pat-win", src.patterns, tf);
   renderSpeed();
   drawForecast();
   const p = s.position, plan = s.snapshot.plan;
@@ -923,7 +925,7 @@ function render() {
       color: "#3b82f6", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: t.side },
     { time: Math.floor(t.closed_ms / 1000 / tfSec) * tfSec + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
       shape: "circle", text: (t.pnl >= 0 ? "+" : "") + fmt(t.pnl) },
-  ]).concat(patMarkers(src.patterns)).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
+  ]).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
   candles.setMarkers(markers);
 
   document.getElementById("think").innerHTML = thinking(s);
@@ -1249,8 +1251,7 @@ async function pollAccChart() {
   const ser = arr => bars.map((c, i) => arr && arr[i] != null ? { time: c.time, value: arr[i] } : null).filter(Boolean);
   accInd.f.setData(ser(accChartData.ema_fast)); accInd.s.setData(ser(accChartData.ema_slow)); accInd.v.setData(ser(accChartData.vwap));
   accZones = (accChartData.order_blocks || []).map(z => ({ ...z, time: Math.round(z.from_ts / 1000) + TZ }));
-  accSeries.setMarkers(patMarkers(accChartData.patterns).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time));
-  patInfo("acc-pat-info", accChartData.patterns);
+  patWindow("acc-pat-win", accChartData.patterns, accTf);
   setTimeout(drawBoxes, 0);
   document.getElementById("acc-chart-title").textContent = `${accSym.split(":")[0]} - ${TF_NAME[accTf] || accTf}`;
   drawAccLines();
@@ -1467,24 +1468,23 @@ function ghostCandles(d, last, step) {
   }
   return { out, band };
 }
-function patMarkers(pats) {
-  // erkannte Muster als kleine Markierungen an der Kerze (gruen = bullisch, rot = baerisch)
-  if (!show.pat || !pats) return [];
-  // einfache Kerzen-Muster nur als kleiner Punkt, beschriftet nur die aussagekraeftigen (uebersichtlich)
-  return pats.slice(1).map(p => ({ time: p.time + TZ, position: p.dir > 0 ? "belowBar" : "aboveBar",
-    color: p.dir > 0 ? "#22d39a" : p.dir < 0 ? "#ff5c7a" : "#94a3b8", shape: p.kind === "chart" ? "square" : "circle",
-    size: p.strong ? 1 : 0.5, text: p.strong ? p.name : "" }));
-}
-function patInfo(id, pats) {
+function patWindow(id, ex, tf) {
+  // Fenster unter dem Chart: die letzten 10 Kerzen in Worten + erkannte Kerzen-/Chart-Muster
   const el = document.getElementById(id);
   if (!el) return;
-  if (!show.pat || !pats || !pats.length) { el.innerHTML = ""; return; }
-  const st = pats[0], last = pats.slice(1).slice(-3).reverse();
-  const sc = st.score || 0;
-  el.innerHTML = `<b>Muster jetzt:</b> <b class="${sc > 0.15 ? "up" : sc < -0.15 ? "down" : ""}">${sc > 0.15 ? "bullisch" : sc < -0.15 ? "baerisch" : "neutral"} (${sc > 0 ? "+" : ""}${String(sc).replace(".", ",")})</b>` +
-    (st.state.length ? ` &middot; ${st.state.join(", ")}` : "") +
-    ` &middot; Widerstand ${st.sr_up >= 10 ? "weit weg" : String(st.sr_up).replace(".", ",") + " ATR"}, Unterstuetzung ${st.sr_dn >= 10 ? "weit weg" : String(st.sr_dn).replace(".", ",") + " ATR"}` +
-    (last.length ? ` &middot; zuletzt: ${last.map(p => p.name).join(", ")}` : "");
+  if (!ex || !ex.candles || !ex.candles.length) { el.innerHTML = ""; return; }
+  const cls = v => v > 0 ? "up" : v < 0 ? "down" : "";
+  const sr = v => v >= 10 ? "weit weg" : String(v).replace(".", ",") + " ATR";
+  const t = s => new Date((s + TZ) * 1000).toLocaleString("de-DE", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+  const rows = ex.candles.map(r => `<tr><td>${t(r.time)}</td>
+    <td class="${cls(r.dir)}">${r.candle} <small>(${r.change_pct > 0 ? "+" : ""}${String(r.change_pct).replace(".", ",")} %)</small></td>
+    <td>${r.patterns.length ? r.patterns.map(p => `<b class="${cls(p.dir)}">${p.name}</b>`).join(", ") : '<span class="sub">-</span>'}</td>
+    <td class="sub">${r.patterns.map(p => p.meaning).join(" &middot; ")}</td></tr>`).join("");
+  const html = `<div class="pwhead"><b>Kerzen &amp; Muster</b> <small class="sub">letzte 10 Kerzen (${TF_NAME[tf] || tf}) - fliesst in KI und Bot-Bewertung ein</small></div>
+    <div class="pwsum">Gesamtbild: <b class="${cls(ex.score > 0.15 ? 1 : ex.score < -0.15 ? -1 : 0)}">${ex.verdict} (${ex.score > 0 ? "+" : ""}${String(ex.score).replace(".", ",")})</b>
+      ${ex.state.length ? " &middot; " + ex.state.join(", ") : ""} &middot; ${ex.summary} &middot; Widerstand ${sr(ex.sr_up)} &middot; Unterstuetzung ${sr(ex.sr_dn)}</div>
+    <div class="wrap"><table><tr><th>Zeit</th><th>Kerze</th><th>Muster</th><th>Was es bedeutet</th></tr>${rows}</table></div>`;
+  if (el._html !== html) { el.innerHTML = html; el._html = html; }
 }
 function learnLine(L, d) {
   // Wie lange und womit die KI schon lernt

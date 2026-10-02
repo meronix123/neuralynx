@@ -194,3 +194,64 @@ def pattern_blocks(side: str, score: float, s: dict) -> str:
     if mode == "confirm" and sign * score < s.get("pattern_confirm", 0.3):
         return f"kein bestaetigendes Muster (Muster-Wert {score:+.2f})"
     return ""
+
+
+MEANING = {
+    "hammer": "Verkaeufer haben gedrueckt, Kaeufer haben fast alles zurueckgekauft - moegliche Wende nach oben",
+    "shooting": "Kaeufer haben hochgetrieben, Verkaeufer haben alles wieder abgegeben - moegliche Wende nach unten",
+    "engulf_up": "grosse gruene Kerze schluckt die rote davor - Kaeufer uebernehmen",
+    "engulf_dn": "grosse rote Kerze schluckt die gruene davor - Verkaeufer uebernehmen",
+    "morning": "3-Kerzen-Wende nach oben (Fall, Zoegern, kraeftiger Anstieg)",
+    "evening": "3-Kerzen-Wende nach unten (Anstieg, Zoegern, kraeftiger Fall)",
+    "soldiers": "drei kraeftige gruene Kerzen hintereinander - starker Kaufdruck",
+    "crows": "drei kraeftige rote Kerzen hintereinander - starker Verkaufsdruck",
+    "doji": "Eroeffnung = Schluss: Markt ist unentschieden, oft vor einer Richtungsentscheidung",
+    "inside": "Kerze liegt ganz in der vorigen - Ruhe, oft vor einer groesseren Bewegung",
+    "dbl_bottom": "Doppel-Tief: zweimal am gleichen Tief abgeprallt und Nackenlinie nach oben gebrochen",
+    "dbl_top": "Doppel-Hoch: zweimal am gleichen Hoch gescheitert und Nackenlinie nach unten gebrochen",
+    "break_up": "Ausbruch ueber das Hoch der letzten 20 Kerzen mit hohem Volumen",
+    "break_dn": "Ausbruch unter das Tief der letzten 20 Kerzen mit hohem Volumen",
+}
+
+
+def explain(df: pd.DataFrame, last: int = 10, tf_seconds: int = 300) -> dict:
+    """Die letzten `last` abgeschlossenen Kerzen in Worten: Form, erkannte Muster, Bedeutung - plus Gesamtbild."""
+    df = df.tail(400).reset_index(drop=True)
+    if len(df) < 30:
+        return {"candles": [], "score": 0.0, "state": [], "sr_up": 10.0, "sr_dn": 10.0}
+    o, h, lo, c = (df[k].astype(float).to_numpy() for k in ("open", "high", "low", "close"))
+    v = df["volume"].astype(float).to_numpy() if "volume" in df else np.ones(len(df))
+    cd, ch = candles(o, h, lo, c), chart(o, h, lo, c, v)
+    pa = analyze(df)
+    body = np.abs(c - o)
+    avg = pd.Series(body).rolling(20, min_periods=5).mean().to_numpy()
+    rows = []
+    end = len(df) - 1                                  # letzte (offene) Kerze nicht bewerten
+    for i in range(max(0, end - last), end):
+        rng = max(h[i] - lo[i], 1e-12)
+        size = "kleine" if body[i] < 0.6 * avg[i] else "grosse" if body[i] > 1.5 * avg[i] else "normale"
+        color = "gruene" if c[i] > o[i] else "rote" if c[i] < o[i] else "neutrale"
+        wick = []
+        if (h[i] - max(c[i], o[i])) > 0.45 * rng:
+            wick.append("langer oberer Docht")
+        if (min(c[i], o[i]) - lo[i]) > 0.45 * rng:
+            wick.append("langer unterer Docht")
+        found = []
+        for key, (name, sign) in CANDLE_NAMES.items():
+            if cd[key][i]:
+                found.append({"name": name, "dir": sign, "meaning": MEANING[key]})
+        for key in ("dbl_bottom", "dbl_top", "break_up", "break_dn"):
+            if ch[key][i]:
+                name, sign = CHART_NAMES[key]
+                found.append({"name": name, "dir": sign, "meaning": MEANING[key]})
+        chg = (c[i] - o[i]) / o[i] * 100 if o[i] else 0.0
+        rows.append({"time": int(df["ts"].iloc[i]) // 1000, "candle": f"{size} {color} Kerze" + (", " + ", ".join(wick) if wick else ""),
+                     "change_pct": round(chg, 3), "dir": 1 if c[i] > o[i] else -1 if c[i] < o[i] else 0, "patterns": found})
+    lastc = pa.iloc[end - 1]
+    state = [CHART_NAMES[k][0] for k in ("hh_hl", "lh_ll", "triangle") if lastc[f"pat_{k}"] > 0]
+    score = float(lastc["pattern_score"])
+    ups = sum(r["dir"] > 0 for r in rows)
+    return {"candles": rows[::-1], "score": round(score, 2), "state": state,
+            "sr_up": round(float(lastc["sr_up"]), 2), "sr_dn": round(float(lastc["sr_dn"]), 2),
+            "summary": f"{ups} von {len(rows)} Kerzen gruen",
+            "verdict": "bullisch" if score > 0.15 else "baerisch" if score < -0.15 else "neutral"}

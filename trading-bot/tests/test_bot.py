@@ -2248,6 +2248,11 @@ def test_pattern_detection_is_causal_and_filters():
     pd.testing.assert_frame_equal(full.iloc[:1000].reset_index(drop=True), part.reset_index(drop=True))
     r = recent(big, 300)
     assert "score" in r[0] and all(x["time"] > 0 for x in r[1:])
+    from bot.patterns import explain
+    ex = explain(big)
+    assert len(ex["candles"]) == 10 and ex["verdict"] in ("bullisch", "baerisch", "neutral")
+    assert ex["candles"][0]["time"] == int(big["ts"].iloc[-2]) // 1000          # neueste ABGESCHLOSSENE zuerst
+    assert all("Kerze" in x["candle"] for x in ex["candles"])
     s = {"pattern_filter": "avoid", "pattern_avoid": 0.5, "pattern_confirm": 0.3}
     assert pattern_blocks("long", -0.6, s) and not pattern_blocks("long", -0.4, s) and not pattern_blocks("short", -0.6, s)
     assert pattern_blocks("long", 0.1, {**s, "pattern_filter": "confirm"}) and not pattern_blocks("long", 0.4, {**s, "pattern_filter": "confirm"})
