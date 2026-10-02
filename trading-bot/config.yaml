@@ -94,6 +94,11 @@ strategy:
   tf_min_pf: 1.2           # (Test: 1,2 besser als 1,0) Profit-Faktor darunter -> auf dieser Zeiteinheit gerade nicht handeln
   tf_warmup: 10            # erst ab 10 Schatten-Trades wird aussortiert
   max_hold_bars: 12        # nach 12 Bars ohne +0,5R und ohne Teilverkauf schliessen (0 = aus)
+  ki_filter: auto          # KI-Prognose (30 min) als Filter: auto = erst wenn sie sich live bewiesen hat,
+                           #   on = immer, off = nie. Ist sie aktiv und klar dagegen -> kein Trade
+  ki_min_conf: 0.55        #   "klar dagegen" = Gegenrichtung mit mind. 55 % Sicherheit
+  ki_min_live: 100         #   auto: so viele live gepruefte Entscheidungen noetig ...
+  ki_min_hit: 0.53         #   ... mit mind. 53 % Treffern
   ml_filter: false         # selbstlernender Filter; erst einschalten, wenn "python run.py backtest"
                            # Lernbeispiele gespeichert hat (data/ml_examples.json)
   ml_threshold: 0.45       # Signale mit geschaetzter Gewinnchance darunter werden verworfen

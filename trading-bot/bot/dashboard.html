@@ -100,7 +100,8 @@
   .note { color:var(--dim); font-size:12px; margin:6px 0; }
   [hidden] { display:none !important; }
   .fcinfo { font-size:12px; color:var(--dim); margin-top:4px; line-height:1.5; }
-  .fcinfo b.up { color:#22c55e; } .fcinfo b.down { color:#ef4444; }
+  .kibadge { display:inline-block; padding:1px 8px; border-radius:6px; font-weight:800; border:1px solid; }
+  .kibadge.up { color:#22c55e; border-color:#22c55e; } .kibadge.down { color:#ef4444; border-color:#ef4444; }
   .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
 </style>
 </head>
@@ -169,7 +170,7 @@
         </div>
         <div id="acc-tfbar" class="tfbar"></div>
         <div style="position:relative"><div id="acc-chart" style="height:420px"></div><canvas id="acc-obcanvas" class="obc"></canvas></div>
-        <div class="legend"><label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#22d3ee"></i>KI-Prognose 30 min</label></div>
+        <div class="legend"><label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#94a3b8"></i>KI-Prognose 30 min</label></div>
         <div id="acc-fc-info" class="fcinfo"></div>
       </div>
       <div class="quick">
@@ -250,7 +251,7 @@
       <span>gestrichelt = Plan, falls jetzt eingestiegen wuerde</span>
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-ob" onchange="toggleShow('ob')"> <i style="background:#22c55e;opacity:.6"></i><i style="background:#ef4444;opacity:.6"></i>Order Blocks (Ober-/Unterkante)</label>
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-walls" onchange="toggleShow('walls')"> <i style="background:#38bdf8"></i><i style="background:#fb923c"></i>Orderbuch-Waende</label>
-      <label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#22d3ee"></i>KI-Prognose 30 min</label>
+      <label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#94a3b8"></i>KI-Prognose 30 min</label>
     </div>
     <div id="fc-info" class="fcinfo"></div>
   </section>
@@ -365,11 +366,14 @@ const emaS = chart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisibl
 const vwap = chart.addLineSeries({ color:"#64748b", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false });
 new ResizeObserver(() => chart.applyOptions({ width: document.getElementById("chart").clientWidth })).observe(document.getElementById("chart"));
 function fcSeries(ch) {
-  // KI-Prognose: Mitte gestrichelt, 80-%-Band gepunktet
-  const o = { lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
-  return { mid: ch.addLineSeries({ ...o, lineWidth: 2, lineStyle: 2, color: "#22d3ee", lastValueVisible: true, title: "KI 30m" }),
-           hi: ch.addLineSeries({ ...o, lineStyle: 3, color: "rgba(34,211,238,0.55)" }),
-           lo: ch.addLineSeries({ ...o, lineStyle: 3, color: "rgba(34,211,238,0.55)" }) };
+  // KI-Prognose: ausgegraute Kerzen + gepunktetes Schwankungsband
+  const o = { lineWidth: 1, lineStyle: 3, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+              color: "rgba(148,163,184,0.45)" };
+  return { ghost: ch.addCandlestickSeries({ upColor: "rgba(148,163,184,0.28)", downColor: "rgba(100,116,139,0.28)",
+             borderUpColor: "rgba(203,213,225,0.7)", borderDownColor: "rgba(148,163,184,0.7)",
+             wickUpColor: "rgba(203,213,225,0.6)", wickDownColor: "rgba(148,163,184,0.6)",
+             priceLineVisible: false, lastValueVisible: false }),
+           hi: ch.addLineSeries(o), lo: ch.addLineSeries(o) };
 }
 const fcBot = fcSeries(chart);
 let fcData = {}, accFc = null;
@@ -800,17 +804,17 @@ function render() {
   const p = s.position, plan = s.snapshot.plan;
   if (p) {
     const q = Number(p.amount).toLocaleString("de-DE", { maximumFractionDigits: 6 });
-    line(p.entry, "#3b82f6", `Bot ${p.side} ${q}`); line(p.sl, "#ef4444", `Bot SL ${q}`); line(p.tp, "#22c55e", `Bot TP ${q}`);
+    line(p.entry, "#3b82f6", `Bot ${p.side === "long" ? "Long" : "Short"} ${q}`); line(p.sl, "#ef4444", "Bot SL"); line(p.tp, "#22c55e", "Bot TP");
   } else if (s.pending) {
-    line(s.pending.price, "#3b82f6", `Bot Limit ${Number(s.pending.amount).toLocaleString("de-DE", { maximumFractionDigits: 6 })}`, true); line(s.pending.sl, "#ef4444", "SL", true); line(s.pending.tp, "#22c55e", "TP", true);
+    zline(s.pending.price, "#3b82f6", "", 2, 1); zline(s.pending.sl, "#ef4444", "", 2, 1); zline(s.pending.tp, "#22c55e", "", 2, 1);
   } else if (plan) {
-    line(plan.sl, "#ef4444", "Plan SL", true); line(plan.tp, "#22c55e", "Plan TP", true);
+    zline(plan.sl, "rgba(239,68,68,0.6)", "", 2, 1); zline(plan.tp, "rgba(34,197,94,0.6)", "", 2, 1);
   }
-  for (const l of accountLines(selected)) zline(l.price, l.color, l.title, l.style, l.width);
+  for (const l of accountLines(selected)) zline(l.price, l.color, l.axis === false ? "" : l.title, l.style, l.width);
   const walls = src.walls || s.walls;
   if (show.walls && walls) {
-    for (const w of (walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.9)", "Kauf-Wand " + big(w.usdt), 3, 2);
-    for (const w of (walls.asks || []).slice(0, 2)) zline(w.price, "rgba(251,146,60,0.9)", "Verk.-Wand " + big(w.usdt), 3, 2);
+    for (const w of (walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.7)", "", 3, 2);   // Waende ohne Preisschild
+    for (const w of (walls.asks || []).slice(0, 2)) zline(w.price, "rgba(251,146,60,0.7)", "", 3, 2);
   }
   const markers = data.history.filter(t => t.symbol === selected).flatMap(t => [
     { time: Math.floor(t.opened_ms / 1000 / tfSec) * tfSec + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
@@ -1134,33 +1138,25 @@ async function pollAccChart() {
   renderTerminal(acc || {});
 }
 function accountLines(sym) {
-  // Positionen des Bitget-Kontos fuer einen Markt: Einstieg, Stop, Ziel, Liquidation (+ liegende TP/SL-Auftraege)
+  // Bitget-Konto im Chart - kurz und einheitlich: Position, SL/TP, Liquidation, Einzel-Positionen.
+  // Limit-Orders werden nicht eingezeichnet (stehen in der Tabelle "Offene Orders").
   const a = acc || {}, out = [];
   if (!a.connected) return out;
   const amt = x => Number(x).toLocaleString("de-DE", { maximumFractionDigits: 6 });
+  const tks = (a.tickets || []).filter(t => t.symbol === sym && t.status !== "pending");
   for (const p of (a.positions || []).filter(p => p.symbol === sym)) {
-    const tag = `Konto ${p.side === "long" ? "Long" : "Short"} ${amt(p.amount)}`;
-    if (p.entry) out.push({ price: p.entry, color: "#3b82f6", title: `${tag} (${fmt(p.value)} USDT)`, style: 0, width: 2 });
-    if (p.sl) out.push({ price: p.sl, color: "#ef4444", title: `${tag} SL`, style: 0, width: 2 });
-    if (p.tp) out.push({ price: p.tp, color: "#22c55e", title: `${tag} TP`, style: 0, width: 2 });
-    if (p.liq) out.push({ price: p.liq, color: "#f59e0b", title: "Liquidation", style: 1, width: 1 });
+    const side = p.side === "long" ? "Long" : "Short";
+    if (p.entry && !tks.length) out.push({ price: p.entry, color: "#3b82f6", title: `${side} ${amt(p.amount)}`, style: 0, width: 2 });
+    if (p.sl) out.push({ price: p.sl, color: "#ef4444", title: "SL", style: 0, width: 2 });
+    if (p.tp) out.push({ price: p.tp, color: "#22c55e", title: "TP", style: 0, width: 2 });
+    if (p.liq) out.push({ price: p.liq, color: "#f59e0b", title: "Liq.", style: 1, width: 1 });
   }
-  const tkIds = new Set((a.tickets || []).flatMap(t => [t.sl_id, t.tp_id]));
-  const tkOrders = new Set((a.tickets || []).map(t => t.order_id));
-  for (const o of (a.orders || []).filter(o => o.symbol === sym && !tkIds.has(o.id) && !tkOrders.has(o.id))) {
-    const pr = o.trigger || o.price;
-    if (pr) out.push({ price: pr, color: "#94a3b8", style: 2, width: 1,
-      title: `${o.kind === "tpsl" ? "Stop/Ziel" : o.kind === "plan" ? "Ausloese-Order" : "Limit " + (o.side || "")} ${amt(o.amount || 0)}` });
-  }
-  for (const t of (a.tickets || []).filter(t => t.symbol === sym)) {
-    const s = `#${t.id} ${t.side === "long" ? "Long" : "Short"} ${amt(t.amount)}`;
-    if (t.status === "pending") {
-      out.push({ price: t.entry, color: "#a855f7", title: `${s} LIMIT wartet`, style: 2, width: 2 });
-      continue;
-    }
-    out.push({ price: t.entry, color: "#3b82f6", title: s, style: 0, width: 1 });
-    out.push({ price: t.sl, color: "#ef4444", title: `${s} SL${t.be ? " (Einstand)" : ""}`, style: 2, width: 2, drag: { id: t.id, kind: "sl" } });
-    out.push({ price: t.tp, color: "#22c55e", title: `${s} TP`, style: 2, width: 2, drag: { id: t.id, kind: "tp" } });
+  for (const t of tks) {
+    const one = tks.length === 1;
+    out.push({ price: t.entry, color: "#3b82f6", title: one ? `${t.side === "long" ? "Long" : "Short"} ${amt(t.amount)}` : "",
+               style: 0, width: 1, axis: one });
+    out.push({ price: t.sl, color: "#ef4444", title: `SL${one ? "" : " #" + t.id}${t.be ? " BE" : ""}`, style: 2, width: 2, drag: { id: t.id, kind: "sl" } });
+    out.push({ price: t.tp, color: "#22c55e", title: `TP${one ? "" : " #" + t.id}`, style: 2, width: 2, drag: { id: t.id, kind: "tp" } });
   }
   return out;
 }
@@ -1169,7 +1165,7 @@ function drawAccLines() {
   if (!accSeries || drag) return;           // waehrend des Ziehens nicht neu zeichnen
   accLines.forEach(l => accSeries.removePriceLine(l)); accLines = []; dragLines = [];
   for (const l of accountLines(accSym)) {
-    const pl = accSeries.createPriceLine({ price: l.price, color: l.color, lineWidth: l.width, lineStyle: l.style, title: l.title, axisLabelVisible: true });
+    const pl = accSeries.createPriceLine({ price: l.price, color: l.color, lineWidth: l.width, lineStyle: l.style, title: l.title, axisLabelVisible: l.axis !== false });
     accLines.push(pl);
     if (l.drag) dragLines.push({ pl, ...l.drag, price: l.price, title: l.title });
   }
@@ -1234,35 +1230,54 @@ async function pollForecast() {
   }
   drawForecast();
 }
-setInterval(pollForecast, 20000);
+setInterval(pollForecast, 10000);
 setTimeout(pollForecast, 1500);
+function ghostCandles(d, last, step) {
+  // 1-Minuten-Pfad der KI -> Kerzen im Raster dieses Charts (ab der Kerze nach der aktuellen)
+  const out = [], band = [];
+  if (!(d.path || []).length || !last) return { out, band };
+  // relativ zur letzten Kerze des Charts anlegen (unabhaengig von Uhr-Abweichungen)
+  const p0 = d.path[0].time, into = Math.min(step - 1, Math.max(0, (p0 + TZ) - last.time));
+  const path = d.path.map(p => ({ ...p, time: last.time + into + (p.time - p0) }));
+  const range = (d.candle_range_pct || 0.1) / 100;
+  let k = 1, prev = last.close;
+  const end = path[path.length - 1].time;
+  while (k <= 60) {
+    const t0 = last.time + k * step, t1 = t0 + step;
+    const pts = path.filter(p => p.time > t0 - step && p.time <= t1 && p.time > last.time);
+    if (!pts.length) { if (t0 > end) break; k++; continue; }
+    const cl = pts[pts.length - 1].price, hiP = Math.max(prev, ...pts.map(p => p.price)), loP = Math.min(prev, ...pts.map(p => p.price));
+    const w = cl * range * Math.min(1, Math.sqrt(step / 300)) * 0.5;
+    out.push({ time: t0, open: prev, high: hiP + w, low: loP - w, close: cl });
+    const b = pts[pts.length - 1].band / 100 * cl;
+    band.push({ time: t0, hi: cl + b, lo: cl - b });
+    prev = cl;
+    if (t1 >= end) break;
+    k++;
+  }
+  return { out, band };
+}
 function applyForecast(ser, d, last, tfSec, infoId) {
   const info = document.getElementById(infoId);
   if (!ser) return;
-  const clear = () => { ser.mid.setData([]); ser.hi.setData([]); ser.lo.setData([]); };
+  const clear = () => { ser.ghost.setData([]); ser.hi.setData([]); ser.lo.setData([]); };
   if (!show.fc) { clear(); if (info) info.innerHTML = ""; return; }
-  if (!d || !d.ok || !last) { clear(); if (info) info.innerHTML = d && d.msg ? `KI-Prognose: ${d.msg}` : "KI-Prognose wird berechnet ..."; return; }
-  // Prognose-Punkte auf das Raster dieses Charts legen (Start = letzte Kerze)
-  const step = Math.max(tfSec || 300, 60), byT = new Map();
-  for (const p of d.points) {
-    const k = Math.ceil((p.time - d.time) / step);
-    byT.set(last.time + k * step, k === 0 ? { ...p, mid: last.close, lo: last.close, hi: last.close } : p);
-  }
-  const pts = [...byT.entries()].sort((a, b) => a[0] - b[0]);
-  const col = d.useful ? "#22d3ee" : "#64748b", band = d.useful ? "rgba(34,211,238,0.55)" : "rgba(100,116,139,0.6)";
-  ser.mid.applyOptions({ color: col }); ser.hi.applyOptions({ color: band }); ser.lo.applyOptions({ color: band });
-  ser.mid.setData(pts.map(([t, p]) => ({ time: t, value: p.mid })));
-  ser.hi.setData(pts.map(([t, p]) => ({ time: t, value: p.hi })));
-  ser.lo.setData(pts.map(([t, p]) => ({ time: t, value: p.lo })));
+  if (!d || !d.ok || !last) { clear(); if (info) info.innerHTML = d && d.msg ? `KI: ${d.msg}` : "KI rechnet ..."; return; }
+  const { out, band } = ghostCandles(d, last, Math.max(tfSec || 300, 60));
+  ser.ghost.setData(out);
+  ser.hi.setData([{ time: last.time, value: last.close }, ...band.map(b => ({ time: b.time, value: b.hi }))]);
+  ser.lo.setData([{ time: last.time, value: last.close }, ...band.map(b => ({ time: b.time, value: b.lo }))]);
   if (!info) return;
-  const pct = v => (v > 0 ? "+" : "") + Number(v).toLocaleString("de-DE", { maximumFractionDigits: 2 }) + " %";
   const q = v => v == null ? "-" : Math.round(v * 100) + " %";
-  const arrow = d.direction === "hoch" ? '<b class="up">&#9650; hoch</b>' : d.direction === "runter" ? '<b class="down">&#9660; runter</b>' : "<b>&#9644; seitwaerts</b>";
-  const end = d.points[d.points.length - 1];
-  info.innerHTML = `<b>KI-Prognose 30 min:</b> ${arrow} ${pct(d.change_pct)} &rarr; ${px(end.mid)} ` +
-    `(80 %-Band ${px(end.lo)} - ${px(end.hi)}) &middot; Treffer Richtung im Test: ${q(d.hit_30m)} &middot; ` +
-    `live: ${q(d.live && d.live.hit)} (${(d.live && d.live.n) || 0} geprueft, im Band ${q(d.live && d.live.in_band)})` +
-    (d.useful ? "" : ' &middot; <span style="color:#f59e0b">derzeit keine echte Vorhersagekraft - nicht danach handeln</span>');
+  const up = d.decision === "LONG", lv = d.live || {};
+  const until = new Date((d.valid_until) * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  const end = d.path && d.path.length ? d.path[d.path.length - 1].price : null;
+  info.innerHTML = `<span class="kibadge ${up ? "up" : "down"}">KI: ${up ? "&#9650; LONG" : "&#9660; SHORT"} ${q(d.confidence)}</span> ` +
+    `30 min &rarr; ${end ? px(end) : "-"} &middot; neu um ${until} &middot; ` +
+    `Treffer live ${q(lv.hit)} (${lv.n || 0}) &middot; Test ${q(d.hit_30m)} &middot; ` +
+    `<span title="${d.bot_note || ""}">Bot: ${d.bot_uses ? "nutzt KI" : "noch nicht"}</span>` +
+    (d.note ? ` &middot; <span style="color:#f59e0b">${d.note}</span>` : "") +
+    (!d.useful ? ' &middot; <span style="color:#f59e0b">keine klare Vorhersagekraft</span>' : "");
 }
 function drawForecast() {
   applyForecast(fcBot, fcData[selected], lastBar, lastTfSec, "fc-info");

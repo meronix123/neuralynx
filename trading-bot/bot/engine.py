@@ -713,6 +713,21 @@ class Bot:
         if prob is not None and prob < self.s.get("ml_threshold", 0.45):
             self.state["last_sig"][sig_key] = sig.ts
             return f"ML-Filter: Gewinnchance nur {prob * 100:.0f} %"
+        ki_mode = self.s.get("ki_filter", "auto")
+        fcr = getattr(self, "_forecaster", None)
+        ki_ready = ki_mode == "on" or (ki_mode == "auto" and fcr is not None
+                                       and fcr.log.stats(sym)["n"] >= self.s.get("ki_min_live", 100))
+        if ki_ready:
+            from .forecast import ki_blocks
+            try:
+                fc = self.forecast(sym)
+            except Exception as e:  # noqa: BLE001 - ohne Prognose weiter wie bisher
+                log.debug("%s KI-Prognose: %s", sym, e)
+                fc = None
+            ki_why = ki_blocks(sig.side, fc, self.s)
+            if ki_why:
+                self.state["last_sig"][sig_key] = sig.ts
+                return ki_why
 
         # ab hier gilt das Signal als bearbeitet (kein zweiter Versuch fuer denselben Bar)
         self.state["last_sig"][sig_key] = sig.ts
@@ -894,9 +909,16 @@ class Bot:
         if not known:
             raise ValueError("Markt unbekannt")
         if getattr(self, "_forecaster", None) is None:
-            self._forecaster = Forecaster(self._candles, ROOT / "data" / f"forecast_{self.cfg['mode']}.json")
+            leader = next((k for k in self.ex.symbols if is_leader(k)), None)
+
+            def price(s):
+                return (self.live_prices() or {}).get(s) if s in self.ex.symbols else None
+            self._forecaster = Forecaster(self._candles, ROOT / "data", self.cfg["mode"], leader, price)
+        from .forecast import ki_active
         with self.__dict__.setdefault("_fc_lock", __import__("threading").Lock()):
-            return self._forecaster.get(sym)
+            fc = self._forecaster.get(sym)
+        active, why = ki_active(fc, self.s)
+        return {**fc, "bot_uses": active, "bot_note": why}
 
     def chart_data(self, sym: str, tf: str, bars: int = 300) -> dict:
         """Chart fuer die Oberflaeche in beliebiger Zeiteinheit: Kerzen, EMAs, VWAP, Order Blocks."""

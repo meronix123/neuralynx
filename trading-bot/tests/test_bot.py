@@ -1843,29 +1843,65 @@ def _fc_frame(n, phi, seed):
 
 
 def test_forecast_learns_real_patterns_and_admits_randomness():
+    from bot.forecast import build, path
+
+    fc = build(_fc_frame(3000, 0.6, 1))
+    assert fc["useful"] and fc["hit_30m"] > 0.55 and fc["decision"] in ("LONG", "SHORT")
+    assert fc["confidence"] > 0.5 and len(fc["nodes"]) == 7 and fc["nodes"][-1]["sec"] == 30 * 60
+    noise = build(_fc_frame(3000, 0.0, 2))
+    assert not noise["useful"] and noise["confidence"] == 0.5     # Zufall: keine vorgetaeuschte Sicherheit
+    assert noise["decision"] in ("LONG", "SHORT")                  # entscheidet sich trotzdem
+    assert build(_fc_frame(200, 0.6, 3)) is None                   # zu wenig Daten
+    p = path(fc, 100.0, fc["time"] + 60, seed=1)
+    assert p[0]["price"] == pytest.approx(100.0) and p[-1]["time"] == fc["time"] + 30 * 60
+    assert all(x["band"] >= 0 for x in p)
+
+
+def test_forecast_follows_btc_for_altcoins():
+    """Altcoin folgt BTC mit Verzoegerung -> die KI nutzt die BTC-Merkmale."""
     from bot.forecast import build
 
-    fc = build(_fc_frame(1000, 0.6, 1))
-    assert fc["useful"] and fc["skill"] > 0.01 and fc["hit_30m"] > 0.55
-    assert len(fc["points"]) == 7 and fc["points"][-1]["time"] - fc["points"][0]["time"] == 30 * 60
-    assert all(p["lo"] <= p["mid"] <= p["hi"] for p in fc["points"])
-    noise = build(_fc_frame(1000, 0.0, 2))
-    assert not noise["useful"]                                  # Zufall wird als "keine Vorhersagekraft" erkannt
-    assert build(_fc_frame(200, 0.6, 3)) is None                # zu wenig Daten
+    btc = _fc_frame(3000, 0.0, 11)
+    r_btc = np.diff(np.log(btc["close"].to_numpy()), prepend=np.log(btc["close"].iloc[0]))
+    rng = np.random.default_rng(12)
+    r_alt = np.r_[0.0, 0.8 * r_btc[:-1]] + rng.normal(0, 0.001, len(r_btc))
+    alt = btc.copy()
+    alt["close"] = 50 * np.exp(np.cumsum(r_alt))
+    alt["open"], alt["high"], alt["low"] = np.r_[alt["close"].iloc[0], alt["close"].to_numpy()[:-1]], \
+        alt["close"] * 1.001, alt["close"] * 0.999
+    assert not build(alt)["useful"]                  # ohne BTC: nicht vorhersagbar
+    assert build(alt, btc)["useful"]                 # mit BTC: Muster gefunden
 
 
-def test_forecast_log_checks_predictions_after_30_minutes(tmp_path):
-    from bot.forecast import ForecastLog
+def test_forecast_memory_log_and_bot_filter(tmp_path):
+    from bot.forecast import CandleMemory, ForecastLog, ki_active, ki_blocks
 
-    lg = ForecastLog(tmp_path / "fc.json")
+    mem = CandleMemory(tmp_path)
+    df = _fc_frame(400, 0.0, 4)
+    out = mem.merge("BTC/USDT:USDT", df.iloc[:300])
+    out = CandleMemory(tmp_path).merge("BTC/USDT:USDT", df.iloc[200:])   # neu gestartet: Gedaechtnis + neue Kerzen
+    assert len(out) == 400 and out["ts"].is_monotonic_increasing
+
+    lg = ForecastLog(tmp_path / "log.json")
     t0 = 1_700_000_000
-    fc = {"time": t0, "price": 100.0, "points": [{"mid": 100.0, "lo": 100.0, "hi": 100.0},
-                                                 {"mid": 101.0, "lo": 99.5, "hi": 102.0}]}
-    lg.add("X", fc)
-    lg.add("X", fc)                                             # gleiche Kerze nur einmal
+    fc = {"time": t0, "decision": "LONG", "confidence": 0.6, "band_pct": 0.5}
+    lg.add("X", fc, 100.0)
+    lg.add("X", fc, 100.0)                           # eine Entscheidung je Kerze
     lg.resolve("X", pd.DataFrame({"ts": [(t0 + 25 * 60) * 1000], "close": [100.8]}))
-    assert lg.stats("X") == {"n": 1, "hit": 1.0, "in_band": 1.0}
-    assert ForecastLog(tmp_path / "fc.json").stats("X")["n"] == 1   # ueberlebt Neustart
+    st = ForecastLog(tmp_path / "log.json").stats("X")
+    assert st["n"] == 1 and st["hit"] == 1.0 and st["hit_sure"] == 1.0
+
+    s = {"ki_filter": "auto", "ki_min_live": 100, "ki_min_hit": 0.53, "ki_min_conf": 0.55}
+    good = {"ok": True, "useful": True, "decision": "SHORT", "confidence": 0.6, "live": {"n": 150, "hit": 0.56}}
+    assert ki_active(good, s)[0] and ki_blocks("long", good, s) and not ki_blocks("short", good, s)
+    young = {**good, "live": {"n": 20, "hit": 0.7}}
+    assert not ki_active(young, s)[0] and not ki_blocks("long", young, s)     # noch nicht bewiesen
+    bad = {**good, "live": {"n": 150, "hit": 0.49}}
+    assert not ki_blocks("long", bad, s)
+    unsure = {**good, "confidence": 0.52}
+    assert not ki_blocks("long", unsure, s)                                     # nur bei klarer Gegen-Meinung
+    assert ki_blocks("long", young, {**s, "ki_filter": "on"})
+    assert not ki_blocks("long", good, {**s, "ki_filter": "off"})
 
 
 def test_diagnose_compares_each_filter():
