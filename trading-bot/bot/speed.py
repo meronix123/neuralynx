@@ -27,6 +27,18 @@ DEFAULTS = {
     "tp_atr": 1.0, "sl_atr": 1.0, "min_tp_fee_x": 3.0, "loop_s": 1.5,
     "maker": 0.0002, "taker": 0.0006, "slippage": 0.0003, "min_notional": 5.0,
 }
+# KI-Autopilot: handelt nach der KI-Prognose (30 min) und fuehrt die Position selbst
+AUTO_DEFAULTS = {
+    "minutes": 60, "loop_s": 5.0, "entry_timeout_s": 60, "max_hold_s": 3600, "max_trades": 40,
+    "min_conf": 0.56,          # Mindest-Sicherheit der KI fuer einen Einstieg
+    "use_raw": False,          # Rohsignal auch ohne nachgewiesene Treffsicherheit (nur Simulation)
+    "sl_band": 1.0,            # Stop = 1 x die 80-%-Schwankung der naechsten 30 min
+    "tp_r": 2.0,               # Ziel = 2 x Risiko
+    "be_r": 0.7,               # ab +0,7 R Stop auf Einstand (inkl. Gebuehren)
+    "partial_r": 1.0,          # ab +1 R ...
+    "partial_frac": 0.5,       # ... die Haelfte verkaufen
+    "trail_r": 1.0,            # danach Stop im Abstand 1 R hinter dem besten Kurs nachziehen
+}
 TFS = {"1m": 1, "2m": 2, "3m": 3, "5m": 5}
 
 
@@ -120,6 +132,13 @@ class PaperBroker:
     def move_stop(self, sym, side, qty, prot, sl):
         prot["sl"] = sl
 
+    def close_part(self, sym, side, qty, prot):
+        last = self.market_fn(sym)["last"]
+        return last * (1 - side * self.p["slippage"])
+
+    def resize(self, sym, side, qty, prot):
+        pass
+
 
 class BitgetBroker:
     """Echtes Bitget-Konto (ccxt-Client mit mode_safe). Stop = an die Position gebundener Bitget-Stop."""
@@ -200,14 +219,42 @@ class BitgetBroker:
             log.debug("Speed alter Stop: %s", e)
         prot.update(sl=sl, sl_id=new)
 
+    def close_part(self, sym, side, qty, prot):
+        """Teilverkauf zum Marktpreis (nur reduzierend)."""
+        o = self.c.create_order(sym, "market", "sell" if side == 1 else "buy", qty, None,
+                                {"reduceOnly": True, "marginMode": self.mm})
+        return float(o.get("average") or self.c.fetch_ticker(sym)["last"])
+
+    def resize(self, sym, side, qty, prot):
+        """Nach einem Teilverkauf: Stop und Ziel auf die Restmenge setzen (neue zuerst, dann alte weg)."""
+        from .exchange import cancel_plan, place_size_tpsl
+        new_sl = place_size_tpsl(self.c, sym, "long" if side == 1 else "short", "loss_plan", prot["sl"], qty, self.mm)
+        try:
+            cancel_plan(self.c, sym, prot["sl_id"])
+        except Exception as e:  # noqa: BLE001
+            log.debug("Autopilot alter Stop: %s", e)
+        prot["sl_id"] = new_sl
+        if prot.get("tp_id"):
+            self.cancel(sym, prot["tp_id"])
+            try:
+                o = self.c.create_order(sym, "limit", "sell" if side == 1 else "buy", qty,
+                                        float(self.c.price_to_precision(sym, prot["tp"])),
+                                        {"reduceOnly": True, "marginMode": self.mm})
+                prot["tp_id"] = str(o.get("id") or "")
+            except Exception as e:  # noqa: BLE001 - Stop bleibt, Ziel fehlt
+                log.warning("Autopilot: Ziel nach Teilverkauf nicht gesetzt: %s", e)
+                prot["tp_id"] = ""
+
 
 class SpeedTrader:
-    """Eine Speed-Trading-Sitzung (Start/Stopp aus der Oberflaeche)."""
+    """Eine Handels-Sitzung aus der Oberflaeche: Speed-Trading (kind='speed') oder KI-Autopilot (kind='ki')."""
 
-    def __init__(self, data_fn, cfg: dict | None = None):
-        """data_fn(sym) -> (1-Minuten-Kerzen, Orderbuch, {'last','bid','ask'}) - fuer Signal und Simulation."""
-        self.data_fn = data_fn
-        self.p = {**DEFAULTS, **(cfg or {})}
+    def __init__(self, data_fn, cfg: dict | None = None, forecast_fn=None, kind: str = "speed"):
+        """data_fn(sym) -> (1-Minuten-Kerzen, Orderbuch, {'last','bid','ask'}) - fuer Signal und Simulation.
+        forecast_fn(sym) -> KI-Prognose (nur KI-Autopilot)."""
+        self.data_fn, self.forecast_fn, self.kind = data_fn, forecast_fn, kind
+        self.name = "KI-Autopilot" if kind == "ki" else "Speed-Trading"
+        self.p = {**DEFAULTS, **(AUTO_DEFAULTS if kind == "ki" else {}), **(cfg or {})}
         self.lock = threading.RLock()
         self.active, self.thread = False, None
         self.session: dict = {}
@@ -220,11 +267,13 @@ class SpeedTrader:
     def start(self, symbols: list[str], broker, equity: float, label: str, **opts) -> str:
         with self.lock:
             if self.active:
-                raise RuntimeError("Speed-Trading laeuft bereits")
+                raise RuntimeError(f"{self.name} laeuft bereits")
             if not symbols:
                 raise ValueError("Mindestens einen Markt waehlen")
             p = {**self.p, **{k: v for k, v in opts.items() if v is not None}}
-            p["minutes"] = max(1, min(60, int(p["minutes"])))
+            p["minutes"] = max(1, min(1440 if self.kind == "ki" else 60, int(p["minutes"])))
+            if self.kind == "ki" and p.get("use_raw") and label != "Simulation":
+                raise ValueError("Rohsignal (unbewaehrte KI) nur in der Simulation")
             if p["margin_usdt"] * p["leverage"] < p["min_notional"]:
                 raise ValueError(f"Einsatz x Hebel muss mind. {p['min_notional']:g} USDT sein (Bitget-Minimum)")
             if p["margin_usdt"] > equity:
@@ -232,23 +281,23 @@ class SpeedTrader:
             self.cur, self.broker = p, broker
             now = time.time()
             self.session = {"symbols": list(symbols), "start": now, "end": now + p["minutes"] * 60, "label": label,
-                            "equity0": equity, "params": {k: p[k] for k in ("minutes", "margin_usdt", "leverage",
-                                                                             "aggressiveness")}}
+                            "equity0": equity, "params": {k: p.get(k) for k in ("minutes", "margin_usdt", "leverage",
+                                                                                 "aggressiveness", "min_conf", "use_raw")}}
             self.slots = {s: {"state": "idle"} for s in symbols}
             self.trades, self.events = [], []
             self.active = True
             self._event(f"Start: {', '.join(x.split(':')[0] for x in symbols)} fuer {p['minutes']} min ({label})")
-            self.thread = threading.Thread(target=self._run, daemon=True, name="speed")
+            self.thread = threading.Thread(target=self._run, daemon=True, name=self.kind)
             self.thread.start()
-            return f"Speed-Trading laeuft {p['minutes']} Minuten ({label})"
+            return f"{self.name} laeuft {p['minutes']} Minuten ({label})"
 
     def stop(self, why: str = "von Hand beendet") -> str:
         with self.lock:
             if not self.active:
-                return "Speed-Trading laeuft nicht"
+                return f"{self.name} laeuft nicht"
             self.session["stop_reason"] = why
             self.session["end"] = 0      # Schleife raeumt auf und endet
-        return "Speed-Trading wird beendet - offene Speed-Positionen werden geschlossen"
+        return f"{self.name} wird beendet - offene Positionen der Sitzung werden geschlossen"
 
     def busy(self, sym: str) -> bool:
         return self.active and sym in self.session.get("symbols", [])
@@ -261,7 +310,7 @@ class SpeedTrader:
         self._last_ev = (text, time.time())
         self.events.append(f"{time.strftime('%H:%M:%S')} {text}")
         self.events = self.events[-60:]
-        log.info("Speed: %s", text)
+        log.info("%s: %s", self.name, text)
 
     def _run(self) -> None:
         try:
@@ -301,11 +350,33 @@ class SpeedTrader:
         self.market[sym] = tick
         return df, book, tick
 
+    def _signal(self, sym, df, book):
+        """-> (Richtung, Einzelwerte, KI-Prognose oder None)."""
+        if self.kind != "ki":
+            side, _, votes = micro_signal(df, book, self.cur["aggressiveness"])
+            return side, votes, None
+        fc = self.forecast_fn(sym) if self.forecast_fn else None
+        if not fc or not fc.get("ok"):
+            return 0, {"KI": (fc or {}).get("msg", "keine Prognose")}, None
+        p_up = fc["p_up_raw"] if self.cur.get("use_raw") else fc["p_up"]
+        conf = max(p_up, 1 - p_up)
+        side = (1 if p_up >= 0.5 else -1) if conf >= self.cur["min_conf"] else 0
+        return side, {"KI": "LONG" if p_up >= 0.5 else "SHORT", "Sicherheit": round(conf, 3)}, fc
+
+    def _levels(self, df, price, side, fc):
+        p = self.cur
+        if self.kind != "ki" or not fc:
+            return levels(df, price, side, p)
+        fees = price * (p["maker"] + p["taker"])
+        r = max(price * fc["band_pct"] / 100 * p["sl_band"], price * 0.0015, 2 * fees)
+        tp_d = max(r * p["tp_r"], p["min_tp_fee_x"] * fees)
+        return price - side * r, price + side * tp_d
+
     def step(self, sym: str) -> None:
         sl = self.slots[sym]
         p = self.cur
         df, book, tick = self._market(sym)
-        side, strength, votes = micro_signal(df, book, p["aggressiveness"])
+        side, votes, fc = self._signal(sym, df, book)
         sl["signal"] = {"side": side, "votes": votes}
         now = time.time()
         if sl["state"] == "idle":
@@ -315,7 +386,7 @@ class SpeedTrader:
             qty = self._qty(sym, price)
             if qty <= 0:
                 return
-            stop, target = levels(df, price, side, p)
+            stop, target = self._levels(df, price, side, fc)
             oid = self.broker.place_entry(sym, side, qty, price)
             sl.update(state="pending", oid=oid, side=side, qty=qty, price=price, sl=stop, tp=target, placed=now)
             self._event(f"{sym.split(':')[0]} {'LONG' if side == 1 else 'SHORT'} Limit {price:.6g} "
@@ -324,14 +395,14 @@ class SpeedTrader:
             st, avg, filled = self.broker.entry_status(sym, sl["oid"])
             if st == "filled":
                 stop, target = sl["sl"] + (avg - sl["price"]), sl["tp"] + (avg - sl["price"])
-                sl.update(state="open", entry=avg, qty=filled, opened=now, sl=stop, tp=target,
-                          prot=self.broker.protect(sym, sl["side"], filled, stop, target))
+                sl.update(state="open", entry=avg, qty=filled, opened=now, sl=stop, tp=target, r0=abs(avg - stop),
+                          best=avg, prot=self.broker.protect(sym, sl["side"], filled, stop, target))
                 self._event(f"{sym.split(':')[0]} ausgefuehrt @ {avg:.6g}")
             elif st == "canceled" or now - sl["placed"] > p["entry_timeout_s"] or side == -sl["side"]:
                 self.broker.cancel(sym, sl["oid"])
                 st, avg, filled = self.broker.entry_status(sym, sl["oid"])
                 if filled > 0:
-                    sl.update(state="open", entry=avg, qty=filled, opened=now,
+                    sl.update(state="open", entry=avg, qty=filled, opened=now, r0=abs(avg - sl["sl"]), best=avg,
                               prot=self.broker.protect(sym, sl["side"], filled, sl["sl"], sl["tp"]))
                     self._event(f"{sym.split(':')[0]} teilweise ausgefuehrt ({filled:g}) - abgesichert")
                 else:
@@ -345,6 +416,62 @@ class SpeedTrader:
             elif now - sl["opened"] > p["max_hold_s"]:
                 px = self.broker.close(sym, sl["side"], sl["qty"], sl["prot"])
                 self._book(sym, sl, px, "Zeit-Limit", maker=False)
+            elif self.kind == "ki":
+                self._manage(sym, sl, tick, side, votes)
+
+    def _manage(self, sym, sl, tick, side, votes) -> None:
+        """KI-Autopilot fuehrt die Position: Einstand, Teilverkauf, Nachziehen, Ausstieg bei KI-Wende."""
+        p = self.cur
+        d = sl["side"]
+        last = tick["last"]
+        r0 = sl.get("r0") or abs(sl["entry"] - sl["sl"]) or sl["entry"] * 0.002
+        sl["best"] = max(sl.get("best", last), last) if d == 1 else min(sl.get("best", last), last)
+        gain = d * (last - sl["entry"]) / r0
+        name = sym.split(":")[0]
+        # KI dreht klar in die Gegenrichtung -> ganz verkaufen
+        if side == -d:
+            px = self.broker.close(sym, d, sl["qty"], sl["prot"])
+            self._book(sym, sl, px, f"KI dreht ({votes.get('KI')} {round((votes.get('Sicherheit') or 0) * 100)} %)", False)
+            return
+        # Teilverkauf bei +partial_r
+        if not sl.get("partial_done") and p["partial_frac"] > 0 and gain >= p["partial_r"]:
+            part = self._round(sym, sl["qty"] * p["partial_frac"])
+            rest = sl["qty"] - part
+            if part > 0 and part * last >= p["min_notional"] and rest * last >= p["min_notional"]:
+                px = self.broker.close_part(sym, d, part, sl["prot"])
+                self._book_part(sym, sl, px, part)
+                sl["qty"] = rest
+                sl["partial_done"] = True
+                self.broker.resize(sym, d, rest, sl["prot"])
+                self._event(f"{name} Teilverkauf {part:g} @ {px:.6g} (+{gain:.1f} R)")
+        # Stop auf Einstand (inkl. Gebuehren) und danach nachziehen
+        be = sl["entry"] * (1 + d * (p["maker"] + p["taker"]))
+        want = None
+        if gain >= p["be_r"] and d * (sl["sl"] - be) < 0:
+            want = be
+        if sl.get("partial_done"):
+            trail = sl["best"] - d * p["trail_r"] * r0
+            if d * (trail - (want if want is not None else sl["sl"])) > 0:
+                want = trail
+        if want is not None and d * (want - sl["sl"]) >= 0.1 * r0 and d * (last - want) > 0:
+            self.broker.move_stop(sym, d, sl["qty"], sl["prot"], want)
+            self._event(f"{name} Stop nachgezogen auf {want:.6g}")
+            sl["sl"] = want
+
+    def _round(self, sym, qty) -> float:
+        try:
+            return float(self.broker.c.amount_to_precision(sym, qty)) if hasattr(self.broker, "c") else qty
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _book_part(self, sym, sl, px, part) -> None:
+        p = self.cur
+        gross = sl["side"] * (px - sl["entry"]) * part
+        fees = sl["entry"] * part * p["maker"] + px * part * p["taker"]
+        self.trades.append({"symbol": sym, "side": "long" if sl["side"] == 1 else "short", "entry": sl["entry"],
+                            "exit": px, "qty": part, "gross": round(gross, 6), "fees": round(fees, 6),
+                            "net": round(gross - fees, 6), "why": "Teilverkauf",
+                            "secs": round(time.time() - sl.get("opened", time.time())), "time": int(time.time() * 1000)})
 
     def _qty(self, sym, price) -> float:
         p = self.cur
@@ -374,13 +501,14 @@ class SpeedTrader:
         tr = self.trades
         wins = [t for t in tr if t["net"] > 0]
         return {
-            "active": self.active, "label": self.session.get("label"), "symbols": self.session.get("symbols", []),
+            "active": self.active, "kind": self.kind, "name": self.name, "label": self.session.get("label"), "symbols": self.session.get("symbols", []),
             "left_s": max(0, int(self.session.get("end", 0) - time.time())) if self.active else 0,
             "params": self.session.get("params", {}), "stop_reason": self.session.get("stop_reason"),
             "trades": len(tr), "wins": len(wins), "hit": round(len(wins) / len(tr), 3) if tr else None,
             "gross": round(sum(t["gross"] for t in tr), 4), "fees": round(sum(t["fees"] for t in tr), 4),
             "net": round(self._net(), 4), "last_trades": tr[-12:][::-1], "events": self.events[-15:][::-1],
             "slots": {s: {"state": v.get("state"), "side": v.get("side"), "entry": v.get("entry") or v.get("price"),
-                          "sl": v.get("sl"), "tp": v.get("tp"), "signal": (v.get("signal") or {}).get("votes")}
+                          "sl": v.get("sl"), "tp": v.get("tp"), "qty": v.get("qty"), "partial": v.get("partial_done"),
+                          "signal": (v.get("signal") or {}).get("votes")}
                       for s, v in self.slots.items()},
         }

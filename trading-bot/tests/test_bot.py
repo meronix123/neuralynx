@@ -2134,3 +2134,69 @@ def test_forecaster_learns_backfills_and_records_book(tmp_path):
     df = mem.merge("BTC/USDT:USDT", full.iloc[state["n"] - 1000:state["n"] + 1].reset_index(drop=True))
     assert df["book_imb"].notna().sum() == 1 and len(df) > 2900
     assert mem.meta["BTC/USDT:USDT"]["retrains"] == 2
+
+
+def test_ki_autopilot_manages_position():
+    """KI-Autopilot: Einstieg nach KI, Stop auf Einstand, Teilverkauf, Nachziehen, Ausstieg wenn die KI dreht."""
+    from bot.speed import PaperBroker, SpeedTrader
+
+    feed = {"last": 100.0}
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG"}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01}),
+                     {"loop_s": 0.0}, forecast_fn=lambda s: fc, kind="ki")
+    broker = PaperBroker(lambda s: ap.market[s], ap.p)
+    ap.cur, ap.broker = {**ap.p, "margin_usdt": 5, "leverage": 10}, broker
+    ap.session = {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 3600, "equity0": 35.0}
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    sym = "BTC/USDT:USDT"
+    s = ap.slots[sym]
+    fc["p_up"] = 0.53                                     # KI zu unsicher -> nichts
+    ap.step(sym)
+    assert s["state"] == "idle"
+    fc["p_up"] = 0.62
+    ap.step(sym)
+    assert s["state"] == "pending" and s["side"] == 1
+    r = 100.0 - s["sl"]
+    assert r == pytest.approx(0.5, rel=0.05) and s["tp"] - 99.99 == pytest.approx(2 * r, rel=0.05)   # Ziel 2R
+    feed["last"] = 99.98
+    ap.step(sym)                                          # ausgefuehrt
+    assert s["state"] == "open" and s["qty"] == pytest.approx(0.5, rel=0.01)
+    feed["last"] = s["entry"] + 0.75 * s["r0"]
+    ap.step(sym)                                          # +0,75 R -> Stop auf Einstand
+    assert s["sl"] > s["entry"] and not s.get("partial_done")
+    feed["last"] = s["entry"] + 1.1 * s["r0"]
+    ap.step(sym)                                          # +1,1 R -> Haelfte verkauft
+    assert s["partial_done"] and s["qty"] == pytest.approx(0.25, rel=0.01)
+    assert ap.trades[-1]["why"] == "Teilverkauf" and ap.trades[-1]["net"] > 0
+    feed["last"] = s["entry"] + 1.8 * s["r0"]
+    ap.step(sym)                                          # Stop zieht nach (1 R hinter dem besten Kurs)
+    assert s["sl"] == pytest.approx(s["entry"] + 0.8 * s["r0"], rel=1e-4)
+    fc.update(p_up=0.35)                                  # KI dreht klar auf SHORT -> ganz verkaufen
+    ap.step(sym)
+    assert s["state"] == "idle" and ap.trades[-1]["why"].startswith("KI dreht") and ap.trades[-1]["net"] > 0
+    assert sum(t["net"] for t in ap.trades) > 0
+
+
+def test_ki_autopilot_safety_rules():
+    from bot.speed import PaperBroker, SpeedTrader
+
+    fc = {"ok": True, "p_up": 0.5, "p_up_raw": 0.7, "band_pct": 0.5}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.05},
+                     forecast_fn=lambda s: fc, kind="ki")
+    broker = PaperBroker(lambda s: ap.market[s], ap.p)
+    with pytest.raises(ValueError, match="nur in der Simulation"):
+        ap.start(["BTC/USDT:USDT"], broker, 35.0, "Testkonto", use_raw=True)
+    # unbewaehrte KI (Sicherheit 50 %) handelt nicht - mit Rohsignal (nur Simulation) schon
+    ap.cur, ap.broker = {**ap.p, "margin_usdt": 5, "leverage": 10}, broker
+    ap.session = {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 3600, "equity0": 35.0}
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "idle"
+    ap.cur["use_raw"] = True
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "pending"
+    assert ap.status()["name"] == "KI-Autopilot"

@@ -96,25 +96,32 @@ def switch_mode(bot, body: dict, restart=True, env_path=None) -> str:
     return f"Modus {MODE_NAMES[mode]} gespeichert - Bot startet neu (ca. 5 s), Seite laedt dann neu"
 
 
-def speed_start(bot, account, body: dict) -> str:
-    """Speed-Trading starten: Simulation oder verbundenes Bitget-Konto (Echtgeld nur mit JA)."""
+def speed_start(bot, account, body: dict, sp=None) -> str:
+    """Speed-Trading / KI-Autopilot starten: Simulation oder verbundenes Bitget-Konto (Echtgeld nur mit JA)."""
     from .speed import BitgetBroker, PaperBroker
+    sp = sp or bot.speed
+    other = bot.autopilot if sp is bot.speed else bot.speed
     syms = [s for s in body.get("symbols") or [] if s]
-    opts = {k: _num(body.get(k)) for k in ("minutes", "margin_usdt", "leverage", "aggressiveness")}
+    clash = [s for s in syms if other.busy(s)]
+    if clash:
+        raise RuntimeError(f"In {', '.join(x.split(':')[0] for x in clash)} laeuft schon {other.name}")
+    opts = {k: _num(body.get(k)) for k in ("minutes", "margin_usdt", "leverage", "aggressiveness", "min_conf")}
     opts = {k: (int(v) if k in ("minutes", "leverage", "aggressiveness") else float(v)) for k, v in opts.items() if v}
-    sp = bot.speed
+    if "min_conf" in opts and opts["min_conf"] > 1:
+        opts["min_conf"] /= 100                     # 56 -> 0,56
+    opts["use_raw"] = bool(body.get("use_raw"))
     if body.get("target") == "account":
         if not account or not account.connected:
             raise RuntimeError("Erst im Reiter Bitget-Konto ein Konto verbinden")
         if not account.demo and body.get("confirm") != "JA":
-            raise RuntimeError("Speed-Trading mit ECHTEM Geld nur mit Bestaetigung JA")
+            raise RuntimeError(f"{sp.name} mit ECHTEM Geld nur mit Bestaetigung JA")
         v = account.view()
         busy = {p["symbol"] for p in v.get("positions") or []} | {t["symbol"] for t in account.tickets().active()}
         busy |= set((getattr(bot, "state", None) or {}).get("meta", {}))
         clash = [s for s in syms if s in busy]
         if clash:
             raise RuntimeError(f"In {', '.join(x.split(':')[0] for x in clash)} ist schon eine Position offen - "
-                               "Speed-Trading nur in freien Maerkten (sonst legt Bitget die Positionen zusammen)")
+                               f"{sp.name} nur in freien Maerkten (sonst legt Bitget die Positionen zusammen)")
         broker = BitgetBroker(account.client, sp.p, bot.cfg.get("margin_mode", "isolated"))
         for s in syms:          # Hebel/Margin-Modus fuer die Speed-Maerkte setzen
             for fn in (lambda: account.client.set_margin_mode(broker.mm, s, {"marginCoin": "USDT"}),
@@ -175,9 +182,14 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
         return speed_start(bot, account, body)
     if path == "/api/speed/stop":
         return bot.speed.stop()
+    if path == "/api/auto/start":
+        return speed_start(bot, account, body, bot.autopilot)
+    if path == "/api/auto/stop":
+        return bot.autopilot.stop()
     if path == "/api/account/quick":
-        if getattr(bot, "speed", None) is not None and bot.speed.busy(body.get("symbol")):
-            raise RuntimeError("In diesem Markt laeuft gerade Speed-Trading - bitte warten oder Speed-Trading stoppen")
+        for tr in (getattr(bot, "speed", None), getattr(bot, "autopilot", None)):
+            if tr is not None and tr.busy(body.get("symbol")):
+                raise RuntimeError(f"In diesem Markt laeuft gerade {tr.name} - bitte warten oder stoppen")
         st = getattr(bot, "state", None) or {}
         if (bot.cfg.get("mode") == account.active and
                 (body.get("symbol") in st.get("meta", {}) or body.get("symbol") in st.get("pending", {}))):
@@ -300,6 +312,8 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
                     self._json(400, {"ok": False, "msg": str(e)})
             elif self.path.startswith("/api/speed"):
                 self._json(200, bot.speed.status())
+            elif self.path.startswith("/api/auto"):
+                self._json(200, bot.autopilot.status())
             elif self.path.startswith("/api/forecast"):
                 from urllib.parse import parse_qs, urlparse
                 q = parse_qs(urlparse(self.path).query)

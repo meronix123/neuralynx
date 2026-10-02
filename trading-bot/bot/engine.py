@@ -70,10 +70,11 @@ class Bot:
         self.flow_cfg = cfg.get("flow", {})
         self.flow = FlowMonitor(self.flow_cfg)
         from .speed import SpeedTrader
-        self.speed = SpeedTrader(self.speed_data, {**cfg.get("speed", {}),
-                                                   "maker": cfg["fees"].get("maker", cfg["fees"]["taker"]),
-                                                   "taker": cfg["fees"]["taker"], "slippage": cfg["fees"]["slippage"],
-                                                   "min_notional": cfg["fees"].get("min_notional", 5.0)})
+        fee_cfg = {"maker": cfg["fees"].get("maker", cfg["fees"]["taker"]), "taker": cfg["fees"]["taker"],
+                   "slippage": cfg["fees"]["slippage"], "min_notional": cfg["fees"].get("min_notional", 5.0)}
+        self.speed = SpeedTrader(self.speed_data, {**cfg.get("speed", {}), **fee_cfg})
+        self.autopilot = SpeedTrader(self.speed_data, {**cfg.get("autopilot", {}), **fee_cfg},
+                                     forecast_fn=self.forecast, kind="ki")
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
         self.views: dict = {}
@@ -228,8 +229,8 @@ class Bot:
             if sym in positions:
                 reasons[sym] = "Position offen"
                 continue
-            if self.speed.busy(sym):
-                reasons[sym] = "Speed-Trading laeuft in diesem Markt"
+            if self.speed.busy(sym) or self.autopilot.busy(sym):
+                reasons[sym] = f"{'Speed-Trading' if self.speed.busy(sym) else 'KI-Autopilot'} laeuft in diesem Markt"
                 continue
             if sym in self.state["pending"]:
                 reasons[sym] = "Limit-Order wartet auf Ausfuehrung"
@@ -1031,6 +1032,7 @@ class Bot:
             "paused": STOP_FILE.exists(),
             "modes_ready": self._modes_ready(),
             "speed": self.speed.status(),
+            "autopilot": self.autopilot.status(),
             "signal_log": self.state.get("signal_log", [])[-40:],
             "sleep_warning": self.status.get("sleep_warning"),
             "last_error": self.last_error,

@@ -275,10 +275,25 @@
         <label>Hebel <input id="sp-lev" value="10" style="width:40px">x</label>
         <label>Tempo <select id="sp-agg"><option value="1">vorsichtig</option><option value="2">normal</option><option value="3" selected>schnell</option><option value="4">sehr schnell</option></select></label>
         <label>mit <select id="sp-target"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
-        <button class="btn" id="sp-start" onclick="speedStart()">Start</button>
-        <button class="btn red" id="sp-stop" hidden onclick="act('/api/speed/stop').then(() => { pollSpeed.until = Date.now() + 60000; })">Speed-Trading stoppen</button>
+        <button class="btn" id="sp-start" onclick="sessionStart('sp')">Start</button>
+        <button class="btn red" id="sp-stop" hidden onclick="act('/api/speed/stop').then(() => { pollSession.until.sp = Date.now() + 60000; })">Speed-Trading stoppen</button>
       </div>
       <div id="sp-status"></div>
+    </div>
+    <div class="speed">
+      <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft, verkauft die Haelfte bei +1 R, zieht den Stop nach, steigt aus wenn die KI dreht</small></div>
+      <div class="speedform">
+        <span id="ap-syms"></span>
+        <label>Dauer <select id="ap-min"><option value="30">30 min</option><option value="60" selected>1 Std</option><option value="240">4 Std</option><option value="720">12 Std</option><option value="1440">24 Std</option></select></label>
+        <label>Einsatz <input id="ap-margin" value="5" style="width:52px"> USDT</label>
+        <label>Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
+        <label>KI-Sicherheit ab <select id="ap-conf"><option value="54">54 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
+        <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
+        <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
+        <button class="btn" id="ap-start" onclick="sessionStart('ap')">Start</button>
+        <button class="btn red" id="ap-stop" hidden onclick="act('/api/auto/stop').then(() => { pollSession.until.ap = Date.now() + 60000; })">Autopilot stoppen</button>
+      </div>
+      <div id="ap-status"></div>
     </div>
   </section>
   <section class="panel">
@@ -1260,63 +1275,73 @@ function initDrag() {
 }
 setInterval(pollAccChart, 5000);
 
-let spSymsKey = "";
-let spFresh = null;
-function renderSpeed() {
-  const sp = spFresh && Date.now() - spFresh.at < 4000 ? spFresh.v : ((data || {}).speed || {});
-  document.getElementById("sp-start").hidden = !!sp.active;
-  document.getElementById("sp-stop").hidden = !sp.active;
+const SESS = { sp: { api: "/api/speed", key: "speed" }, ap: { api: "/api/auto", key: "autopilot" } };
+const sessFresh = {}, sessSymsKey = {};
+function renderSpeed() { renderSession("sp"); renderSession("ap"); }
+function renderSession(k) {
+  const sp = sessFresh[k] && Date.now() - sessFresh[k].at < 4000 ? sessFresh[k].v : ((data || {})[SESS[k].key] || {});
+  document.getElementById(k + "-start").hidden = !!sp.active;
+  document.getElementById(k + "-stop").hidden = !sp.active;
   const syms = Object.keys((data || {}).symbols || {});
-  if (syms.join() !== spSymsKey) {                  // Markt-Auswahl nur bei Aenderung neu bauen
-    spSymsKey = syms.join();
-    document.getElementById("sp-syms").innerHTML = syms.map((x, i) =>
-      `<label class="spsym"><input type="checkbox" class="sp-sym" value="${x}" ${i === 0 ? "checked" : ""}>${x.split("/")[0]}</label>`).join("");
+  if (syms.join() !== sessSymsKey[k]) {                  // Markt-Auswahl nur bei Aenderung neu bauen
+    sessSymsKey[k] = syms.join();
+    document.getElementById(k + "-syms").innerHTML = syms.map((x, i) =>
+      `<label class="spsym"><input type="checkbox" class="${k}-sym" value="${x}" ${i === 0 ? "checked" : ""}>${x.split("/")[0]}</label>`).join("");
   }
   const out = html => {
-    const el = document.getElementById("sp-status");
+    const el = document.getElementById(k + "-status");
     if (el._html === html) return;
     const open = !!(el.querySelector("details") || {}).open;          // aufgeklappten "Ablauf" offen lassen
     el.innerHTML = html; el._html = html;
     const d = el.querySelector("details"); if (d) d.open = open;
   };
   if (!sp.active && !sp.trades && !(sp.events || []).length) { out(""); return; }
-  const mm = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const hm = s => s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")} Std` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   const q = v => v == null ? "-" : Math.round(v * 100) + " %";
   const n4 = v => (v >= 0 ? "+" : "") + Number(v || 0).toLocaleString("de-DE", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
-  const slots = Object.entries(sp.slots || {}).map(([k, v]) => `${k.split("/")[0]}: ${v.state === "open" ? `<b class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"}</b> @ ${px(v.entry)}` : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : "sucht"}`).join(" &middot; ");
+  const sig = v => v && v.signal && v.signal.KI ? ` <small class="sub">(KI ${v.signal.KI}${v.signal.Sicherheit ? " " + q(v.signal.Sicherheit) : ""})</small>` : "";
+  const slots = Object.entries(sp.slots || {}).map(([s, v]) => `${s.split("/")[0]}: ${v.state === "open"
+    ? `<b class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"}</b> @ ${px(v.entry)} &middot; Stop ${px(v.sl)}${v.partial ? " &middot; Haelfte verkauft" : ""}`
+    : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : "sucht"}${sig(v)}`).join(" &middot; ");
   out(`<div class="sprun">
-    ${sp.active ? `<b class="up">LAEUFT</b> (${sp.label}) noch <b>${mm(sp.left_s || 0)}</b> &middot; ${slots}<br>` :
+    ${sp.active ? `<b class="up">LAEUFT</b> (${sp.label}) noch <b>${hm(sp.left_s || 0)}</b> &middot; ${slots}<br>` :
       `<b>Beendet</b>${sp.stop_reason ? " (" + sp.stop_reason + ")" : ""} &middot; `}
-    ${sp.trades || 0} Trades &middot; ${sp.wins || 0} Gewinner (${q(sp.hit)}) &middot; brutto ${n4(sp.gross)} &middot; Gebuehren ${n4(-(sp.fees || 0))} &middot;
+    ${sp.trades || 0} Abschluesse &middot; ${sp.wins || 0} im Plus (${q(sp.hit)}) &middot; brutto ${n4(sp.gross)} &middot; Gebuehren ${n4(-(sp.fees || 0))} &middot;
     <b class="${(sp.net || 0) >= 0 ? "up" : "down"}">netto ${n4(sp.net)} USDT</b>
     ${(sp.last_trades || []).length ? `<div class="wrap"><table><tr><th>Markt</th><th>Richtung</th><th>Einstieg</th><th>Ausstieg</th><th>Grund</th><th>Dauer</th><th>netto</th></tr>
-      ${sp.last_trades.map(t => `<tr><td>${t.symbol.split("/")[0]}</td><td class="${t.side === "long" ? "up" : "down"}">${t.side.toUpperCase()}</td><td>${px(t.entry)}</td><td>${px(t.exit)}</td><td>${t.why}</td><td>${t.secs} s</td><td class="${t.net >= 0 ? "up" : "down"}">${n4(t.net)}</td></tr>`).join("")}</table></div>` : ""}
+      ${sp.last_trades.map(t => `<tr><td>${t.symbol.split("/")[0]}</td><td class="${t.side === "long" ? "up" : "down"}">${t.side.toUpperCase()}</td><td>${px(t.entry)}</td><td>${px(t.exit)}</td><td>${t.why}</td><td>${t.secs >= 120 ? Math.round(t.secs / 60) + " min" : t.secs + " s"}</td><td class="${t.net >= 0 ? "up" : "down"}">${n4(t.net)}</td></tr>`).join("")}</table></div>` : ""}
     <details><summary class="sub">Ablauf</summary><div class="sub">${(sp.events || []).join("<br>")}</div></details></div>`);
 }
-async function pollSpeed() {
+async function pollSession() {
   if (!data || view !== "bot") return;
-  const sp = data.speed || {};
-  if (!sp.active && !pollSpeed.until) return;          // nur waehrend/kurz nach einer Sitzung schnell abfragen
-  try { const v = await (await fetch("/api/speed")).json(); spFresh = { at: Date.now(), v }; data.speed = v; renderSpeed(); }
-  catch (e) { return; }
-  if (!data.speed.active && Date.now() > (pollSpeed.until || 0)) pollSpeed.until = 0;
+  for (const k of Object.keys(SESS)) {
+    const sp = (data[SESS[k].key] || {});
+    if (!sp.active && Date.now() > (pollSession.until[k] || 0)) continue;   // nur waehrend/kurz nach einer Sitzung
+    try { const v = await (await fetch(SESS[k].api)).json(); sessFresh[k] = { at: Date.now(), v }; data[SESS[k].key] = v; renderSession(k); }
+    catch (e) { /* Bot kurz nicht erreichbar */ }
+  }
 }
-setInterval(pollSpeed, 1000);
-async function speedStart() {
-  const syms = [...document.querySelectorAll(".sp-sym:checked")].map(x => x.value);
+pollSession.until = {};
+setInterval(pollSession, 1000);
+async function sessionStart(k) {
+  const syms = [...document.querySelectorAll(`.${k}-sym:checked`)].map(x => x.value);
   if (!syms.length) return toast("Mindestens einen Markt waehlen", false);
-  const body = { symbols: syms, minutes: val("sp-min"), margin_usdt: val("sp-margin").replace(",", "."), leverage: val("sp-lev"),
-                 aggressiveness: val("sp-agg"), target: val("sp-target") };
+  const body = { symbols: syms, minutes: val(k + "-min"), margin_usdt: val(k + "-margin").replace(",", "."), leverage: val(k + "-lev"),
+                 target: val(k + "-target") };
+  if (k === "sp") body.aggressiveness = val("sp-agg");
+  if (k === "ap") { body.min_conf = val("ap-conf"); body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; }
+  const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
+  const mins = Number(body.minutes), dur = mins >= 60 ? `${mins / 60} Std` : `${mins} min`;
   if (body.target === "account") {
     if (!acc || !acc.connected) return toast("Erst im Reiter Bitget-Konto ein Konto verbinden", false);
     if (!acc.demo) {
-      const r = await askBox(`ACHTUNG: Speed-Trading mit ECHTEM GELD fuer ${body.minutes} Minuten (${body.margin_usdt} USDT x ${body.leverage}x je Trade). Zum Bestaetigen JA eintippen:`, [["Bestaetigung", ""]]);
+      const r = await askBox(`ACHTUNG: ${name} mit ECHTEM GELD fuer ${dur} (${body.margin_usdt} USDT x ${body.leverage}x je Trade). Zum Bestaetigen JA eintippen:`, [["Bestaetigung", ""]]);
       if (!r || r[0].trim().toUpperCase() !== "JA") return toast("Nicht gestartet - Bestaetigung JA fehlt", false);
       body.confirm = "JA";
     }
   }
-  const ok = await act("/api/speed/start", body, body.target === "account" && acc.demo ? `Speed-Trading auf dem TESTKONTO starten (${body.minutes} min)?` : null);
-  if (ok) { pollSpeed.until = Date.now() + 10 * 60_000; data.speed = { ...(data.speed || {}), active: true }; pollSpeed(); }
+  const ok = await act(SESS[k].api + "/start", body, body.target === "account" && acc.demo ? `${name} auf dem TESTKONTO starten (${dur})?` : null);
+  if (ok) { pollSession.until[k] = Date.now() + 10 * 60_000; data[SESS[k].key] = { ...(data[SESS[k].key] || {}), active: true }; pollSession(); }
 }
 
 async function pollForecast() {
@@ -1404,7 +1429,7 @@ async function pollAcc() {
   if (view !== "acc" && acc && !acc.connected) return;
   try { acc = await (await fetch("/api/account")).json(); renderAcc(); drawAccLines(); } catch (e) { /* Bot nicht erreichbar */ }
 }
-setInterval(pollAcc, 3000);
+setInterval(pollAcc, 2000);
 
 async function poll() {
   try {
@@ -1416,7 +1441,7 @@ async function poll() {
     document.getElementById("head").innerHTML = `<span class="down">Keine Verbindung zum Bot</span>`;
   }
 }
-poll(); setInterval(poll, 3000);
+poll(); setInterval(poll, 2000);
 </script>
 </body>
 </html>
