@@ -25,6 +25,7 @@ import pandas as pd
 
 from .indicators import atr, bollinger, ema, macd_hist, rsi
 from .orderblocks import detect as ob_detect
+from .patterns import analyze as pattern_analyze
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ MAX_HISTORY = 20_000                     # gespeicherte 5-Minuten-Kerzen je Mark
 HALF_LIFE = 3_000                        # Gewicht neuerer Kerzen: halbiert sich alle ~10 Tage
 L2 = 2.0
 BAND_Z = 1.28                            # 80-%-Band
+BOOST_ROWS = 12_000                      # Baum-Modell lernt aus den neuesten 12.000 Kerzen (Rechenzeit)
 MIN_BOOK_BARS = 800                      # Orderbuch-Druck erst ab ~3 Tagen Aufzeichnung als Merkmal
 BACKFILL_DAYS = 70                       # beim ersten Start so viel Vergangenheit von Bitget laden
 GRID = [(0.5, 1500), (2.0, 1500), (2.0, 6000), (8.0, 6000), (8.0, 20000)]   # (L2, Halbwertszeit in Kerzen)
@@ -111,6 +113,24 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
             f["ob1h_up"] = np.where(okp & ~np.isnan(ab1[pc]), (ab1[pc] - c_) / av, 10.0)
             f["ob1h_dn"] = np.where(okp & ~np.isnan(be1[pc]), (c_ - be1[pc]) / av, 10.0)
             f["ob1h_sup"] = np.where(okp, su1[pc], 0).astype(float)
+    # Kerzen- und Chart-Muster auf 5 min, 1 h und 4 h (hoehere erst nach Kerzenschluss bekannt)
+    pa = pattern_analyze(df)
+    for col in ("cdl_score", "pat_score", "pattern_score", "sr_up", "sr_dn", "pat_dbl_top", "pat_dbl_bottom",
+                "pat_break_up", "pat_break_dn", "pat_triangle", "cdl_doji", "cdl_inside"):
+        f[f"m5_{col}"] = pa[col].to_numpy()
+    if len(df) > 600:
+        t1 = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        for rule, hours, name in (("1h", 1, "m1h"), ("4h", 4, "m4h")):
+            g = df.set_index(t1).resample(rule, label="left", closed="left").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+            if len(g) < 40:
+                continue
+            pg = pattern_analyze(g.reset_index(drop=True))
+            known = (g.index + pd.Timedelta(hours=hours)).as_unit("ns").asi8 // 1_000_000
+            pos = np.searchsorted(known, df["ts"].to_numpy(), side="right") - 1
+            okp, pc = pos >= 0, np.clip(pos, 0, None)
+            for col in ("pattern_score", "cdl_score", "pat_score", "pat_hh_hl", "pat_lh_ll"):
+                f[f"{name}_{col}"] = np.where(okp, pg[col].to_numpy()[pc], 0.0)
     if macro is not None and len(macro):
         from .macro import merge_macro
         f["macro"] = np.asarray(merge_macro(df, macro, gold=gold), dtype=float)
@@ -289,7 +309,8 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     mix = 0.0
     if boost and len(tr) >= 1000:
         lin = _logit_fit(X_all[idx30[tr]], y30_all[tr], weight[idx30[tr]], L2_)
-        bst = Boost().fit(X_all[idx30[tr]], y30_all[tr], weight[idx30[tr]])
+        tb = tr[-BOOST_ROWS:]
+        bst = Boost().fit(X_all[idx30[tb]], y30_all[tb], weight[idx30[tb]])
         pl, pb = _logit_p(lin, X_all[idx30[va]]), bst.proba(X_all[idx30[va]])
         mix = min((0.0, 0.5, 1.0), key=lambda a_: _logloss((1 - a_) * pl + a_ * pb, y30_all[va]))
 
@@ -306,9 +327,11 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         final = _logit_fit(X_all[idx], y, weight[idx], L2_)
         p_now = float(_logit_p(final, X_all[n_closed - 1:n_closed])[0])     # letzte ABGESCHLOSSENE Kerze
         if h == H and mix > 0:
-            b_te = Boost().fit(X_all[idx[tr_i]], y[tr_i], weight[idx[tr_i]]).proba(X_all[idx[te_i]])
+            tb = tr_i[-BOOST_ROWS:]
+            b_te = Boost().fit(X_all[idx[tb]], y[tb], weight[idx[tb]]).proba(X_all[idx[te_i]])
             p_te = (1 - mix) * p_te + mix * b_te
-            b_now = float(Boost().fit(X_all[idx], y, weight[idx]).proba(X_all[n_closed - 1:n_closed])[0])
+            fb = np.arange(len(idx))[-BOOST_ROWS:]
+            b_now = float(Boost().fit(X_all[idx[fb]], y[fb], weight[idx[fb]]).proba(X_all[n_closed - 1:n_closed])[0])
             p_now = (1 - mix) * p_now + mix * b_now
         yt = y[te_i]
         hit = float(((p_te >= 0.5) == (yt == 1)).mean())

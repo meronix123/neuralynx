@@ -181,11 +181,11 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     if path == "/api/speed/start":
         return speed_start(bot, account, body)
     if path == "/api/speed/stop":
-        return bot.speed.stop()
+        return bot.speed.stop(close=bool(body.get("close")))
     if path == "/api/auto/start":
         return speed_start(bot, account, body, bot.autopilot)
     if path == "/api/auto/stop":
-        return bot.autopilot.stop()
+        return bot.autopilot.stop(close=bool(body.get("close")))
     if path == "/api/account/quick":
         for tr in (getattr(bot, "speed", None), getattr(bot, "autopilot", None)):
             if tr is not None and tr.busy(body.get("symbol")):

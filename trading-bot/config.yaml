@@ -84,6 +84,10 @@ strategy:
   ob_filter: avoid         # Order Blocks: off | avoid (Gegen-Zone vor dem Ziel -> kein Trade)
                            #   | confirm (nur nach Antest einer passenden Zone) | both
                            #   Jahrestest: "avoid" mit Staerke 2,0 als einzige Variante in Training UND Test im Plus
+  pattern_filter: "off"   # Chart-/Kerzen-Muster: off | avoid (klares Gegen-Muster -> kein Trade) | confirm
+                           #   (nur mit passendem Muster). Erst mit "python run.py diagnose" pruefen!
+  pattern_avoid: 0.5       #   avoid: Gegen-Muster ab diesem Wert (0..1)
+  pattern_confirm: 0.3     #   confirm: passendes Muster ab diesem Wert
   ob_disp_atr: 2.0         # Zone zaehlt, wenn der Kurs danach mind. 2 x ATR weglaeuft
   ob_look: 3               #   ... innerhalb von 3 Kerzen
   ob_room: 0.6             # avoid: 60 % des Weges zum Ziel muessen frei von Gegen-Zonen sein
@@ -163,17 +167,17 @@ paper:
 
 speed:                 # Speed-Trading (Start in der Oberflaeche, Reiter Bot unter dem Chart)
   entry_timeout_s: 20    # Limit-Einstieg nach 20 s ohne Ausfuehrung stornieren
-  max_hold_s: 300        # Speed-Position spaetestens nach 5 min schliessen
-  max_trades: 60         # hoechstens so viele Trades je Sitzung
-  max_loss_pct: 5.0      # Sitzung endet bei 5 % Verlust (vom Startkapital)
+  max_hold_s: 0          # 0 = keine Zeitgrenze (Position laeuft bis Ziel/Stop); z. B. 300 = nach 5 min schliessen
+  max_trades: 1000       # hoechstens so viele Trades je Sitzung
+  max_loss_pct: 5.0      # bei 5 % Verlust (vom Startkapital): keine neuen Trades mehr (offene laufen mit Stop weiter)
   tp_atr: 1.0            # Ziel = 1 x 1-Minuten-ATR ...
   sl_atr: 1.0            # Stop = 1 x 1-Minuten-ATR
   min_tp_fee_x: 3.0      # ... aber mind. 3 x die Gebuehren
   loop_s: 1.5            # alle 1,5 s pruefen
 autopilot:             # KI-Autopilot (Start in der Oberflaeche, Reiter Bot unter dem Chart)
   entry_timeout_s: 60    # Limit-Einstieg nach 60 s ohne Ausfuehrung stornieren
-  max_hold_s: 3600       # Position spaetestens nach 1 Stunde schliessen
-  max_trades: 40         # hoechstens so viele Abschluesse je Sitzung
+  max_hold_s: 0          # 0 = keine Zeitgrenze (Position laeuft bis Ziel/Stop/KI-Wende)
+  max_trades: 1000       # hoechstens so viele Abschluesse je Sitzung
   max_loss_pct: 5.0      # Sitzung endet bei 5 % Verlust (vom Startkapital)
   sl_band: 1.0           # Stop = 1 x die 80-%-Schwankung der naechsten 30 min laut KI
   tp_r: 2.0              # Ziel = 2 x Risiko

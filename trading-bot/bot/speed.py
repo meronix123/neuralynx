@@ -22,14 +22,14 @@ from .indicators import atr, ema
 log = logging.getLogger(__name__)
 
 DEFAULTS = {
-    "minutes": 5, "margin_usdt": 5.0, "leverage": 10, "aggressiveness": 3,   # 1 = vorsichtig ... 4 = sehr schnell
-    "entry_timeout_s": 20, "max_hold_s": 300, "max_trades": 60, "max_loss_pct": 5.0,
+    "minutes": 0, "margin_usdt": 5.0, "leverage": 10, "aggressiveness": 3,   # 1 = vorsichtig ... 4 = sehr schnell
+    "entry_timeout_s": 20, "max_hold_s": 0, "max_trades": 1000, "max_loss_pct": 5.0,
     "tp_atr": 1.0, "sl_atr": 1.0, "min_tp_fee_x": 3.0, "loop_s": 1.5,
     "maker": 0.0002, "taker": 0.0006, "slippage": 0.0003, "min_notional": 5.0,
 }
 # KI-Autopilot: handelt nach der KI-Prognose (30 min) und fuehrt die Position selbst
 AUTO_DEFAULTS = {
-    "minutes": 60, "loop_s": 5.0, "entry_timeout_s": 60, "max_hold_s": 3600, "max_trades": 40,
+    "minutes": 0, "loop_s": 5.0, "entry_timeout_s": 60, "max_hold_s": 0, "max_trades": 1000,
     "min_conf": 0.56,          # Mindest-Sicherheit der KI fuer einen Einstieg
     "use_raw": False,          # Rohsignal auch ohne nachgewiesene Treffsicherheit (nur Simulation)
     "sl_band": 1.0,            # Stop = 1 x die 80-%-Schwankung der naechsten 30 min
@@ -271,7 +271,7 @@ class SpeedTrader:
             if not symbols:
                 raise ValueError("Mindestens einen Markt waehlen")
             p = {**self.p, **{k: v for k, v in opts.items() if v is not None}}
-            p["minutes"] = max(1, min(1440 if self.kind == "ki" else 60, int(p["minutes"])))
+            minutes = int(p.get("minutes") or 0)              # 0 = laeuft, bis "Aus" gedrueckt wird
             if self.kind == "ki" and p.get("use_raw") and label != "Simulation":
                 raise ValueError("Rohsignal (unbewaehrte KI) nur in der Simulation")
             if p["margin_usdt"] * p["leverage"] < p["min_notional"]:
@@ -280,24 +280,33 @@ class SpeedTrader:
                 raise ValueError(f"Einsatz {p['margin_usdt']:g} USDT ist mehr als verfuegbar ({equity:.2f})")
             self.cur, self.broker = p, broker
             now = time.time()
-            self.session = {"symbols": list(symbols), "start": now, "end": now + p["minutes"] * 60, "label": label,
+            self.session = {"symbols": list(symbols), "start": now, "label": label, "stopping": False,
+                            "end": now + minutes * 60 if minutes > 0 else float("inf"),
                             "equity0": equity, "params": {k: p.get(k) for k in ("minutes", "margin_usdt", "leverage",
                                                                                  "aggressiveness", "min_conf", "use_raw")}}
             self.slots = {s: {"state": "idle"} for s in symbols}
             self.trades, self.events = [], []
             self.active = True
-            self._event(f"Start: {', '.join(x.split(':')[0] for x in symbols)} fuer {p['minutes']} min ({label})")
+            self._event(f"Ein: {', '.join(x.split(':')[0] for x in symbols)} ({label})")
             self.thread = threading.Thread(target=self._run, daemon=True, name=self.kind)
             self.thread.start()
-            return f"{self.name} laeuft {p['minutes']} Minuten ({label})"
+            return f"{self.name} ist an ({label}) - laeuft, bis du Aus drueckst"
 
-    def stop(self, why: str = "von Hand beendet") -> str:
+    def stop(self, why: str = "Aus gedrueckt", close: bool = False) -> str:
+        """Aus: keine neuen Trades mehr, wartende Limit-Orders weg. Offene Positionen behalten Stop und Ziel
+        und werden weiter gefuehrt, bis sie zu sind (close=True: sofort alle zum Marktpreis schliessen)."""
         with self.lock:
             if not self.active:
-                return f"{self.name} laeuft nicht"
+                return f"{self.name} ist aus"
             self.session["stop_reason"] = why
-            self.session["end"] = 0      # Schleife raeumt auf und endet
-        return f"{self.name} wird beendet - offene Positionen der Sitzung werden geschlossen"
+            self.session["stopping"] = True
+            if close:
+                self.session["close_now"] = True
+        if close:
+            return f"{self.name} aus - offene Positionen der Sitzung werden jetzt geschlossen"
+        n = sum(1 for v in self.slots.values() if v.get("state") == "open")
+        return (f"{self.name} aus - keine neuen Trades. " +
+                (f"{n} offene Position(en) laufen mit Stop und Ziel weiter, bis sie zu sind" if n else "Keine offene Position"))
 
     def busy(self, sym: str) -> bool:
         return self.active and sym in self.session.get("symbols", [])
@@ -314,35 +323,59 @@ class SpeedTrader:
 
     def _run(self) -> None:
         try:
-            while time.time() < self.session["end"]:
-                if self._net() <= -self.session["equity0"] * self.cur["max_loss_pct"] / 100:
-                    self.session["stop_reason"] = f"Verlust-Limit {self.cur['max_loss_pct']:g} % erreicht"
+            while True:
+                ses = self.session
+                if ses.get("close_now"):
                     break
-                for sym in self.session["symbols"]:
+                if not ses["stopping"]:
+                    if time.time() >= ses["end"]:
+                        ses.update(stopping=True, stop_reason="Zeit abgelaufen")
+                    elif self._net() <= -ses["equity0"] * self.cur["max_loss_pct"] / 100:
+                        ses.update(stopping=True, stop_reason=f"Verlust-Limit {self.cur['max_loss_pct']:g} % erreicht")
+                if ses["stopping"]:
+                    self._cancel_pending()
+                    if not any(v.get("state") == "open" for v in self.slots.values()):
+                        break                                   # nichts mehr offen -> Sitzung zu Ende
+                for sym in ses["symbols"]:
                     try:
                         self.step(sym)
                     except Exception as e:  # noqa: BLE001 - ein Fehler darf die Sitzung nicht beenden
                         self._event(f"{sym.split(':')[0]} Fehler: {e}")
                 time.sleep(self.cur["loop_s"])
         finally:
-            self._wind_down()
+            self._wind_down(close=bool(self.session.get("close_now")))
 
-    def _wind_down(self) -> None:
+    def _cancel_pending(self) -> None:
         for sym, sl in self.slots.items():
+            if sl.get("state") != "pending":
+                continue
             try:
-                if sl["state"] == "pending":
-                    self.broker.cancel(sym, sl["oid"])
-                    st, avg, filled = self.broker.entry_status(sym, sl["oid"])
-                    if filled > 0:                        # kurz vor dem Storno ausgefuehrt
-                        sl.update(state="open", entry=avg, qty=filled, opened=time.time(),
-                                  prot=self.broker.protect(sym, sl["side"], filled, sl["sl"], sl["tp"]))
-                if sl["state"] == "open":
+                self.broker.cancel(sym, sl["oid"])
+                st, avg, filled = self.broker.entry_status(sym, sl["oid"])
+                if filled > 0:                            # kurz vor dem Storno ausgefuehrt -> absichern
+                    sl.update(state="open", entry=avg, qty=filled, opened=time.time(), r0=abs(avg - sl["sl"]),
+                              best=avg, prot=self.broker.protect(sym, sl["side"], filled, sl["sl"], sl["tp"]))
+                else:
+                    sl.clear()
+                    sl["state"] = "idle"
+            except Exception as e:  # noqa: BLE001
+                self._event(f"{sym.split(':')[0]} Storno: {e}")
+
+    def _wind_down(self, close: bool = False) -> None:
+        self._cancel_pending()
+        for sym, sl in self.slots.items():
+            if sl.get("state") != "open":
+                continue
+            try:
+                if close:
                     px = self.broker.close(sym, sl["side"], sl["qty"], sl["prot"])
-                    self._book(sym, sl, px, "Sitzungsende", maker=False)
+                    self._book(sym, sl, px, "von Hand geschlossen", maker=False)
+                else:
+                    self._event(f"{sym.split(':')[0]}: Position bleibt offen (Stop und Ziel liegen auf Bitget)")
             except Exception as e:  # noqa: BLE001
                 self._event(f"{sym.split(':')[0]} beim Beenden: {e} - bitte im Konto pruefen!")
         self.active = False
-        self._event(f"Ende ({self.session.get('stop_reason', 'Zeit abgelaufen')}): {len(self.trades)} Trades, "
+        self._event(f"Aus ({self.session.get('stop_reason', '-')}): {len(self.trades)} Abschluesse, "
                     f"netto {self._net():+.4f} USDT")
 
     def _market(self, sym):
@@ -380,7 +413,7 @@ class SpeedTrader:
         sl["signal"] = {"side": side, "votes": votes}
         now = time.time()
         if sl["state"] == "idle":
-            if side == 0 or len(self.trades) >= p["max_trades"] or now > self.session["end"] - 30:
+            if side == 0 or self.session.get("stopping") or len(self.trades) >= p["max_trades"]:
                 return
             price = tick["bid"] if side == 1 else tick["ask"]
             qty = self._qty(sym, price)
@@ -413,7 +446,7 @@ class SpeedTrader:
             if done:
                 why, px, maker = done
                 self._book(sym, sl, px, why, maker)
-            elif now - sl["opened"] > p["max_hold_s"]:
+            elif p.get("max_hold_s") and now - sl["opened"] > p["max_hold_s"]:
                 px = self.broker.close(sym, sl["side"], sl["qty"], sl["prot"])
                 self._book(sym, sl, px, "Zeit-Limit", maker=False)
             elif self.kind == "ki":
@@ -502,7 +535,8 @@ class SpeedTrader:
         wins = [t for t in tr if t["net"] > 0]
         return {
             "active": self.active, "kind": self.kind, "name": self.name, "label": self.session.get("label"), "symbols": self.session.get("symbols", []),
-            "left_s": max(0, int(self.session.get("end", 0) - time.time())) if self.active else 0,
+            "stopping": bool(self.session.get("stopping")),
+            "running_s": int(time.time() - self.session.get("start", time.time())) if self.active else 0,
             "params": self.session.get("params", {}), "stop_reason": self.session.get("stop_reason"),
             "trades": len(tr), "wins": len(wins), "hit": round(len(wins) / len(tr), 3) if tr else None,
             "gross": round(sum(t["gross"] for t in tr), 4), "fees": round(sum(t["fees"] for t in tr), 4),

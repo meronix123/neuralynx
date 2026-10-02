@@ -518,7 +518,7 @@ def test_filters_and_ml_run_in_simulation():
     filt = simulate(cfg, prep, rules)
     sk = filt["skipped"]
     assert sk["leader"] > 0 and sk["leader"] + sk["health"] + sk["ml"] > 0
-    assert base["skipped"] == {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "orderblock": 0,
+    assert base["skipped"] == {"muster": 0, "leader": 0, "mtf": 0, "funding": 0, "macro": 0, "orderblock": 0,
                                "zeiteinheit": 0, "health": 0, "ml": 0}
     assert filt["end"] == pytest.approx(filt["start"] + filt["table"].pnl.sum())
     assert (filt["table"].why == "zeit").any()
@@ -2023,31 +2023,51 @@ def test_speed_session_in_simulation():
 
 
 def test_speed_start_stop_and_wind_down():
+    """Ein/Aus: Aus schliesst nichts (Position laeuft mit Stop/Ziel weiter), "jetzt schliessen" schliesst alles."""
     from bot.speed import PaperBroker, SpeedTrader
 
     feed = {"last": 100.0}
     df = _speed_df(120, 0.0008)
     book = {"bids": [[99.99, 50]] * 20, "asks": [[100.01, 10]] * 20}
-    sp = SpeedTrader(lambda s: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01,
-                                           "ask": feed["last"] + 0.01}), {"loop_s": 0.05})
-    broker = PaperBroker(lambda s: sp.market[s], sp.p)
+
+    def make():
+        sp = SpeedTrader(lambda s: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01,
+                                               "ask": feed["last"] + 0.01}), {"loop_s": 0.05})
+        return sp, PaperBroker(lambda s: sp.market[s], sp.p)
+
+    sp, broker = make()
     with pytest.raises(ValueError, match="Bitget-Minimum"):
         sp.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=0.2, leverage=10)
     with pytest.raises(ValueError, match="mehr als verfuegbar"):
         sp.start(["BTC/USDT:USDT"], broker, 3.0, "Simulation", margin_usdt=5, leverage=10)
-    sp.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=5, leverage=10, minutes=1)
+    assert "bis du Aus" in sp.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=5, leverage=10)
     assert sp.busy("BTC/USDT:USDT") and not sp.busy("ETH/USDT:USDT")
     with pytest.raises(RuntimeError, match="laeuft bereits"):
         sp.start(["ETH/USDT:USDT"], broker, 35.0, "Simulation")
     time.sleep(0.3)
     feed["last"] = 99.9                                  # Einstieg ausgefuehrt
     time.sleep(0.3)
-    sp.stop()
+    assert sp.slots["BTC/USDT:USDT"]["state"] == "open"
+    assert "laufen mit Stop und Ziel weiter" in sp.stop()  # Aus: nichts schliessen
+    time.sleep(0.3)
+    st = sp.status()
+    assert st["active"] and st["stopping"] and st["trades"] == 0          # Position laeuft weiter
+    assert sp.slots["BTC/USDT:USDT"]["state"] == "open"
+    feed["last"] = sp.slots["BTC/USDT:USDT"]["tp"] + 0.05               # Ziel erreicht -> Sitzung endet
     sp.thread.join(5)
     st = sp.status()
-    assert not st["active"] and st["trades"] == 1 and sp.trades[0]["why"] == "Sitzungsende"
+    assert not st["active"] and st["trades"] == 1 and sp.trades[0]["why"] == "ziel"
+    # "Aus + jetzt schliessen"
+    feed["last"] = 100.0
+    sp, broker = make()
+    sp.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=5, leverage=10)
+    time.sleep(0.3)
+    feed["last"] = 99.9
+    time.sleep(0.3)
+    sp.stop(close=True)
+    sp.thread.join(5)
+    assert not sp.active and sp.trades[-1]["why"] == "von Hand geschlossen"
     assert sp.slots["BTC/USDT:USDT"]["state"] == "idle"
-
 
 def test_speed_bitget_broker_orders():
     from bot.speed import DEFAULTS, BitgetBroker
@@ -2200,3 +2220,35 @@ def test_ki_autopilot_safety_rules():
     ap.step("BTC/USDT:USDT")
     assert ap.slots["BTC/USDT:USDT"]["state"] == "pending"
     assert ap.status()["name"] == "KI-Autopilot"
+
+
+def test_pattern_detection_is_causal_and_filters():
+    """Muster: richtig erkannt, nur aus Vergangenheit (Zukunft aendert nichts), Filter-Logik."""
+    from bot.patterns import analyze, candles, pattern_blocks, recent
+
+    # Hammer nach Fall, Bearish Engulfing nach Anstieg
+    o = np.array([10, 9.8, 9.6, 9.4, 9.2, 9.0, 8.95]); c = np.array([9.8, 9.6, 9.4, 9.2, 9.0, 8.9, 9.0])
+    h = np.maximum(o, c) + 0.01; lo = np.minimum(o, c) - 0.01; lo[-1] = 8.6
+    assert candles(o, h, lo, c)["hammer"][-1]
+    # Anstieg, dann grosse rote Kerze, die die vorige gruene ganz umschliesst
+    o2 = np.array([9.0, 9.2, 9.4, 9.6, 9.8, 10.0, 10.5])
+    c2 = np.array([9.2, 9.4, 9.6, 9.8, 10.0, 10.4, 9.7])
+    assert candles(o2, np.maximum(o2, c2) + 0.02, np.minimum(o2, c2) - 0.02, c2)["engulf_dn"][-1]
+    # Doppel-Tief mit Bruch der Nackenlinie
+    path = [10, 9, 8, 7, 6, 7, 8, 9, 10, 9, 8, 7, 6.05, 7, 8, 9, 10, 10.6, 10.8, 11]
+    close = np.repeat(path, 1).astype(float)
+    df = pd.DataFrame({"ts": np.arange(len(close)) * 300_000, "open": np.r_[close[0], close[:-1]], "close": close,
+                       "high": np.maximum(close, np.r_[close[0], close[:-1]]) + 0.05,
+                       "low": np.minimum(close, np.r_[close[0], close[:-1]]) - 0.05, "volume": 1000.0})
+    pa = analyze(df)
+    assert pa["pat_dbl_bottom"].iloc[-4:].max() == 1 and pa["pat_dbl_top"].sum() == 0
+    # kausal: was bis Kerze i erkannt wurde, aendert sich nicht durch spaetere Kerzen
+    big = _fc_frame(1500, 0.3, 5)
+    full, part = analyze(big), analyze(big.iloc[:1000])
+    pd.testing.assert_frame_equal(full.iloc[:1000].reset_index(drop=True), part.reset_index(drop=True))
+    r = recent(big, 300)
+    assert "score" in r[0] and all(x["time"] > 0 for x in r[1:])
+    s = {"pattern_filter": "avoid", "pattern_avoid": 0.5, "pattern_confirm": 0.3}
+    assert pattern_blocks("long", -0.6, s) and not pattern_blocks("long", -0.4, s) and not pattern_blocks("short", -0.6, s)
+    assert pattern_blocks("long", 0.1, {**s, "pattern_filter": "confirm"}) and not pattern_blocks("long", 0.4, {**s, "pattern_filter": "confirm"})
+    assert not pattern_blocks("long", -1.0, {"pattern_filter": False})       # YAML: off = False

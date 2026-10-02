@@ -14,6 +14,7 @@ from .macro import fetch_macro, latest as macro_latest, macro_blocks
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .flow import FlowMonitor, fetch_walls, flow_score, flow_verdict, wall_blocks
 from .orderblocks import ob_blocks, zones_for_chart
+from .patterns import recent as pattern_recent
 from .ml import features, train_from_examples
 from .notify import Notifier
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
@@ -716,6 +717,11 @@ class Bot:
         if ob_why:
             self.state["last_sig"][sig_key] = sig.ts
             return ob_why
+        from .patterns import pattern_blocks
+        pat_why = pattern_blocks(sig.side, float(row.get("pattern_score", 0) or 0), self.s)
+        if pat_why:
+            self.state["last_sig"][sig_key] = sig.ts
+            return pat_why
         x = features({k: row[k] for k in ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n",
                                           "trend", "regime", "strategy") if k in row}, sig.side)
         prob = self.model.proba(x) if (self.s.get("ml_filter") and self.model) else None
@@ -982,6 +988,7 @@ class Bot:
             "ema_fast": _series(tail, "ema_f", bars), "ema_slow": _series(tail, "ema_s", bars),
             "vwap": _series(tail, "vwap", bars),
             "order_blocks": zones, "walls": self._walls(sym),
+            "patterns": pattern_recent(df.tail(400).reset_index(drop=True), TF_MS[tf] // 1000),
             "price": float(df["close"].iloc[-1]),
             "min_amount": self._min_amount(sym),
             "min_notional": self.cfg["fees"].get("min_notional", 5.0),
@@ -1003,6 +1010,7 @@ class Bot:
                 "pending": self.state["pending"].get(sym),
                 "market": market.get(sym),
                 "order_blocks": zones_for_chart(df, self.s),
+                "patterns": pattern_recent(df.tail(400).reset_index(drop=True), TF_MS[self.cfg["timeframe"]] // 1000),
                 "walls": self._walls(sym),
                 "flow": self._flow_for_display(sym),
                 "candles": [

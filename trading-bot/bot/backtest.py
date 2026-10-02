@@ -20,6 +20,7 @@ from .exchange import is_metal, make_client, resolve_symbols, to_df
 from .filters import health_gate, is_leader, leader_blocks, mtf_blocks, time_stop_due
 from .ml import SignalModel, features
 from .orderblocks import ob_blocks
+from .patterns import pattern_blocks
 from .risk import RiskGuard, position_size, round_amount, stop_is_safe
 from .strategy import TF_MS, compute_signals, higher_tfs, levels_from, resample, trail_stop
 from .tfselect import ShadowBook, active_tfs, adaptive, shadow_results, tf_cfg
@@ -77,7 +78,7 @@ def usable(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
 PREP_COLS = ("ts", "open", "high", "low", "close", "atr", "signal", "sl_dist", "tp_dist", "strategy", "regime",
              "rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "mtf_score", "funding_rank", "macro_score",
-             "ob_above", "ob_below", "ob_support")
+             "ob_above", "ob_below", "ob_support", "pattern_score")
 FEATURE_COLS = ("rsi", "adx", "bb_width", "atr_pct", "vol_ratio", "macd_n", "trend", "regime", "strategy")
 
 
@@ -144,7 +145,7 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
     strat_pnls: dict[str, list[float]] = {}
     health_skips: dict[str, int] = {}
     n_signals = 0
-    skipped = {"leader": 0, "mtf": 0, "funding": 0, "macro": 0, "orderblock": 0, "zeiteinheit": 0,
+    skipped = {"muster": 0, "leader": 0, "mtf": 0, "funding": 0, "macro": 0, "orderblock": 0, "zeiteinheit": 0,
                "health": 0, "ml": 0}
 
     # Jeder Datenstrom (Markt oder Markt|Zeiteinheit) wird zum Bar-SCHLUSS verarbeitet
@@ -300,6 +301,9 @@ def simulate(cfg: dict, prep: dict, rules: dict[str, tuple[float, float]],
                 if "ob_above" in d and ob_blocks(side, c, d["tp_dist"][i], d["ob_above"][i], d["ob_below"][i],
                                                  d["ob_support"][i], s):
                     skipped["orderblock"] += 1
+                    continue
+                if "pattern_score" in d and pattern_blocks(side, d["pattern_score"][i], s):
+                    skipped["muster"] += 1
                     continue
                 if book is not None and not book.stats(tf, t_close, s)["ok"]:
                     skipped["zeiteinheit"] += 1

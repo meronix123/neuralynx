@@ -256,6 +256,10 @@ def compute_signals(df: pd.DataFrame, trend_df: pd.DataFrame, s: dict,
     d = _merge_mtf(d, mtf or {})
     # Order Blocks (Smart-Money-Zonen) - Filter sitzt in orderblocks.ob_blocks
     from .orderblocks import add_columns
+    from .patterns import analyze as pattern_analyze
+    pa = pattern_analyze(d)                     # Kerzen- und Chart-Muster (kausal, je Kerze)
+    for col in ("pattern_score", "cdl_score", "pat_score"):
+        d[col] = pa[col].to_numpy()
     return add_columns(d, s)
 
 

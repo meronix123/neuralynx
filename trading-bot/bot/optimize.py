@@ -428,11 +428,13 @@ DIAG_VARIANTS = {
     "ohne Strategie-Gesundheit": {"strategy": dict(health_window=0)},
     "Mindest-Punkte 3 statt 4": {"strategy": dict(min_score=3), "_prepare": True},
     "Trend + Ausbruch": {"strategy": dict(strategies=["trend", "breakout"]), "_prepare": True},
+    "Muster-Filter: Gegen-Muster meiden": {"strategy": dict(pattern_filter="avoid")},
+    "Muster-Filter: nur mit Bestaetigung": {"strategy": dict(pattern_filter="confirm")},
     "alle Zusatzfilter aus": {"strategy": dict(leader_filter=False, mtf_filter=False, funding_filter=False,
                                                macro_filter=False, ob_filter="off", health_window=0),
                               "tf_select": "all"},
 }
-SKIP_NAMES = {"leader": "BTC-Leitfilter", "mtf": "Zeitebenen", "funding": "Funding", "macro": "Makro",
+SKIP_NAMES = {"muster": "Chart-/Kerzen-Muster", "leader": "BTC-Leitfilter", "mtf": "Zeitebenen", "funding": "Funding", "macro": "Makro",
               "orderblock": "Order Block", "zeiteinheit": "Zeiteinheiten-Sperre", "health": "Strategie-Gesundheit",
               "ml": "ML-Filter"}
 

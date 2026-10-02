@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trading-Bot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="/lightweight-charts.js"></script>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#e6e8ee; --dim:#8a93a6;
@@ -115,6 +117,60 @@
   .kibadge { display:inline-block; padding:1px 8px; border-radius:6px; font-weight:800; border:1px solid; }
   .kibadge.up { color:#22c55e; border-color:#22c55e; } .kibadge.down { color:#ef4444; border-color:#ef4444; }
   .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
+
+  /* ===== Design: edles Nachtblau, Tuerkis/Violett als Akzent, klare Gliederung ===== */
+  :root { --bg:#0a0d16; --panel:#111726; --panel2:#0d1320; --line:#1f2a40; --text:#e8ecf5; --dim:#8b97b0;
+          --green:#22d39a; --red:#ff5c7a; --blue:#4f8cff; --amber:#ffb547; --cyan:#22d3ee; --violet:#a78bfa;
+          --accent:linear-gradient(90deg, #22d3ee, #a78bfa); }
+  body { font-family: Inter, system-ui, sans-serif; font-feature-settings: "tnum" 1, "cv11" 1;
+         background: radial-gradient(1200px 600px at 10% -10%, #16213b 0%, transparent 60%),
+                     radial-gradient(900px 500px at 110% 0%, #241a3f 0%, transparent 55%), var(--bg);
+         background-attachment: fixed; }
+  header { background: rgba(10,13,22,.6); backdrop-filter: blur(10px); border-bottom:1px solid var(--line); }
+  nav { padding:12px 16px 0; }
+  nav button { border-radius:10px; padding:7px 14px; background:var(--panel); font-weight:600; color:var(--dim); }
+  nav button.on { color:#fff; border-color:transparent; background:linear-gradient(135deg, #1f6feb 0%, #7c3aed 100%);
+                  box-shadow:0 4px 18px rgba(124,58,237,.35); }
+  .panel, .ov, .kpi { background:linear-gradient(180deg, rgba(23,31,51,.92), rgba(15,21,36,.92));
+                      border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 30px rgba(0,0,0,.35); }
+  .panel { padding:14px; }
+  h3 { color:#c9d3e8; font-size:12px; letter-spacing:.08em; display:flex; align-items:center; gap:8px; }
+  h3::before { content:""; width:4px; height:14px; border-radius:2px; background:var(--accent); flex:none; }
+  .ovt { color:#9fb0cf; } .ovt::before { content:""; display:inline-block; width:3px; height:10px; margin-right:6px;
+                                         border-radius:2px; background:var(--accent); vertical-align:-1px; }
+  .kpi b, .ovr b { font-variant-numeric: tabular-nums; }
+  .btn { border-radius:9px; background:#18213a; border-color:#2a3655; transition:all .15s; font-weight:500; }
+  .btn:hover { border-color:var(--cyan); box-shadow:0 0 0 3px rgba(34,211,238,.12); }
+  .btn.red { border-color:#5c2233; color:#ffb3c1; } .btn.red:hover { background:#3a1522; border-color:var(--red); }
+  .btn.primary, #sp-start, #ap-start { background:linear-gradient(135deg, #10b981, #0ea5e9); border-color:transparent; color:#04121a; font-weight:700; }
+  .btn.buy { background:linear-gradient(135deg, #0f766e, #16a34a); border-color:transparent; }
+  .btn.sell { background:linear-gradient(135deg, #9f1239, #dc2626); border-color:transparent; }
+  .tfbar button, .otype button { border-radius:8px; background:var(--panel2); }
+  .tfbar button.on, .otype button.on { border-color:transparent; background:linear-gradient(135deg, #1f6feb, #7c3aed); color:#fff; }
+  .tfbar button.entry { box-shadow: inset 0 -2px 0 var(--cyan); }
+  .sym { border-radius:10px; } .sym:hover { background:#16203a; }
+  .sym.active { border-color:transparent; background:linear-gradient(135deg, rgba(31,111,235,.25), rgba(124,58,237,.25));
+                box-shadow: inset 0 0 0 1px rgba(79,140,255,.6); }
+  table { font-variant-numeric: tabular-nums; }
+  th { color:#9fb0cf; font-weight:600; position:sticky; top:0; background:#121a2d; }
+  td, th { border-bottom:1px solid rgba(31,42,64,.7); padding:6px 8px; }
+  tbody tr:nth-child(even) td, table tr:nth-child(even) td { background:rgba(255,255,255,.015); }
+  tr:hover td { background:rgba(79,140,255,.06); }
+  input, select { background:#0c1220; border-color:#24304b; border-radius:8px; }
+  input:focus, select:focus { outline:none; border-color:var(--cyan); box-shadow:0 0 0 3px rgba(34,211,238,.15); }
+  .think, .mtf div, .quick, .flow .step { background:rgba(10,15,27,.7); border:1px solid var(--line); border-radius:10px; }
+  .badge.live { background:linear-gradient(135deg, #9f1239, #dc2626); } .badge.demo { background:linear-gradient(135deg, #1d4ed8, #4f46e5); }
+  .speed { border-top:1px solid var(--line); margin-top:14px; padding-top:12px; }
+  .speed + .speed { margin-top:12px; }
+  .speedhead b { background:var(--accent); -webkit-background-clip:text; background-clip:text; color:transparent; font-size:15px; }
+  .kibadge { border-radius:999px; padding:2px 10px; }
+  .kibadge.up { color:#04121a; background:linear-gradient(135deg, #34d399, #22d3ee); border-color:transparent; }
+  .kibadge.down { color:#fff; background:linear-gradient(135deg, #fb7185, #e11d48); border-color:transparent; }
+  .fcinfo { color:#9fb0cf; }
+  #toast { border-radius:12px; background:#121a2d; box-shadow:0 10px 30px rgba(0,0,0,.45); }
+  #askbox > div { background:#121a2d; border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.6); }
+  ::-webkit-scrollbar { width:10px; height:10px; } ::-webkit-scrollbar-thumb { background:#24304b; border-radius:8px; }
+  ::-webkit-scrollbar-track { background:transparent; }
 </style>
 </head>
 <body>
@@ -264,19 +320,21 @@
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-ob" onchange="toggleShow('ob')"> <i style="background:#22c55e;opacity:.6"></i><i style="background:#ef4444;opacity:.6"></i>Order Blocks (Ober-/Unterkante)</label>
       <label style="display:inline;cursor:pointer"><input type="checkbox" id="cb-walls" onchange="toggleShow('walls')"> <i style="background:#38bdf8"></i><i style="background:#fb923c"></i>Orderbuch-Waende</label>
       <label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-fc" onchange="toggleShow('fc')"> <i style="background:#94a3b8"></i>KI-Prognose 30 min</label>
+      <label style="display:inline;cursor:pointer"><input type="checkbox" class="cb-pat" onchange="toggleShow('pat')"> &#9679; Chart-/Kerzen-Muster</label>
     </div>
+    <div id="pat-info" class="fcinfo"></div>
     <div id="fc-info" class="fcinfo"></div>
     <div class="speed">
-      <div class="speedhead"><b>&#9889; Speed-Trading</b> <small class="sub">kleine Bewegungen auf 1/2/3/5 min, Limit-Orders (Maker), zeitlich begrenzt</small></div>
+      <div class="speedhead"><b>&#9889; Speed-Trading</b> <small class="sub">kleine Bewegungen auf 1/2/3/5 min, Limit-Orders (Maker) - laeuft, bis du Aus drueckst</small></div>
       <div class="speedform">
         <span id="sp-syms"></span>
-        <label>Dauer <select id="sp-min"><option>1</option><option>3</option><option selected>5</option><option>10</option><option>15</option><option>30</option></select> min</label>
         <label>Einsatz <input id="sp-margin" value="5" style="width:52px"> USDT</label>
         <label>Hebel <input id="sp-lev" value="10" style="width:40px">x</label>
         <label>Tempo <select id="sp-agg"><option value="1">vorsichtig</option><option value="2">normal</option><option value="3" selected>schnell</option><option value="4">sehr schnell</option></select></label>
         <label>mit <select id="sp-target"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
-        <button class="btn" id="sp-start" onclick="sessionStart('sp')">Start</button>
-        <button class="btn red" id="sp-stop" hidden onclick="act('/api/speed/stop').then(() => { pollSession.until.sp = Date.now() + 60000; })">Speed-Trading stoppen</button>
+        <button class="btn" id="sp-start" onclick="sessionStart('sp')">Ein</button>
+        <button class="btn" id="sp-stop" hidden onclick="sessionStop('sp', false)">Aus</button>
+        <button class="btn red" id="sp-close" hidden onclick="sessionStop('sp', true)">Aus + Positionen jetzt schliessen</button>
       </div>
       <div id="sp-status"></div>
     </div>
@@ -284,14 +342,14 @@
       <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft, verkauft die Haelfte bei +1 R, zieht den Stop nach, steigt aus wenn die KI dreht</small></div>
       <div class="speedform">
         <span id="ap-syms"></span>
-        <label>Dauer <select id="ap-min"><option value="30">30 min</option><option value="60" selected>1 Std</option><option value="240">4 Std</option><option value="720">12 Std</option><option value="1440">24 Std</option></select></label>
         <label>Einsatz <input id="ap-margin" value="5" style="width:52px"> USDT</label>
         <label>Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
         <label>KI-Sicherheit ab <select id="ap-conf"><option value="54">54 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
         <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
         <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
-        <button class="btn" id="ap-start" onclick="sessionStart('ap')">Start</button>
-        <button class="btn red" id="ap-stop" hidden onclick="act('/api/auto/stop').then(() => { pollSession.until.ap = Date.now() + 60000; })">Autopilot stoppen</button>
+        <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
+        <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)">Aus</button>
+        <button class="btn red" id="ap-close" hidden onclick="sessionStop('ap', true)">Aus + Positionen jetzt schliessen</button>
       </div>
       <div id="ap-status"></div>
     </div>
@@ -396,12 +454,12 @@ const px = v => v == null ? "-" : Number(v).toPrecision(6);
 const time = s => new Date(s).toLocaleString("de-DE", {weekday:"short", hour:"2-digit", minute:"2-digit"});
 
 const chart = LightweightCharts.createChart(document.getElementById("chart"), {
-  layout: { background: { color: "#171a21" }, textColor: "#8a93a6" },
-  grid: { vertLines: { color: "#1f2430" }, horzLines: { color: "#1f2430" } },
+  layout: { background: { color: "#0f1626" }, textColor: "#8b97b0", fontFamily: "Inter, system-ui, sans-serif" },
+  grid: { vertLines: { color: "#172036" }, horzLines: { color: "#172036" } },
   timeScale: { timeVisible: true, secondsVisible: false },
   crosshair: { mode: 0 },
 });
-const candles = chart.addCandlestickSeries({ upColor:"#22c55e", downColor:"#ef4444", wickUpColor:"#22c55e", wickDownColor:"#ef4444", borderVisible:false });
+const candles = chart.addCandlestickSeries({ upColor:"#22d39a", downColor:"#ff5c7a", wickUpColor:"#22d39a", wickDownColor:"#ff5c7a", borderVisible:false });
 const emaF = chart.addLineSeries({ color:"#f59e0b", lineWidth:1, priceLineVisible:false, lastValueVisible:false });
 const emaS = chart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisible:false, lastValueVisible:false });
 const vwap = chart.addLineSeries({ color:"#64748b", lineWidth:1, lineStyle:2, priceLineVisible:false, lastValueVisible:false });
@@ -422,7 +480,7 @@ let fcData = {}, accFc = null;
 function zline(price, color, title, style, width) {
   lines.push(candles.createPriceLine({ price, color, title, lineWidth: width || 1, lineStyle: style, axisLabelVisible: !!title }));
 }
-let show = { ob: true, walls: true, fc: true };
+let show = { ob: true, walls: true, fc: true, pat: true };
 try { show = { ...show, ...JSON.parse(localStorage.getItem("chart_show") || "{}") }; } catch (e) { /* ohne Speicher */ }
 function toggleShow(k) {
   show[k] = !show[k];
@@ -841,6 +899,8 @@ function render() {
   lines.forEach(l => candles.removePriceLine(l)); lines = [];
   document.getElementById("cb-ob").checked = show.ob; document.getElementById("cb-walls").checked = show.walls;
   document.querySelectorAll(".cb-fc").forEach(cb => cb.checked = show.fc);
+  document.querySelectorAll(".cb-pat").forEach(cb => cb.checked = show.pat);
+  patInfo("pat-info", src.patterns);
   renderSpeed();
   drawForecast();
   const p = s.position, plan = s.snapshot.plan;
@@ -852,7 +912,7 @@ function render() {
   } else if (plan) {
     zline(plan.sl, "rgba(239,68,68,0.6)", "", 2, 1); zline(plan.tp, "rgba(34,197,94,0.6)", "", 2, 1);
   }
-  for (const l of accountLines(selected)) zline(l.price, l.color, l.axis === false ? "" : l.title, l.style, l.width);
+  for (const l of [...accountLines(selected), ...sessionLines(selected)]) zline(l.price, l.color, l.axis === false ? "" : l.title, l.style, l.width);
   const walls = src.walls || s.walls;
   if (show.walls && walls) {
     for (const w of (walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.7)", "", 3, 2);   // Waende ohne Preisschild
@@ -863,7 +923,7 @@ function render() {
       color: "#3b82f6", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: t.side },
     { time: Math.floor(t.closed_ms / 1000 / tfSec) * tfSec + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
       shape: "circle", text: (t.pnl >= 0 ? "+" : "") + fmt(t.pnl) },
-  ]).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
+  ]).concat(patMarkers(src.patterns)).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
   candles.setMarkers(markers);
 
   document.getElementById("think").innerHTML = thinking(s);
@@ -1149,9 +1209,9 @@ function renderTickets(a, pos) {
 function ensureAccChart() {
   if (accChart) return;
   accChart = LightweightCharts.createChart(document.getElementById("acc-chart"), {
-    layout: { background: { color: "#171a21" }, textColor: "#8a93a6" },
-    grid: { vertLines: { color: "#1f2430" }, horzLines: { color: "#1f2430" } }, timeScale: { timeVisible: true, secondsVisible: false } });
-  accSeries = accChart.addCandlestickSeries({ upColor:"#22c55e", downColor:"#ef4444", wickUpColor:"#22c55e", wickDownColor:"#ef4444", borderVisible:false });
+    layout: { background: { color: "#0f1626" }, textColor: "#8b97b0", fontFamily: "Inter, system-ui, sans-serif" },
+    grid: { vertLines: { color: "#172036" }, horzLines: { color: "#172036" } }, timeScale: { timeVisible: true, secondsVisible: false } });
+  accSeries = accChart.addCandlestickSeries({ upColor:"#22d39a", downColor:"#ff5c7a", wickUpColor:"#22d39a", wickDownColor:"#ff5c7a", borderVisible:false });
   accInd = {
     f: accChart.addLineSeries({ color:"#f59e0b", lineWidth:1, priceLineVisible:false, lastValueVisible:false }),
     s: accChart.addLineSeries({ color:"#a855f7", lineWidth:1, priceLineVisible:false, lastValueVisible:false }),
@@ -1189,6 +1249,8 @@ async function pollAccChart() {
   const ser = arr => bars.map((c, i) => arr && arr[i] != null ? { time: c.time, value: arr[i] } : null).filter(Boolean);
   accInd.f.setData(ser(accChartData.ema_fast)); accInd.s.setData(ser(accChartData.ema_slow)); accInd.v.setData(ser(accChartData.vwap));
   accZones = (accChartData.order_blocks || []).map(z => ({ ...z, time: Math.round(z.from_ts / 1000) + TZ }));
+  accSeries.setMarkers(patMarkers(accChartData.patterns).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time));
+  patInfo("acc-pat-info", accChartData.patterns);
   setTimeout(drawBoxes, 0);
   document.getElementById("acc-chart-title").textContent = `${accSym.split(":")[0]} - ${TF_NAME[accTf] || accTf}`;
   drawAccLines();
@@ -1218,11 +1280,25 @@ function accountLines(sym) {
   }
   return out;
 }
+function sessionLines(sym) {
+  // offene Positionen von Speed-Trading / KI-Autopilot im Chart (kurz beschriftet)
+  const out = [];
+  for (const k of ["sp", "ap"]) {
+    const st = (sessFresh[k] && Date.now() - sessFresh[k].at < 4000 ? sessFresh[k].v : (data || {})[SESS[k].key]) || {};
+    const v = (st.slots || {})[sym];
+    if (!st.active || !v || v.state !== "open") continue;
+    const tag = k === "sp" ? "Speed" : "KI";
+    out.push({ price: v.entry, color: "#3b82f6", title: `${tag} ${v.side === 1 ? "Long" : "Short"}`, style: 0, width: 1 });
+    if (v.sl) out.push({ price: v.sl, color: "#ef4444", title: `${tag} SL`, style: 2, width: 1 });
+    if (v.tp) out.push({ price: v.tp, color: "#22c55e", title: `${tag} TP`, style: 2, width: 1 });
+  }
+  return out;
+}
 let dragLines = [], drag = null, dragEndedAt = 0;
 function drawAccLines() {
   if (!accSeries || drag) return;           // waehrend des Ziehens nicht neu zeichnen
   accLines.forEach(l => accSeries.removePriceLine(l)); accLines = []; dragLines = [];
-  for (const l of accountLines(accSym)) {
+  for (const l of [...accountLines(accSym), ...sessionLines(accSym)]) {
     const pl = accSeries.createPriceLine({ price: l.price, color: l.color, lineWidth: l.width, lineStyle: l.style, title: l.title, axisLabelVisible: l.axis !== false });
     accLines.push(pl);
     if (l.drag) dragLines.push({ pl, ...l.drag, price: l.price, title: l.title });
@@ -1281,7 +1357,8 @@ function renderSpeed() { renderSession("sp"); renderSession("ap"); }
 function renderSession(k) {
   const sp = sessFresh[k] && Date.now() - sessFresh[k].at < 4000 ? sessFresh[k].v : ((data || {})[SESS[k].key] || {});
   document.getElementById(k + "-start").hidden = !!sp.active;
-  document.getElementById(k + "-stop").hidden = !sp.active;
+  document.getElementById(k + "-stop").hidden = !sp.active || !!sp.stopping;
+  document.getElementById(k + "-close").hidden = !sp.active;
   const syms = Object.keys((data || {}).symbols || {});
   if (syms.join() !== sessSymsKey[k]) {                  // Markt-Auswahl nur bei Aenderung neu bauen
     sessSymsKey[k] = syms.join();
@@ -1296,7 +1373,7 @@ function renderSession(k) {
     const d = el.querySelector("details"); if (d) d.open = open;
   };
   if (!sp.active && !sp.trades && !(sp.events || []).length) { out(""); return; }
-  const hm = s => s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")} Std` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const hm = s => s >= 3600 ? `${Math.floor(s / 3600)} Std ${Math.floor(s % 3600 / 60)} min` : `${Math.floor(s / 60)} min`;
   const q = v => v == null ? "-" : Math.round(v * 100) + " %";
   const n4 = v => (v >= 0 ? "+" : "") + Number(v || 0).toLocaleString("de-DE", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
   const sig = v => v && v.signal && v.signal.KI ? ` <small class="sub">(KI ${v.signal.KI}${v.signal.Sicherheit ? " " + q(v.signal.Sicherheit) : ""})</small>` : "";
@@ -1304,8 +1381,9 @@ function renderSession(k) {
     ? `<b class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"}</b> @ ${px(v.entry)} &middot; Stop ${px(v.sl)}${v.partial ? " &middot; Haelfte verkauft" : ""}`
     : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : "sucht"}${sig(v)}`).join(" &middot; ");
   out(`<div class="sprun">
-    ${sp.active ? `<b class="up">LAEUFT</b> (${sp.label}) noch <b>${hm(sp.left_s || 0)}</b> &middot; ${slots}<br>` :
-      `<b>Beendet</b>${sp.stop_reason ? " (" + sp.stop_reason + ")" : ""} &middot; `}
+    ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}) seit ${hm(sp.running_s || 0)} &middot; ${slots}<br>` :
+      sp.active ? `<b style="color:#f59e0b">AUS</b> - keine neuen Trades, offene Positionen laufen mit Stop und Ziel weiter &middot; ${slots}<br>` :
+      `<b>AUS</b>${sp.stop_reason ? " (" + sp.stop_reason + ")" : ""} &middot; `}
     ${sp.trades || 0} Abschluesse &middot; ${sp.wins || 0} im Plus (${q(sp.hit)}) &middot; brutto ${n4(sp.gross)} &middot; Gebuehren ${n4(-(sp.fees || 0))} &middot;
     <b class="${(sp.net || 0) >= 0 ? "up" : "down"}">netto ${n4(sp.net)} USDT</b>
     ${(sp.last_trades || []).length ? `<div class="wrap"><table><tr><th>Markt</th><th>Richtung</th><th>Einstieg</th><th>Ausstieg</th><th>Grund</th><th>Dauer</th><th>netto</th></tr>
@@ -1323,24 +1401,29 @@ async function pollSession() {
 }
 pollSession.until = {};
 setInterval(pollSession, 1000);
+async function sessionStop(k, close) {
+  const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
+  const ok = await act(SESS[k].api + "/stop", { close },
+    close ? `${name} ausschalten und ALLE offenen Positionen dieser Sitzung JETZT zum Marktpreis schliessen?` : null);
+  if (ok) { pollSession.until[k] = Date.now() + 10 * 60_000; pollSession(); }
+}
 async function sessionStart(k) {
   const syms = [...document.querySelectorAll(`.${k}-sym:checked`)].map(x => x.value);
   if (!syms.length) return toast("Mindestens einen Markt waehlen", false);
-  const body = { symbols: syms, minutes: val(k + "-min"), margin_usdt: val(k + "-margin").replace(",", "."), leverage: val(k + "-lev"),
+  const body = { symbols: syms, margin_usdt: val(k + "-margin").replace(",", "."), leverage: val(k + "-lev"),
                  target: val(k + "-target") };
   if (k === "sp") body.aggressiveness = val("sp-agg");
   if (k === "ap") { body.min_conf = val("ap-conf"); body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; }
   const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
-  const mins = Number(body.minutes), dur = mins >= 60 ? `${mins / 60} Std` : `${mins} min`;
   if (body.target === "account") {
     if (!acc || !acc.connected) return toast("Erst im Reiter Bitget-Konto ein Konto verbinden", false);
     if (!acc.demo) {
-      const r = await askBox(`ACHTUNG: ${name} mit ECHTEM GELD fuer ${dur} (${body.margin_usdt} USDT x ${body.leverage}x je Trade). Zum Bestaetigen JA eintippen:`, [["Bestaetigung", ""]]);
+      const r = await askBox(`ACHTUNG: ${name} mit ECHTEM GELD einschalten (${body.margin_usdt} USDT x ${body.leverage}x je Trade, laeuft bis Aus). Zum Bestaetigen JA eintippen:`, [["Bestaetigung", ""]]);
       if (!r || r[0].trim().toUpperCase() !== "JA") return toast("Nicht gestartet - Bestaetigung JA fehlt", false);
       body.confirm = "JA";
     }
   }
-  const ok = await act(SESS[k].api + "/start", body, body.target === "account" && acc.demo ? `${name} auf dem TESTKONTO starten (${dur})?` : null);
+  const ok = await act(SESS[k].api + "/start", body, body.target === "account" && acc.demo ? `${name} auf dem TESTKONTO einschalten?` : null);
   if (ok) { pollSession.until[k] = Date.now() + 10 * 60_000; data[SESS[k].key] = { ...(data[SESS[k].key] || {}), active: true }; pollSession(); }
 }
 
@@ -1383,6 +1466,25 @@ function ghostCandles(d, last, step) {
     k++;
   }
   return { out, band };
+}
+function patMarkers(pats) {
+  // erkannte Muster als kleine Markierungen an der Kerze (gruen = bullisch, rot = baerisch)
+  if (!show.pat || !pats) return [];
+  // einfache Kerzen-Muster nur als kleiner Punkt, beschriftet nur die aussagekraeftigen (uebersichtlich)
+  return pats.slice(1).map(p => ({ time: p.time + TZ, position: p.dir > 0 ? "belowBar" : "aboveBar",
+    color: p.dir > 0 ? "#22d39a" : p.dir < 0 ? "#ff5c7a" : "#94a3b8", shape: p.kind === "chart" ? "square" : "circle",
+    size: p.strong ? 1 : 0.5, text: p.strong ? p.name : "" }));
+}
+function patInfo(id, pats) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!show.pat || !pats || !pats.length) { el.innerHTML = ""; return; }
+  const st = pats[0], last = pats.slice(1).slice(-3).reverse();
+  const sc = st.score || 0;
+  el.innerHTML = `<b>Muster jetzt:</b> <b class="${sc > 0.15 ? "up" : sc < -0.15 ? "down" : ""}">${sc > 0.15 ? "bullisch" : sc < -0.15 ? "baerisch" : "neutral"} (${sc > 0 ? "+" : ""}${String(sc).replace(".", ",")})</b>` +
+    (st.state.length ? ` &middot; ${st.state.join(", ")}` : "") +
+    ` &middot; Widerstand ${st.sr_up >= 10 ? "weit weg" : String(st.sr_up).replace(".", ",") + " ATR"}, Unterstuetzung ${st.sr_dn >= 10 ? "weit weg" : String(st.sr_dn).replace(".", ",") + " ATR"}` +
+    (last.length ? ` &middot; zuletzt: ${last.map(p => p.name).join(", ")}` : "");
 }
 function learnLine(L, d) {
   // Wie lange und womit die KI schon lernt
