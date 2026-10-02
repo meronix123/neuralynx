@@ -370,6 +370,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         "nodes": [{"sec": s_, "ret": round(r, 4), "band": round(b_, 4)} for s_, r, b_ in nodes],
         "change_pct": round(nodes[-1][1], 3), "band_pct": round(nodes[-1][2], 3),
         "candle_range_pct": round(float(np.median(rng)) * 100, 4),
+        "typical_30_pct": round(moves[-1][0], 4), "sd_5m_pct": round(moves[0][1], 4),
         "quality": quality, "hit_30m": q30["hit"], "base_30m": q30["base"], "useful": bool(useful),
         "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]), "feature_names": names,
         "model": {"l2": L2_, "half_life_days": round(HL_ * STEP_MIN / 1440, 1), "trees": mix,
@@ -378,30 +379,33 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
 
 
 def path(fc: dict, price: float, now_s: int, seed: int) -> list[dict]:
-    """Prognose als 1-Minuten-Verlauf ab jetzt (fuer die Prognose-Kerzen jeder Zeiteinheit).
-    Zwischen den 5-Minuten-Punkten etwas uebliche Schwankung, damit es wie ein Chart aussieht -
-    die Punkte selbst (Richtung, Ziel) kommen aus dem Modell."""
-    nodes = fc["nodes"]
+    """Szenario fuer die Prognose-Kerzen (1-Minuten-Verlauf ab jetzt): So saehe es wahrscheinlich aus, wenn
+    die KI recht hat - Richtung der Entscheidung, Groesse der typischen 30-Minuten-Bewegung dieses Markts,
+    unterwegs Auf und Ab mit der echten Schwankung (Brownsche Bruecke, je 5-Minuten-Kerze gleich)."""
     start = fc["time"]
-    end = start + nodes[-1]["sec"]
+    end = start + HORIZONS[-1] * STEP_MIN * 60
+    sign = 1 if fc.get("decision") == "LONG" else -1
+    target = sign * float(fc.get("typical_30_pct") or abs(fc["nodes"][-1]["ret"]))      # in %
+    sd_min = float(fc.get("sd_5m_pct") or 0.1) / math.sqrt(STEP_MIN)                      # Schwankung je Minute in %
+    band_end = fc["nodes"][-1]["band"]
     rs = np.random.default_rng(seed)
-    noise_sd = fc.get("candle_range_pct", 0.1) / 100 / 3
+    n = HORIZONS[-1] * STEP_MIN                                                            # 30 Minuten-Schritte
+    steps = rs.normal(0, sd_min, n)
+    walk = np.r_[0.0, np.cumsum(steps)]
+    tt = np.arange(n + 1) / n
+    bridge = walk - tt * walk[-1] + tt * target          # beginnt bei 0, endet genau beim Szenario-Ziel
+    t0 = now_s - now_s % 60
     out = []
-    times = list(range(now_s - now_s % 60, end, 60)) + [end]
-    for t in times:
-        x = t - start
-        k = max(0, min(len(nodes) - 2, int(x // (STEP_MIN * 60))))
-        a, b = nodes[k], nodes[k + 1]
-        frac = 0.0 if b["sec"] == a["sec"] else min(1.0, max(0.0, (x - a["sec"]) / (b["sec"] - a["sec"])))
-        r = a["ret"] + (b["ret"] - a["ret"]) * frac
-        wiggle = rs.normal(0, noise_sd) * math.sin(math.pi * frac) if 0 < frac < 1 else 0.0
-        out.append({"time": t, "price": price * math.exp(r / 100 + wiggle),
-                    "band": b["band"] * frac + a["band"] * (1 - frac)})
-    # vom aktuellen Kurs aus starten (die Prognose wurde zu Beginn der Kerze berechnet)
+    for k in range(n + 1):
+        t = start + k * 60
+        if t < t0 and k < n:
+            continue
+        out.append({"time": t, "price": price * math.exp(bridge[k] / 100), "band": band_end * math.sqrt(max(tt[k], 1e-9))})
     if out:
-        shift = price / out[0]["price"]
-        for p in out:
-            p["price"] *= shift
+        shift = price / out[0]["price"]                  # vom aktuellen Kurs aus starten
+        for p_ in out:
+            p_["price"] *= shift
+        out[-1]["time"] = end
     return out
 
 

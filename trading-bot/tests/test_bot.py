@@ -2041,7 +2041,7 @@ def test_speed_start_stop_and_wind_down():
     with pytest.raises(ValueError, match="mehr als verfuegbar"):
         sp.start(["BTC/USDT:USDT"], broker, 3.0, "Simulation", margin_usdt=5, leverage=10)
     assert "bis du Aus" in sp.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=5, leverage=10)
-    assert sp.busy("BTC/USDT:USDT") and not sp.busy("ETH/USDT:USDT")
+    assert not sp.busy("BTC/USDT:USDT")                  # Simulation sperrt nichts auf dem Konto
     with pytest.raises(RuntimeError, match="laeuft bereits"):
         sp.start(["ETH/USDT:USDT"], broker, 35.0, "Simulation")
     time.sleep(0.3)
@@ -2199,6 +2199,32 @@ def test_ki_autopilot_manages_position():
     assert sum(t["net"] for t in ap.trades) > 0
 
 
+def test_session_blocks_only_markets_it_holds_and_waits_for_free_markets():
+    """Schnell-Orders nur gesperrt, wo die Sitzung auf dem Konto selbst etwas haelt; die Sitzung wartet,
+    wo im Konto schon etwas anderes offen ist."""
+    from bot.speed import PaperBroker, SpeedTrader
+
+    df = _speed_df(120, 0.0008)
+    book = {"bids": [[99.99, 50]] * 20, "asks": [[100.01, 10]] * 20}
+    sp = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.0})
+    occupied = {"ETH/USDT:USDT"}
+    sp.cur, sp.broker, sp.free_fn = {**sp.p, "margin_usdt": 5, "leverage": 10}, PaperBroker(lambda s: sp.market[s], sp.p), \
+        (lambda s: s not in occupied)
+    sp.active = True
+    sp.session = {"symbols": ["BTC/USDT:USDT", "ETH/USDT:USDT"], "end": time.time() + 300, "equity0": 35.0,
+                  "label": "Testkonto", "stopping": False}
+    sp.slots = {s: {"state": "idle"} for s in sp.session["symbols"]}
+    assert not sp.busy("BTC/USDT:USDT")                  # nur suchen -> Markt frei fuer Schnell-Orders
+    sp.step("BTC/USDT:USDT")
+    sp.step("ETH/USDT:USDT")
+    assert sp.slots["BTC/USDT:USDT"]["state"] == "pending" and sp.busy("BTC/USDT:USDT")
+    assert sp.slots["ETH/USDT:USDT"]["state"] == "idle"   # dort ist schon etwas offen -> warten
+    assert "wartet" in sp.slots["ETH/USDT:USDT"]["signal"]["votes"]
+    occupied.clear()
+    sp.step("ETH/USDT:USDT")
+    assert sp.slots["ETH/USDT:USDT"]["state"] == "pending"
+
+
 def test_ki_autopilot_safety_rules():
     from bot.speed import PaperBroker, SpeedTrader
 
@@ -2273,3 +2299,18 @@ def test_forecast_with_all_data_sources():
     fc = build(df, {"btc": df, "eth": df}, funding=funding, macro=macro)
     assert fc is not None and fc["decision"] in ("LONG", "SHORT")
     assert {"macro", "funding", "book_imb", "wall_bid", "btc_r1", "eth_r1", "m5_pattern_score"} <= set(fc["feature_names"])
+
+
+def test_forecast_scenario_moves_like_a_chart():
+    from bot.forecast import path
+
+    fc = {"time": 1_700_000_100, "decision": "LONG", "typical_30_pct": 0.4, "sd_5m_pct": 0.15,
+          "nodes": [{"sec": 0, "ret": 0.0, "band": 0.0}, {"sec": 1800, "ret": 0.01, "band": 0.6}]}
+    p = path(fc, 100.0, fc["time"], seed=7)
+    prices = [x["price"] for x in p]
+    assert prices[0] == pytest.approx(100.0) and prices[-1] == pytest.approx(100.4, rel=1e-3)   # Richtung LONG
+    moves = np.diff(prices)
+    assert (moves > 0).any() and (moves < 0).any()                                             # Auf und Ab
+    assert path(fc, 100.0, fc["time"], seed=7) == p                                            # stabil
+    down = path({**fc, "decision": "SHORT"}, 100.0, fc["time"], seed=7)
+    assert down[-1]["price"] == pytest.approx(99.6, rel=1e-3)

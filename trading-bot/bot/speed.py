@@ -264,7 +264,8 @@ class SpeedTrader:
         self.market: dict[str, dict] = {}
 
     # --- Steuerung -------------------------------------------------------
-    def start(self, symbols: list[str], broker, equity: float, label: str, **opts) -> str:
+    def start(self, symbols: list[str], broker, equity: float, label: str, free_fn=None, **opts) -> str:
+        """free_fn(sym) -> True, wenn im Konto in diesem Markt nichts anderes offen ist (sonst wird dort gewartet)."""
         with self.lock:
             if self.active:
                 raise RuntimeError(f"{self.name} laeuft bereits")
@@ -278,7 +279,7 @@ class SpeedTrader:
                 raise ValueError(f"Einsatz x Hebel muss mind. {p['min_notional']:g} USDT sein (Bitget-Minimum)")
             if p["margin_usdt"] > equity:
                 raise ValueError(f"Einsatz {p['margin_usdt']:g} USDT ist mehr als verfuegbar ({equity:.2f})")
-            self.cur, self.broker = p, broker
+            self.cur, self.broker, self.free_fn = p, broker, free_fn
             now = time.time()
             self.session = {"symbols": list(symbols), "start": now, "label": label, "stopping": False,
                             "end": now + minutes * 60 if minutes > 0 else float("inf"),
@@ -309,7 +310,10 @@ class SpeedTrader:
                 (f"{n} offene Position(en) laufen mit Stop und Ziel weiter, bis sie zu sind" if n else "Keine offene Position"))
 
     def busy(self, sym: str) -> bool:
-        return self.active and sym in self.session.get("symbols", [])
+        """Haelt die Sitzung in diesem Markt gerade selbst eine Position/Order auf dem echten Konto?
+        (Simulation sperrt nichts; ein Markt, in dem nur gesucht wird, ist frei.)"""
+        return (self.active and self.session.get("label") != "Simulation"
+                and (self.slots.get(sym) or {}).get("state") in ("pending", "open"))
 
     # --- Ablauf ------------------------------------------------------------
     def _event(self, text: str) -> None:
@@ -414,6 +418,10 @@ class SpeedTrader:
         now = time.time()
         if sl["state"] == "idle":
             if side == 0 or self.session.get("stopping") or len(self.trades) >= p["max_trades"]:
+                return
+            free_fn = getattr(self, "free_fn", None)
+            if free_fn is not None and not free_fn(sym):
+                sl["signal"]["votes"] = {**votes, "wartet": "andere Position in diesem Markt offen"}
                 return
             price = tick["bid"] if side == 1 else tick["ask"]
             qty = self._qty(sym, price)

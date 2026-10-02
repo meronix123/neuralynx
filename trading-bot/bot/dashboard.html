@@ -1460,8 +1460,10 @@ function ghostCandles(d, last, step) {
     const cl = pts[pts.length - 1].price, hiP = Math.max(prev, ...pts.map(p => p.price)), loP = Math.min(prev, ...pts.map(p => p.price));
     const w = cl * range * Math.min(1, Math.sqrt(step / 300)) * 0.5;
     out.push({ time: t0, open: prev, high: hiP + w, low: loP - w, close: cl });
-    const b = pts[pts.length - 1].band / 100 * cl;
-    band.push({ time: t0, hi: cl + b, lo: cl - b });
+    // Band ruhig um die Hauptrichtung (gerade Linie vom jetzigen Kurs zum Szenario-Ziel)
+    const p0 = path[0], pe = path[path.length - 1], fr = Math.min(1, Math.max(0, (t0 + step - p0.time) / Math.max(1, pe.time - p0.time)));
+    const mid = last.close + (pe.price - last.close) * fr, b = pts[pts.length - 1].band / 100 * mid;
+    band.push({ time: t0, hi: mid + b, lo: mid - b });
     prev = cl;
     if (t1 >= end) break;
     k++;
@@ -1515,7 +1517,7 @@ function applyForecast(ser, d, last, tfSec, infoId) {
   const until = new Date((d.valid_until) * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
   const end = d.path && d.path.length ? d.path[d.path.length - 1].price : null;
   info.innerHTML = `<span class="kibadge ${up ? "up" : "down"}">KI: ${up ? "&#9650; LONG" : "&#9660; SHORT"} ${q(d.confidence)}</span> ` +
-    `30 min &rarr; ${end ? px(end) : "-"} &middot; neu um ${until} &middot; ` +
+    `Kerzen = Szenario, falls die KI recht hat (30 min &rarr; ${end ? px(end) : "-"}) &middot; neu um ${until} &middot; ` +
     `Treffer live ${q(lv.hit)} (${lv.n || 0}) &middot; Test ${q(d.hit_30m)} &middot; ` +
     `<span title="${d.bot_note || ""}">Bot: ${d.bot_uses ? "nutzt KI" : "noch nicht"}</span>` +
     (d.note ? ` &middot; <span style="color:#f59e0b">${d.note}</span>` : "") +

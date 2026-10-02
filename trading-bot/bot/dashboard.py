@@ -102,9 +102,6 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
     sp = sp or bot.speed
     other = bot.autopilot if sp is bot.speed else bot.speed
     syms = [s for s in body.get("symbols") or [] if s]
-    clash = [s for s in syms if other.busy(s)]
-    if clash:
-        raise RuntimeError(f"In {', '.join(x.split(':')[0] for x in clash)} laeuft schon {other.name}")
     opts = {k: _num(body.get(k)) for k in ("minutes", "margin_usdt", "leverage", "aggressiveness", "min_conf")}
     opts = {k: (int(v) if k in ("minutes", "leverage", "aggressiveness") else float(v)) for k, v in opts.items() if v}
     if "min_conf" in opts and opts["min_conf"] > 1:
@@ -116,12 +113,18 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
         if not account.demo and body.get("confirm") != "JA":
             raise RuntimeError(f"{sp.name} mit ECHTEM Geld nur mit Bestaetigung JA")
         v = account.view()
-        busy = {p["symbol"] for p in v.get("positions") or []} | {t["symbol"] for t in account.tickets().active()}
-        busy |= set((getattr(bot, "state", None) or {}).get("meta", {}))
-        clash = [s for s in syms if s in busy]
-        if clash:
-            raise RuntimeError(f"In {', '.join(x.split(':')[0] for x in clash)} ist schon eine Position offen - "
-                               f"{sp.name} nur in freien Maerkten (sonst legt Bitget die Positionen zusammen)")
+
+        def free(sym):
+            """Im Konto nichts anderes offen (Einzel-Positionen, Bot, andere Sitzung)? Sonst dort warten,
+            denn Bitget wuerde die Positionen zusammenlegen."""
+            av = account.view()
+            if any(p["symbol"] == sym for p in av.get("positions") or []):
+                return False
+            if any(t["symbol"] == sym for t in account.tickets().active()):
+                return False
+            if sym in (getattr(bot, "state", None) or {}).get("meta", {}) or other.busy(sym):
+                return False
+            return True
         broker = BitgetBroker(account.client, sp.p, bot.cfg.get("margin_mode", "isolated"))
         for s in syms:          # Hebel/Margin-Modus fuer die Speed-Maerkte setzen
             for fn in (lambda: account.client.set_margin_mode(broker.mm, s, {"marginCoin": "USDT"}),
@@ -139,7 +142,7 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
         broker = PaperBroker(lambda s: sp.market.get(s) or bot.speed_data(s)[2], sp.p)
         equity = float(bot.cfg.get("paper", {}).get("start_equity", 35))
         label = "Simulation"
-    return sp.start(syms, broker, equity, label, **opts)
+    return sp.start(syms, broker, equity, label, free_fn=free if body.get("target") == "account" else None, **opts)
 
 
 def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
@@ -189,7 +192,8 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     if path == "/api/account/quick":
         for tr in (getattr(bot, "speed", None), getattr(bot, "autopilot", None)):
             if tr is not None and tr.busy(body.get("symbol")):
-                raise RuntimeError(f"In diesem Markt laeuft gerade {tr.name} - bitte warten oder stoppen")
+                raise RuntimeError(f"{tr.name} haelt in diesem Markt gerade selbst eine Position - Bitget wuerde "
+                                   "deine Order damit zusammenlegen. Anderen Markt waehlen oder warten, bis sie zu ist.")
         st = getattr(bot, "state", None) or {}
         if (bot.cfg.get("mode") == account.active and
                 (body.get("symbol") in st.get("meta", {}) or body.get("symbol") in st.get("pending", {}))):

@@ -231,7 +231,7 @@ class Bot:
                 reasons[sym] = "Position offen"
                 continue
             if self.speed.busy(sym) or self.autopilot.busy(sym):
-                reasons[sym] = f"{'Speed-Trading' if self.speed.busy(sym) else 'KI-Autopilot'} laeuft in diesem Markt"
+                reasons[sym] = f"{'Speed-Trading' if self.speed.busy(sym) else 'KI-Autopilot'} haelt hier gerade eine Position"
                 continue
             if sym in self.state["pending"]:
                 reasons[sym] = "Limit-Order wartet auf Ausfuehrung"
