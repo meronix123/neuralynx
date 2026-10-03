@@ -2314,3 +2314,48 @@ def test_forecast_scenario_moves_like_a_chart():
     assert path(fc, 100.0, fc["time"], seed=7) == p                                            # stabil
     down = path({**fc, "decision": "SHORT"}, 100.0, fc["time"], seed=7)
     assert down[-1]["price"] == pytest.approx(99.6, rel=1e-3)
+
+
+def test_confidence_per_strength_finds_rare_edges_but_not_noise():
+    from bot.forecast import _local_cal, selective
+
+    rng = np.random.default_rng(3)
+    n = 4000
+    p = rng.uniform(0.35, 0.65, n)
+    # nur bei starker Meinung (|p-0.5| > 0.12) liegt die KI zu 70 % richtig, sonst Zufall
+    strong = np.abs(p - 0.5) > 0.12
+    right = np.where(strong, rng.random(n) < 0.7, rng.random(n) < 0.5)
+    y = np.where(right, (p >= 0.5), (p < 0.5)).astype(float)
+    p_cal, z, _ = _local_cal(p, y, 0.64, 1)
+    assert p_cal > 0.6 and z > 3                        # starke Meinung -> echte Sicherheit
+    assert abs(_local_cal(p, y, 0.51, 1)[0] - 0.5) < 0.02   # schwache Meinung -> ~50 %
+    noise = (rng.random(n) < 0.5).astype(float)
+    assert _local_cal(p, noise, 0.64, 6)[0] == pytest.approx(0.5, abs=0.02)   # Zufall -> keine Sicherheit
+    sel = {r["min_conf"]: r for r in selective(p, y, 1)}
+    assert sel[0.56]["per_day"] > 0 and sel[0.56]["hit"] > 0.62
+    assert all(r["n"] == 0 or r["hit"] is not None for r in sel.values())
+
+
+def test_ki_autopilot_fast_mode_uses_short_forecast_and_tight_stops():
+    from bot.speed import PaperBroker, SpeedTrader
+
+    fc = {"ok": True, "p_up": 0.5, "p_up_raw": 0.5, "band_pct": 0.8, "sd_5m_pct": 0.3,
+          "by_horizon": [{"min": 5, "p_up": 0.6}, {"min": 10, "p_up": 0.55}, {"min": 30, "p_up": 0.5}]}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.0},
+                     forecast_fn=lambda s: fc, kind="ki")
+    broker = PaperBroker(lambda s: ap.market[s], ap.p)
+    ap.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=5, leverage=10, fast=True, min_conf=0.56)
+    ap.stop(close=True)
+    ap.thread.join(5)
+    assert ap.cur["fast"] and ap.cur["loop_s"] == 1.5 and ap.cur["partial_r"] == 0.8
+    ap.cur["loop_s"] = 0.0
+    ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 35.0,
+                                    "label": "Simulation", "stopping": False}
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "pending" and s["side"] == 1                   # 5-min-Prognose 60 % -> LONG
+    assert 99.99 - s["sl"] == pytest.approx(0.3, rel=0.05)               # Stop = 5-Minuten-Schwankung (eng)
+    assert s["tp"] - 99.99 == pytest.approx(0.45, rel=0.05)              # Ziel 1,5 R

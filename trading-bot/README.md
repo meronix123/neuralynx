@@ -131,6 +131,20 @@ kleine Bewegungen: Signal aus 1/2/3/5-Minuten-Chart und Orderbuch, Einstieg per 
 Netto-Ergebnis NACH Gebuehren. Ehrlich: Bei so kleinen Bewegungen fressen Gebuehren viel - erst in
 der Simulation und auf dem Testkonto pruefen, ob netto etwas uebrig bleibt.
 
+## KI-Bericht
+
+```
+python run.py ki-bericht
+```
+Wertet die KI auf diesem PC aus: gepruefte Live-Entscheidungen je Markt (gesamt, je Sicherheitsstufe),
+Test-Trefferquote je Tag, frischer Test mit den gespeicherten Kerzen je Vorhersagezeit (5-30 min) und
+wie viele Trades pro Tag der Autopilot bei 54/56/58/60 % Mindest-Sicherheit gemacht haette - und wie
+oft er dann richtig lag.
+
+KI-Autopilot "Fast": Vorhersage 5-10 min, enge Stops/Ziele aus der 5-Minuten-Schwankung, Pruefung alle
+1,5 s - viele Trades, aber auch viele Gebuehren. Nur sinnvoll, wenn der KI-Bericht auf 5-10 min eine
+Trefferquote klar ueber 55 % zeigt.
+
 ## Vom Handy aus ansehen (Fernzugriff)
 
 1. Auf dem PC: `python run.py fernzugriff` - Passwort festlegen (mind. 10 Zeichen, wird nur als Hash gespeichert).

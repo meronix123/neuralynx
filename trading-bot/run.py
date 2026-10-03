@@ -168,7 +168,7 @@ def signals(mode: str = "paper") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "optimize", "diagnose", "report", "signale", "fernzugriff", "modus", "check", "bot"])
+    ap.add_argument("command", choices=["backtest", "optimize", "diagnose", "ki-bericht", "report", "signale", "fernzugriff", "modus", "check", "bot"])
     ap.add_argument("option", nargs="?", default="")
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
@@ -198,6 +198,12 @@ def main() -> None:
         optimize_cli(cfg, args.days or (120 if args.fast else 365), fast=args.fast)
         return
 
+    if args.command == "ki-bericht":
+        from bot.config import ROOT
+        from bot.forecast import report as ki_report
+        print("Werte die KI aus (frischer Test je Markt dauert etwas) ...")
+        print(ki_report(ROOT / "data", cfg["mode"], None))
+        return
     if args.command == "diagnose":
         from bot.optimize import diagnose_cli
         diagnose_cli(cfg, args.days or 90)

@@ -107,6 +107,7 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
     if "min_conf" in opts and opts["min_conf"] > 1:
         opts["min_conf"] /= 100                     # 56 -> 0,56
     opts["use_raw"] = bool(body.get("use_raw"))
+    opts["fast"] = bool(body.get("fast"))
     if body.get("target") == "account":
         if not account or not account.connected:
             raise RuntimeError("Erst im Reiter Bitget-Konto ein Konto verbinden")

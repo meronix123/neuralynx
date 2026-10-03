@@ -347,7 +347,8 @@
         <span id="ap-syms"></span>
         <label>Einsatz <input id="ap-margin" value="5" style="width:52px"> USDT</label>
         <label>Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
-        <label>KI-Sicherheit ab <select id="ap-conf"><option value="54">54 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
+        <label>Tempo <select id="ap-fast"><option value="0">normal (bis 30 min)</option><option value="1">Fast (5-10 min, sehr viele Trades)</option></select></label>
+        <label>KI-Sicherheit ab <select id="ap-conf"><option value="53">53 %</option><option value="54">54 %</option><option value="55">55 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
         <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
         <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
         <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
@@ -1382,7 +1383,7 @@ function renderSession(k) {
     ? `<b class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"}</b> @ ${px(v.entry)} &middot; Stop ${px(v.sl)}${v.partial ? " &middot; Haelfte verkauft" : ""}`
     : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : "sucht"}${sig(v)}`).join(" &middot; ");
   out(`<div class="sprun">
-    ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}) seit ${hm(sp.running_s || 0)} &middot; ${slots}<br>` :
+    ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}${(sp.params || {}).fast ? " &middot; FAST" : ""}) seit ${hm(sp.running_s || 0)} &middot; ${slots}<br>` :
       sp.active ? `<b style="color:#f59e0b">AUS</b> - keine neuen Trades, offene Positionen laufen mit Stop und Ziel weiter &middot; ${slots}<br>` :
       `<b>AUS</b>${sp.stop_reason ? " (" + sp.stop_reason + ")" : ""} &middot; `}
     ${sp.trades || 0} Abschluesse &middot; ${sp.wins || 0} im Plus (${q(sp.hit)}) &middot; brutto ${n4(sp.gross)} &middot; Gebuehren ${n4(-(sp.fees || 0))} &middot;
@@ -1414,7 +1415,7 @@ async function sessionStart(k) {
   const body = { symbols: syms, margin_usdt: val(k + "-margin").replace(",", "."), leverage: val(k + "-lev"),
                  target: val(k + "-target") };
   if (k === "sp") body.aggressiveness = val("sp-agg");
-  if (k === "ap") { body.min_conf = val("ap-conf"); body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; }
+  if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; }
   const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
   if (body.target === "account") {
     if (!acc || !acc.connected) return toast("Erst im Reiter Bitget-Konto ein Konto verbinden", false);

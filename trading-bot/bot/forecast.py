@@ -264,9 +264,54 @@ def _logloss(p, y):
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
 
 
+def _local_cal(p_te: np.ndarray, yt: np.ndarray, p_now: float, h: int) -> tuple[float, float, int]:
+    """Sicherheit je Meinungsstaerke: Wie oft lag die KI an ungesehenen Daten richtig, wenn sie eine
+    aehnlich starke Meinung hatte wie jetzt? -> (kalibrierte Wahrscheinlichkeit "hoeher", z-Wert, Anzahl).
+    Ohne nachweisbaren Vorsprung (z < 1) bleibt es bei 0,5."""
+    n = len(p_te)
+    k = int(min(n, max(300, n * 0.12)))
+    near = np.argsort(np.abs(p_te - p_now))[:k]            # die k aehnlichsten Vorhersagen
+    up = float(yt[near].mean())
+    n_eff = max(1.0, k / h)                                 # ueberlappende Zeitraeume zaehlen weniger
+    z = (up - 0.5) / math.sqrt(0.25 / n_eff)
+    shrunk = (up * n_eff + 0.5 * 30) / (n_eff + 30)         # bei wenig Daten Richtung 0,5 ziehen
+    # strenger als bei einer einzelnen Pruefung: es wird unter 6 Vorhersagezeiten die beste genommen
+    trust = max(0.0, min(1.0, (abs(z) - 1.8) / 2.0))
+    return 0.5 + (shrunk - 0.5) * trust, z, k
+
+
+def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 0.56, 0.58, 0.60)) -> list[dict]:
+    """Wie oft haette die KI an ungesehenen Daten mindestens X % Sicherheit gezeigt - und wie oft lag sie
+    dann richtig? (Sicherheit je Meinungsstaerke wie live, aus den jeweils aehnlichsten Vorhersagen.)"""
+    n = len(p_te)
+    if n < 300:
+        return []
+    order = np.argsort(p_te)
+    ys = yt[order]
+    k = int(min(n, max(300, n * 0.12)))
+    csum = np.r_[0.0, np.cumsum(ys)]
+    pos = np.arange(n)
+    lo = np.clip(pos - k // 2, 0, n - k)
+    up = (csum[lo + k] - csum[lo]) / k                     # Anteil "hoeher" bei aehnlicher Meinung
+    n_eff = max(1.0, k / h)
+    z = (up - 0.5) / math.sqrt(0.25 / n_eff)
+    shrunk = (up * n_eff + 0.5 * 30) / (n_eff + 30)
+    trust = np.clip((np.abs(z) - 1.8) / 2.0, 0, 1)
+    p_cal = 0.5 + (shrunk - 0.5) * trust
+    conf = np.maximum(p_cal, 1 - p_cal)
+    right = (p_cal >= 0.5) == (ys == 1)
+    days = n * STEP_MIN / 1440
+    out = []
+    for t in thresholds:
+        sel = conf >= t
+        out.append({"min_conf": t, "per_day": round(float(sel.sum()) / days, 1) if days else 0.0,
+                    "hit": round(float(right[sel].mean()), 3) if sel.any() else None, "n": int(sel.sum())})
+    return out
+
+
 def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | None = None,
           funding: pd.DataFrame | None = None, macro: pd.DataFrame | None = None, gold: bool = False,
-          boost: bool = True) -> dict | None:
+          boost: bool = True, keep_test: bool = False) -> dict | None:
     """Modell aus 5-Minuten-Kerzen (ts, open, high, low, close, volume; die letzte darf offen sein).
 
     Drei Abschnitte: Lernen (erste 70 %), Auswahl (naechste 10 %: Einstellungen + Mischung linear/Baeume),
@@ -316,6 +361,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         mix = min((0.0, 0.5, 1.0), key=lambda a_: _logloss((1 - a_) * pl + a_ * pb, y30_all[va]))
 
     probs, raw, moves, quality = [], [], [], []
+    test_keep: dict = {}
     for h in HORIZONS:
         idx = idx30 if h == H else np.arange(warm, n_closed - h)
         ret = (lr[idx + h] - lr[idx]) * 100
@@ -344,15 +390,28 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         n_eff = max(1.0, len(te_i) / h)
         z = (hit - max(0.5, float(base))) / math.sqrt(0.25 / n_eff)
         trust = max(0.0, min(1.0, (z - 1.0) / 2.0))
+        # Trefferquote in den 20 % sichersten Momenten (dort steigt der Autopilot ein)
+        strong = np.abs(p_te - 0.5) >= np.quantile(np.abs(p_te - 0.5), 0.8)
+        hit_top = float(((p_te[strong] >= 0.5) == (yt[strong] == 1)).mean()) if strong.any() else None
+        p_loc, z_loc, _ = _local_cal(p_te, yt, p_now, h)
+        if keep_test:
+            test_keep[h] = (p_te.copy(), yt.copy())
         quality.append({"min": h * STEP_MIN, "hit": round(hit, 3), "base": round(float(base), 3),
                         "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0, "n_test": int(len(te_i)),
-                        "trust": round(trust, 2), "z": round(z, 2)})
-        probs.append(0.5 + (p_now - 0.5) * trust)
+                        "trust": round(trust, 2), "z": round(z, 2),
+                        "hit_top20": None if hit_top is None else round(hit_top, 3), "z_now": round(z_loc, 2)})
+        # Sicherheit: je Meinungsstaerke gemessen; die globale Messung zaehlt, wenn sie mehr hergibt
+        p_glob = 0.5 + (p_now - 0.5) * trust
+        probs.append(p_loc if abs(p_loc - 0.5) > abs(p_glob - 0.5) else p_glob)
         raw.append(p_now)
         moves.append((float(np.mean(np.abs(ret[-2000:]))), float(np.std(ret[-2000:]))))
     live = live or {}
-    p30, note = _calibrate(probs[-1], live)
-    lean = p30 if abs(p30 - 0.5) > 1e-9 else raw[-1]       # ohne Vorsprung: Richtung des Rohmodells
+    # Entscheidung auf der Vorhersagezeit, auf der die KI gerade nachweislich am staerksten ist
+    best = max(range(len(HORIZONS)), key=lambda i: abs(probs[i] - 0.5))
+    if abs(probs[best] - 0.5) < 1e-9:
+        best = len(HORIZONS) - 1
+    p30, note = _calibrate(probs[best], live)
+    lean = p30 if abs(p30 - 0.5) > 1e-9 else raw[best]     # ohne Vorsprung: Richtung des Rohmodells
     decision = "LONG" if lean >= 0.5 else "SHORT"
     anchor_ts = int(df["ts"].iloc[n_closed]) // 1000          # Beginn der offenen Kerze
     # Pfad = Meinung des Modells (roh) in Richtung der Entscheidung; wie sehr man ihr trauen kann,
@@ -366,13 +425,16 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     rng = (df["high"] - df["low"]).astype(float).to_numpy()[-300:-1] / df["close"].astype(float).to_numpy()[-300:-1]
     return {
         "time": anchor_ts, "decision": decision,
-        "confidence": round(max(p30, 1 - p30), 3), "p_up": round(p30, 3), "p_up_raw": round(raw[-1], 3),
+        "confidence": round(max(p30, 1 - p30), 3), "p_up": round(p30, 3), "p_up_raw": round(raw[best], 3),
+        "decision_min": HORIZONS[best] * STEP_MIN,
+        "by_horizon": [{"min": h * STEP_MIN, "p_up": round(pp, 3)} for h, pp in zip(HORIZONS, probs)],
         "nodes": [{"sec": s_, "ret": round(r, 4), "band": round(b_, 4)} for s_, r, b_ in nodes],
         "change_pct": round(nodes[-1][1], 3), "band_pct": round(nodes[-1][2], 3),
         "candle_range_pct": round(float(np.median(rng)) * 100, 4),
         "typical_30_pct": round(moves[-1][0], 4), "sd_5m_pct": round(moves[0][1], 4),
         "quality": quality, "hit_30m": q30["hit"], "base_30m": q30["base"], "useful": bool(useful),
         "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]), "feature_names": names,
+        **({"test": test_keep} if keep_test else {}),
         "model": {"l2": L2_, "half_life_days": round(HL_ * STEP_MIN / 1440, 1), "trees": mix,
                   "kind": "linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume"},
     }
@@ -425,7 +487,8 @@ class ForecastLog:
         if any(x["sym"] == sym and x["time"] == fc["time"] for x in self.items[-200:]):
             return                                   # eine Entscheidung je Markt und 5-Minuten-Kerze
         self.items.append({"sym": sym, "time": fc["time"], "price": price, "decision": fc["decision"],
-                           "conf": fc["confidence"], "band": fc["band_pct"], "actual": None})
+                           "conf": fc["confidence"], "band": fc["band_pct"], "actual": None,
+                           "p_raw": fc.get("p_up_raw"), "h_min": fc.get("decision_min", 30)})
         self.items = self.items[-self.keep:]
         self._save()
 
@@ -764,3 +827,79 @@ def ki_blocks(side: str, fc: dict | None, s: dict) -> str:
     if fc["decision"] != want and fc["confidence"] >= s.get("ki_min_conf", 0.55):
         return f"KI dagegen: {fc['decision']} mit {round(fc['confidence'] * 100)} % Sicherheit (naechste 30 min)"
     return ""
+
+
+def report(folder: Path, mode: str, symbols: list[str] | None = None) -> str:
+    """KI-Bericht aus den Daten auf diesem PC (python run.py ki-bericht)."""
+    lines = []
+    w = lines.append
+    lg = ForecastLog(folder / f"ki_entscheidungen_{mode}.json")
+    meta = {}
+    try:
+        meta = json.loads((folder / "ki" / "lernen.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    syms = symbols or sorted({x["sym"] for x in lg.items} | set(meta))
+    pct = lambda v: "-" if v is None else f"{v * 100:.1f} %"
+    w(f"===== KI-BERICHT ({mode}) =====")
+    done_all = [x for x in lg.items if x["actual"] is not None and x["actual"] != x["price"]]
+    w(f"Gepruefte Live-Entscheidungen insgesamt: {len(done_all)}")
+    for sym in syms:
+        w("")
+        w(f"--- {sym} ---")
+        m = meta.get(sym, {})
+        if m.get("since"):
+            w(f"lernt seit {time.strftime('%d.%m. %H:%M', time.localtime(m['since']))}, {m.get('retrains', 0)}x neu gelernt")
+        th = m.get("test_hit") or {}
+        if th:
+            w("Test-Trefferquote je Tag: " + ", ".join(f"{k[5:]}: {pct(v)}" for k, v in list(th.items())[-10:]))
+        done = [x for x in done_all if x["sym"] == sym]
+        if done:
+            ok = [(x["actual"] > x["price"]) == (x["decision"] == "LONG") for x in done]
+            w(f"Live: {len(done)} Entscheidungen geprueft, {pct(sum(ok) / len(ok))} richtig")
+            for lo_, hi_, name in ((0.0, 0.52, "unter 52 %"), (0.52, 0.54, "52-54 %"), (0.54, 0.56, "54-56 %"),
+                                   (0.56, 0.60, "56-60 %"), (0.60, 1.01, "ueber 60 %")):
+                sel = [o for o, x in zip(ok, done) if lo_ <= x["conf"] < hi_]
+                if sel:
+                    w(f"   Sicherheit {name:<11} {len(sel):>5}x  davon richtig {pct(sum(sel) / len(sel))}")
+            raw = [(o, x) for o, x in zip(ok, done) if x.get("p_raw") is not None]
+            if len(raw) >= 50:
+                strong = sorted(raw, key=lambda t: -abs(t[1]["p_raw"] - 0.5))[:max(10, len(raw) // 5)]
+                okr = [(t[1]["actual"] > t[1]["price"]) == (t[1]["p_raw"] >= 0.5) for t in strong]
+                w(f"   Rohmeinung, staerkste 20 %: {len(strong)}x, Richtung richtig {pct(sum(okr) / len(okr))}")
+        f = folder / "ki" / f"kerzen_{sym.split(':')[0].replace('/', '')}_5m.csv"
+        if not f.exists():
+            continue
+        try:
+            df = pd.read_csv(f)
+            lead = {}
+            for ls in ("BTC/USDT:USDT", "ETH/USDT:USDT"):
+                lf = folder / "ki" / f"kerzen_{ls.split(':')[0].replace('/', '')}_5m.csv"
+                if ls != sym and lf.exists() and "XAU" not in sym and "XAG" not in sym:
+                    lead[ls.split("/")[0].lower()] = pd.read_csv(lf)
+            df = pd.concat([df, df.iloc[-1:]]).reset_index(drop=True)      # letzte Zeile als "offene" Kerze
+            fc = build(df, lead, keep_test=True)
+        except Exception as e:  # noqa: BLE001
+            w(f"Frischer Test nicht moeglich: {e}")
+            continue
+        if not fc:
+            w("Zu wenig gespeicherte Kerzen fuer einen Test")
+            continue
+        w(f"Frischer Test mit {fc['trained_on']} Kerzen ({fc['trained_on'] * STEP_MIN / 1440:.0f} Tage), "
+          f"{fc['features']} Merkmale, Modell {fc['model']['kind']}:")
+        for q in fc["quality"]:
+            w(f"   {q['min']:>2} min: Treffer {pct(q['hit'])} (Zufall {pct(q['base'])}), "
+              f"sicherste 20 %: {pct(q.get('hit_top20'))}, Vorsprung z={q['z']:+.1f}")
+        best = max(fc["test"].items(), key=lambda kv: (kv[1][0] - 0.5).std())
+        w("Autopilot haette (ungesehene Daten, beste Vorhersagezeit) eingestiegen:")
+        for h, (p_te, yt) in sorted(fc["test"].items()):
+            sel = selective(p_te, yt, h)
+            if not sel:
+                continue
+            w(f"   {h * STEP_MIN:>2} min: " + " | ".join(
+                f"ab {round(r['min_conf'] * 100)} %: {r['per_day']:.1f}/Tag, richtig {pct(r['hit'])}" for r in sel[1:]))
+        _ = best
+        w(f"Jetzt: {fc['decision']} mit {pct(fc['confidence'])} (auf {fc['decision_min']} min)")
+    w("")
+    w("Faustregel: Eine Schwelle lohnt sich, wenn 'richtig' dort klar ueber 55 % liegt und genug Trades/Tag kommen.")
+    return "\n".join(lines)

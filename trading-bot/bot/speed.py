@@ -38,7 +38,9 @@ AUTO_DEFAULTS = {
     "partial_r": 1.0,          # ab +1 R ...
     "partial_frac": 0.5,       # ... die Haelfte verkaufen
     "trail_r": 1.0,            # danach Stop im Abstand 1 R hinter dem besten Kurs nachziehen
+    "fast": False,             # Fast-Modus: 5-10-min-Prognose, enge Stops/Ziele, sehr schnelle Reaktion
 }
+FAST_AUTO = {"loop_s": 1.5, "entry_timeout_s": 20, "be_r": 0.5, "partial_r": 0.8, "trail_r": 0.7, "tp_r": 1.5}
 TFS = {"1m": 1, "2m": 2, "3m": 3, "5m": 5}
 
 
@@ -272,6 +274,8 @@ class SpeedTrader:
             if not symbols:
                 raise ValueError("Mindestens einen Markt waehlen")
             p = {**self.p, **{k: v for k, v in opts.items() if v is not None}}
+            if self.kind == "ki" and p.get("fast"):
+                p.update(FAST_AUTO)
             minutes = int(p.get("minutes") or 0)              # 0 = laeuft, bis "Aus" gedrueckt wird
             if self.kind == "ki" and p.get("use_raw") and label != "Simulation":
                 raise ValueError("Rohsignal (unbewaehrte KI) nur in der Simulation")
@@ -284,7 +288,7 @@ class SpeedTrader:
             self.session = {"symbols": list(symbols), "start": now, "label": label, "stopping": False,
                             "end": now + minutes * 60 if minutes > 0 else float("inf"),
                             "equity0": equity, "params": {k: p.get(k) for k in ("minutes", "margin_usdt", "leverage",
-                                                                                 "aggressiveness", "min_conf", "use_raw")}}
+                                                                                 "aggressiveness", "min_conf", "use_raw", "fast")}}
             self.slots = {s: {"state": "idle"} for s in symbols}
             self.trades, self.events = [], []
             self.active = True
@@ -396,6 +400,11 @@ class SpeedTrader:
         if not fc or not fc.get("ok"):
             return 0, {"KI": (fc or {}).get("msg", "keine Prognose")}, None
         p_up = fc["p_up_raw"] if self.cur.get("use_raw") else fc["p_up"]
+        if self.cur.get("fast") and not self.cur.get("use_raw"):
+            # Fast-Modus: die staerkste Prognose auf 5-10 Minuten
+            short = [x for x in fc.get("by_horizon") or [] if x["min"] <= 10]
+            if short:
+                p_up = max(short, key=lambda x: abs(x["p_up"] - 0.5))["p_up"]
         conf = max(p_up, 1 - p_up)
         side = (1 if p_up >= 0.5 else -1) if conf >= self.cur["min_conf"] else 0
         return side, {"KI": "LONG" if p_up >= 0.5 else "SHORT", "Sicherheit": round(conf, 3)}, fc
@@ -405,7 +414,10 @@ class SpeedTrader:
         if self.kind != "ki" or not fc:
             return levels(df, price, side, p)
         fees = price * (p["maker"] + p["taker"])
-        r = max(price * fc["band_pct"] / 100 * p["sl_band"], price * 0.0015, 2 * fees)
+        if p.get("fast"):          # enge Stops aus der 5-Minuten-Schwankung
+            r = max(price * float(fc.get("sd_5m_pct") or 0.1) / 100, price * 0.0008, 2 * fees)
+        else:
+            r = max(price * fc["band_pct"] / 100 * p["sl_band"], price * 0.0015, 2 * fees)
         tp_d = max(r * p["tp_r"], p["min_tp_fee_x"] * fees)
         return price - side * r, price + side * tp_d
 
