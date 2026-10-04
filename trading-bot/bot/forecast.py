@@ -259,6 +259,14 @@ class Boost:
         return 1 / (1 + np.exp(-F))
 
 
+def _sr_pct(feats: pd.DataFrame, col: str) -> float | None:
+    """Abstand zum naechsten Widerstand/zur naechsten Unterstuetzung in % (letzte abgeschlossene Kerze)."""
+    if col not in feats or "atr_pct" not in feats or len(feats) < 2:
+        return None
+    v, a = float(feats[col].iloc[-2]), float(feats["atr_pct"].iloc[-2])
+    return None if v != v or a != a or v >= 10 else round(v * a, 4)
+
+
 def _logloss(p, y):
     p = np.clip(p, 1e-6, 1 - 1e-6)
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
@@ -311,7 +319,7 @@ def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 
 
 def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | None = None,
           funding: pd.DataFrame | None = None, macro: pd.DataFrame | None = None, gold: bool = False,
-          boost: bool = True, keep_test: bool = False) -> dict | None:
+          boost: bool = True, keep_test: bool = False, move_min: float = 0.1) -> dict | None:
     """Modell aus 5-Minuten-Kerzen (ts, open, high, low, close, volume; die letzte darf offen sein).
 
     Drei Abschnitte: Lernen (erste 70 %), Auswahl (naechste 10 %: Einstellungen + Mischung linear/Baeume),
@@ -330,7 +338,18 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     age = np.arange(len(df))[::-1].astype(float)
     warm = min(300, n_closed // 5)                 # die ersten Kerzen haben unvollstaendige Indikatoren
     H = HORIZONS[-1]
-    idx30 = np.arange(warm, n_closed - H)
+    # Nur aus Bewegungen lernen, die nach Gebuehren zaehlen (|Bewegung| >= move_min %), und nie aus
+    # Zeitraeumen, in denen der Markt still stand / geschlossen war (Gold/Silber nachts, Wochenende)
+    from .hours import flat_mask
+    flat_c = np.r_[0, np.cumsum(flat_mask(df))]
+
+    def labeled(idx, h):
+        ret_ = (lr[idx + h] - lr[idx]) * 100
+        alive = (flat_c[idx + h + 1] - flat_c[idx]) == 0
+        ok = alive & (np.abs(ret_) >= move_min)
+        return idx[ok], ret_[ok], ret_[alive]
+
+    idx30, ret30, _ = labeled(np.arange(warm, n_closed - H), H)
     if len(idx30) < 200:
         return None
     n = len(idx30)
@@ -340,7 +359,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         return idx[:a_end - h], idx[a_end:v_end - h], idx[v_end:]
 
     # 1) Einstellungen (Regularisierung, wie stark neuere Daten zaehlen) an der 30-min-Prognose waehlen
-    y30_all = ((lr[idx30 + H] - lr[idx30]) > 0).astype(float)
+    y30_all = (ret30 > 0).astype(float)
     tr, va, te = cut(np.arange(n), H)
     best = None
     for l2, hl in GRID:
@@ -363,8 +382,9 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     probs, raw, moves, quality = [], [], [], []
     test_keep: dict = {}
     for h in HORIZONS:
-        idx = idx30 if h == H else np.arange(warm, n_closed - h)
-        ret = (lr[idx + h] - lr[idx]) * 100
+        idx, ret, ret_alive = labeled(np.arange(warm, n_closed - h), h)
+        if len(idx) < 200:
+            return None
         y = (ret > 0).astype(float)
         nn = len(idx)
         t_end = int(nn * (1 - test_share))
@@ -404,7 +424,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         p_glob = 0.5 + (p_now - 0.5) * trust
         probs.append(p_loc if abs(p_loc - 0.5) > abs(p_glob - 0.5) else p_glob)
         raw.append(p_now)
-        moves.append((float(np.mean(np.abs(ret[-2000:]))), float(np.std(ret[-2000:]))))
+        moves.append((float(np.mean(np.abs(ret_alive[-2000:]))), float(np.std(ret_alive[-2000:]))))
     live = live or {}
     # Entscheidung auf der Vorhersagezeit, auf der die KI gerade nachweislich am staerksten ist
     best = max(range(len(HORIZONS)), key=lambda i: abs(probs[i] - 0.5))
@@ -435,6 +455,8 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         "quality": quality, "hit_30m": q30["hit"], "base_30m": q30["base"], "useful": bool(useful),
         "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]), "feature_names": names,
         **({"test": test_keep} if keep_test else {}),
+        "move_min": move_min, "labeled": int(len(idx30)),
+        "sr_up_pct": _sr_pct(feats, "m5_sr_up"), "sr_dn_pct": _sr_pct(feats, "m5_sr_dn"),
         "model": {"l2": L2_, "half_life_days": round(HL_ * STEP_MIN / 1440, 1), "trees": mix,
                   "kind": "linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume"},
     }

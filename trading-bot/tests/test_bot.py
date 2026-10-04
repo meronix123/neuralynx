@@ -2359,3 +2359,117 @@ def test_ki_autopilot_fast_mode_uses_short_forecast_and_tight_stops():
     assert s["state"] == "pending" and s["side"] == 1                   # 5-min-Prognose 60 % -> LONG
     assert 99.99 - s["sl"] == pytest.approx(0.3, rel=0.05)               # Stop = 5-Minuten-Schwankung (eng)
     assert s["tp"] - 99.99 == pytest.approx(0.45, rel=0.05)              # Ziel 1,5 R
+
+
+def test_metal_trading_hours_and_flat_detection():
+    from datetime import datetime, timezone
+
+    from bot.hours import close_before_weekend, entry_allowed, flat_mask, is_open, minutes_to_close
+
+    utc = timezone.utc
+    assert is_open("BTC/USDT:USDT", datetime(2026, 10, 3, 12, tzinfo=utc))           # Krypto: Samstag offen
+    assert not is_open("XAU/USDT:USDT", datetime(2026, 10, 3, 12, tzinfo=utc))       # Gold: Samstag zu
+    assert not is_open("XAG/USDT:USDT", datetime(2026, 10, 5, 21, 30, tzinfo=utc))   # taegliche Pause
+    assert is_open("XAU/USDT:USDT", datetime(2026, 10, 4, 22, 30, tzinfo=utc))       # Sonntagabend wieder offen
+    ok, why = entry_allowed("XAU/USDT:USDT", datetime(2026, 10, 6, 20, 45, tzinfo=utc))
+    assert not ok and "schliesst" in why                                              # 15 min vor der Pause
+    assert entry_allowed("XAU/USDT:USDT", datetime(2026, 10, 6, 12, tzinfo=utc))[0]
+    assert minutes_to_close("XAU/USDT:USDT", datetime(2026, 10, 9, 20, 0, tzinfo=utc)) == 60
+    assert close_before_weekend("XAU/USDT:USDT", datetime(2026, 10, 9, 20, 55, tzinfo=utc))
+    assert not close_before_weekend("XAU/USDT:USDT", datetime(2026, 10, 8, 20, 55, tzinfo=utc))
+    assert not close_before_weekend("BTC/USDT:USDT", datetime(2026, 10, 9, 20, 55, tzinfo=utc))
+    df = pd.DataFrame({"high": [1, 2, 2, 2, 2, 3.0], "low": [0.5, 2, 2, 2, 2, 2.5], "volume": [1, 0, 0, 0, 0, 5.0]})
+    assert list(flat_mask(df)) == [False, True, True, True, True, False]
+
+
+def test_forecast_ignores_closed_market_periods():
+    """Gold/Silber: Stillstand (Markt zu) darf keine falsche Treffsicherheit erzeugen."""
+    from bot.forecast import build
+
+    rng = np.random.default_rng(3)
+    n = 9000
+    ts = 1_700_000_000_000 + np.arange(n) * 300_000
+    t = pd.to_datetime(ts, unit="ms", utc=True)
+    closed = np.asarray((t.hour == 21) | (t.weekday == 5) | ((t.weekday == 4) & (t.hour >= 21))
+                        | ((t.weekday == 6) & (t.hour < 22)))
+    c = 2000 * np.exp(np.cumsum(np.where(closed, 0.0, rng.normal(0, 0.0015, n))))
+    o = np.r_[c[0], c[:-1]]
+    df = pd.DataFrame({"ts": ts, "open": o, "close": c, "high": np.where(closed, c, np.maximum(o, c) * 1.0005),
+                       "low": np.where(closed, c, np.minimum(o, c) * 0.9995), "volume": np.where(closed, 0.0, 1000.0)})
+    fc = build(df)
+    assert not fc["useful"] and fc["confidence"] == pytest.approx(0.5, abs=0.02)
+    assert all(abs(q["base"] - 0.5) < 0.04 for q in fc["quality"])       # kein "Stillstand = faellt" mehr
+    assert fc["labeled"] < 0.8 * n
+
+
+def _ap(fc, sd=None, cfg=None, last=100.0):
+    from bot.speed import PaperBroker, SpeedTrader
+
+    df = sd if sd is not None else _speed_df(120, 0.0)
+    book = {"bids": [[last - 0.01, 10]] * 20, "asks": [[last + 0.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": last, "bid": last - 0.01, "ask": last + 0.01}),
+                     {"loop_s": 0.0, **(cfg or {})}, forecast_fn=lambda s: fc, kind="ki")
+    ap.broker = PaperBroker(lambda s: ap.market[s], ap.p)
+    ap.cur = {**ap.p, "margin_usdt": 5, "leverage": 10, **(cfg or {})}
+    ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 100.0,
+                                   "label": "Simulation", "stopping": False}
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    return ap
+
+
+def test_autopilot_sizes_by_risk_and_picks_safe_leverage():
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG"}
+    ap = _ap(fc, cfg={"size_mode": "auto", "risk_pct": 1.0, "leverage": 20})
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    stop_pct = (s["price"] - s["sl"]) / s["price"]
+    loss_at_stop = s["qty"] * s["price"] * stop_pct
+    assert loss_at_stop == pytest.approx(1.0, rel=0.1)                    # 1 % von 100 USDT bei voller Sicherheit
+    assert 1 <= s["lev"] <= 20 and 1 / s["lev"] >= 2 * stop_pct           # Liquidation weit hinter dem Stop
+    ap2 = _ap({**fc, "p_up": 0.56}, cfg={"size_mode": "auto", "risk_pct": 1.0, "leverage": 20})
+    ap2.step("BTC/USDT:USDT")
+    s2 = ap2.slots["BTC/USDT:USDT"]
+    assert s2["qty"] < s["qty"] * 0.7                                      # unsicherer -> kleiner
+    # Widerstand direkt ueber dem Kurs -> Ziel lohnt nicht -> kein Trade
+    ap3 = _ap({**fc, "sr_up_pct": 0.3}, cfg={"size_mode": "auto"})
+    ap3.step("BTC/USDT:USDT")
+    assert ap3.slots["BTC/USDT:USDT"]["state"] == "idle"
+    # % vom Konto, begrenzt auf freies Guthaben
+    ap4 = _ap(fc, cfg={"size_mode": "pct", "size_pct": 10})
+    ap4.step("BTC/USDT:USDT")
+    s4 = ap4.slots["BTC/USDT:USDT"]
+    assert s4["qty"] * s4["price"] / 10 == pytest.approx(10.0, rel=0.05)
+    ap5 = _ap(fc, cfg={"size_mode": "pct", "size_pct": 90})
+    ap5.step("BTC/USDT:USDT")
+    s5 = ap5.slots["BTC/USDT:USDT"]
+    assert s5["qty"] * s5["price"] / 10 <= 50.0 + 1e-6                   # max. 50 % des Kontos als Einsatz
+
+
+def test_autopilot_scale_in_only_in_profit_gate_and_trade_log(tmp_path):
+    import json
+
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG"}
+    feed = {"last": 100.0}
+    ap = _ap(fc, cfg={"scale_in": True, "first_frac": 0.5, "add_at_r": 0.5, "log_path": str(tmp_path / "t.jsonl")})
+    ap.data_fn = lambda s: (_speed_df(120, 0.0), {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20},
+                            {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01})
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    s = ap.slots[sym]
+    assert s["qty"] == pytest.approx(s["full"] * 0.5, rel=0.02)          # erst die Haelfte
+    feed["last"] = 99.98
+    ap.step(sym)
+    feed["last"] = s["entry"] - 0.2 * s["r0"]
+    ap.step(sym)
+    assert not s.get("added")                                             # im Verlust: nie nachkaufen
+    feed["last"] = s["entry"] + 0.6 * s["r0"]
+    ap.step(sym)
+    assert s["added"] and s["qty"] == pytest.approx(s["full"], rel=0.02)  # im Gewinn nachgekauft
+    feed["last"] = s["sl"] - 0.05
+    ap.step(sym)
+    rows = [json.loads(x) for x in (tmp_path / "t.jsonl").read_text().splitlines()]
+    assert rows and rows[-1]["kind"] == "ki" and rows[-1]["added"] and "why_in" in rows[-1]
+    # Markt-Sperre: KI trifft live schlecht -> dort kein Einstieg
+    bad = _ap({**fc, "live": {"n": 200, "hit": 0.44}})
+    bad.step(sym)
+    assert bad.slots[sym]["state"] == "idle" and "gesperrt" in bad.slots[sym]["signal"]["votes"]["KI"]

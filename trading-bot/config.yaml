@@ -165,6 +165,12 @@ fees:
 paper:
   start_equity: 35  # Startkapital in USDT fuer die Simulation
 
+hours:                 # Handelszeiten Gold/Silber (UTC) - Krypto handelt rund um die Uhr
+  metal_week_close: "Fri 21:00"    # Wochenende: zu ab ...
+  metal_week_open: "Sun 22:00"     # ... bis
+  metal_daily_pause: ["21:00", "22:00"]   # taegliche Pause
+  no_entry_before_close_min: 30    # so lange vor Schluss keine neue Position
+  close_before_weekend: true       # Speed/Autopilot schliessen Gold/Silber-Positionen kurz vor dem Wochenende
 speed:                 # Speed-Trading (Start in der Oberflaeche, Reiter Bot unter dem Chart)
   entry_timeout_s: 20    # Limit-Einstieg nach 20 s ohne Ausfuehrung stornieren
   max_hold_s: 0          # 0 = keine Zeitgrenze (Position laeuft bis Ziel/Stop); z. B. 300 = nach 5 min schliessen

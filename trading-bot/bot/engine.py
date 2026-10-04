@@ -73,8 +73,11 @@ class Bot:
         from .speed import SpeedTrader
         fee_cfg = {"maker": cfg["fees"].get("maker", cfg["fees"]["taker"]), "taker": cfg["fees"]["taker"],
                    "slippage": cfg["fees"]["slippage"], "min_notional": cfg["fees"].get("min_notional", 5.0)}
-        self.speed = SpeedTrader(self.speed_data, {**cfg.get("speed", {}), **fee_cfg})
-        self.autopilot = SpeedTrader(self.speed_data, {**cfg.get("autopilot", {}), **fee_cfg},
+        fee_cfg["hours"] = cfg.get("hours") or {}
+        self.speed = SpeedTrader(self.speed_data, {**cfg.get("speed", {}), **fee_cfg,
+                                                   "log_path": str(ROOT / "data" / f"sitzungen_{cfg['mode']}.jsonl")})
+        self.autopilot = SpeedTrader(self.speed_data, {**cfg.get("autopilot", {}), **fee_cfg,
+                                                       "log_path": str(ROOT / "data" / f"sitzungen_{cfg['mode']}.jsonl")},
                                      forecast_fn=self.forecast, kind="ki")
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
@@ -683,8 +686,10 @@ class Bot:
             1 for k, o in self.state["pending"].items() if o["side"] == sig.side and k not in positions)
         if same_dir >= self.r["max_same_direction"]:
             return f"Schon {same_dir} Positionen {sig.side}"
-        if is_metal(sym) and not self.cfg["filters"]["metals_trade_weekend"] and now.weekday() >= 5:
-            return "Metalle am Wochenende pausiert"
+        from .hours import entry_allowed
+        ok_h, why_h = entry_allowed(sym, now, self.cfg)
+        if not ok_h:
+            return why_h
         spread = self.ex.spread_pct(sym)
         if spread is not None and spread > self.cfg["filters"]["max_spread_pct"]:
             return f"Spread zu hoch ({spread:.3f} %)"
