@@ -191,6 +191,11 @@ Quellen, bevorzugt begutachtete Studien) wurden ausgewertet. Nur Belegtes ist ei
   Pruefung alle 3 s (normal), 1,5 s (Fast), 1 s (Turbo). Oberflaeche: der KI-Autopilot steht rechts neben dem
   Chart; Einstiege (Pfeil mit Preis und Hebel), Stop, Ziel und Ausstiege (Punkt mit Ergebnis) sind im Chart
   violett markiert.
+- **Schneller entscheiden (Daytrading)**: Die gelernten Modelle bleiben im Speicher und bewerten die LAUFENDE
+  Kerze alle 5 s neu - die KI reagiert innerhalb von Sekunden auf eine Bewegung statt erst beim Kerzenschluss
+  (gleiche Schrumpfung der Sicherheit wie bei der Kerzenschluss-Prognose). Einstieg im kleinen Ruecksetzer
+  (Limit 0,15 R unter/ueber dem Kurs, Stop/Ziel wandern mit; laeuft der Kurs weg, fasst der Markt-Einstieg nach).
+  Orderfluss-Bestaetigung: kein Einstieg, wenn der Taker-Fluss der letzten Trades klar dagegen laeuft.
 - **Ausstiege** (Studienlage): Einstand erst ab +1,3 R; ATR-Nachzieh-Stop nur im Trend (ADX >= 20) oder bei
   Erschoepfung; Zeit-Ausstiege wie bisher.
 - **Not-Aus**: stimmt die versprochene Sicherheit ueber 20 Trades nicht mit den Ergebnissen ueberein

@@ -52,8 +52,10 @@ AUTO_DEFAULTS = {
     "cost_guard": True,
     "fee_r_x": 4.0,            # Stop mind. 4 x die Kosten eines Trades (Gebuehren + Schlupf) entfernt
     "chase": True,             # Limit nicht ausgefuehrt, Signal steht noch -> zum Marktpreis einsteigen
-    "chase_max_r": 0.15,       #   ... wenn der Kurs hoechstens 0,15 R weggelaufen ist
+    "chase_max_r": 0.3,        #   ... wenn der Kurs hoechstens 0,3 R vom Limit weggelaufen ist (Limit liegt 0,15 R tiefer)
     "chase_avoid_marks": True, #   ... nicht um :00/:15/:30/:45 und Funding (Spread springt dort)
+    "entry_pullback_r": 0.15,  # Limit 0,15 R unter dem Kurs (Long) / darueber (Short): Einstieg im kleinen Ruecksetzer
+    "flow_confirm": 0.15,      # Einstieg nur, wenn der Taker-Fluss nicht klar dagegen laeuft (unter -0,15 = dagegen)
     "flip_extra": 0.03,        # Ausstieg bei KI-Wende nur mit 3 Punkten mehr Sicherheit als fuer den Einstieg
     "min_hold_frac": 0.5,      #   ... und fruehestens nach der halben Vorhersagezeit
     "learn_n": 12,             # Lernen aus eigenen Trades: ab 12 Abschluessen in einem Markt (letzte 3 Tage) ...
@@ -704,6 +706,13 @@ class SpeedTrader:
                                    + (f" (Test: {round(q['hit'] * 100)} % Treffer, Vorsprung z={q['z']:+.1f})" if q else ""))
             else:
                 votes["wartet"] = f"KI nur {round(conf * 100)} % sicher - braucht {round(need * 100)} %"
+        # Orderfluss-Bestaetigung: aggressive Kaeufe/Verkaeufe der letzten Trades duerfen nicht klar dagegen sein
+        flow = (fc.get("flow_now") or {}).get("taker")
+        thr = self.cur.get("flow_confirm")
+        if side != 0 and flow is not None and thr and side * float(flow) < -float(thr):
+            votes["Fluss"] = round(float(flow), 2)
+            votes["wartet"] = f"Orderfluss dagegen (Taker {float(flow):+.2f}) - wartet auf Bestaetigung"
+            side = 0
         # Ziel-vor-Stop-Modell: Erwartungswert nach Kosten in R muss positiv sein
         tb = fc.get("tb") or {}
         head = tb.get("long" if p_up >= 0.5 else "short")
@@ -832,6 +841,12 @@ class SpeedTrader:
             if stop is None:
                 sl["signal"]["votes"] = {**votes, "wartet": "Widerstand/Unterstuetzung zu nah - Ziel lohnt nicht"}
                 return
+            if self.kind == "ki" and p.get("entry_pullback_r"):
+                # Einstieg im kleinen Ruecksetzer (Limit etwas unter/ueber dem Kurs); laeuft der Kurs weg, fasst
+                # der Markt-Einstieg nach (chase). Stop/Ziel wandern mit dem tatsaechlichen Einstieg.
+                r = abs(price - stop)
+                price = price - side * p["entry_pullback_r"] * r
+                stop, target = stop - side * p["entry_pullback_r"] * r, target - side * p["entry_pullback_r"] * r
             lev = p["leverage"]
             if p.get("size_mode") == "auto":
                 qty, lev = self._auto_size(sym, price, stop, votes.get("Sicherheit") or 0.55, votes.get("Ziel vor Stop"))

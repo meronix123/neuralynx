@@ -438,6 +438,7 @@ def tp_before_sl(df: pd.DataFrame, X_all: np.ndarray, flat_c: np.ndarray, warm: 
         strong = p_te >= np.quantile(p_te, 0.8)
         base = float(y[tr].mean())
         brier, brier0 = float(np.mean((p_te - yt) ** 2)), float(np.mean((base - yt) ** 2))
+        out.setdefault("_models", {})[name] = (final, cal)
         out[name] = {"p": round(p_now, 3), "base": round(base, 3), "n_test": int(len(te)),
                      "hit_top20": round(float(yt[strong].mean()), 3) if strong.any() else None,
                      "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0,
@@ -559,6 +560,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
 
     probs, raw, moves, quality = [], [], [], []
     test_keep: dict = {}
+    kept_models: dict = {"names": names, "dir": {}, "mix": mix, "boost": None, "tb": {}, "H": H, "step": STEP}
     for h in HZ:
         idx, ret, ret_alive = labeled(np.arange(warm, n_closed - h), h)
         if len(idx) < 200:
@@ -576,8 +578,10 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
             b_te = Boost().fit(X_all[idx[tb]], y[tb], weight[idx[tb]]).proba(X_all[idx[te_i]])
             p_te = (1 - mix) * p_te + mix * b_te
             fb = np.arange(len(idx))[-BOOST_ROWS:]
-            b_now = float(Boost().fit(X_all[idx[fb]], y[fb], weight[idx[fb]]).proba(X_all[n_closed - 1:n_closed])[0])
+            b_final = Boost().fit(X_all[idx[fb]], y[fb], weight[idx[fb]])
+            b_now = float(b_final.proba(X_all[n_closed - 1:n_closed])[0])
             p_now = (1 - mix) * p_now + mix * b_now
+            kept_models["boost"] = b_final
         yt = y[te_i]
         hit = float(((p_te >= 0.5) == (yt == 1)).mean())
         base = max(y[tr_i].mean(), 1 - y[tr_i].mean())   # "immer die haeufigere Richtung"
@@ -606,10 +610,14 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
             p_glob = min(max(p_glob, 1 - cap), cap)
         probs.append(p_loc if abs(p_loc - 0.5) > abs(p_glob - 0.5) else p_glob)
         raw.append(p_now)
+        # fuer die Live-Bewertung der laufenden Kerze: Modell + wie stark die Rohmeinung geschrumpft wurde
+        shrink = (probs[-1] - 0.5) / (p_now - 0.5) if abs(p_now - 0.5) > 1e-6 else 0.0
+        kept_models["dir"][h] = (final, float(max(0.0, min(1.0, shrink))))
         moves.append((float(np.mean(np.abs(ret_alive[-2000:]))), float(np.std(ret_alive[-2000:]))))
     live = live or {}
     try:
         tb = tp_before_sl(df, X_all, flat_c, warm, n_closed, H, moves[-1][1], weight, L2_, test_share)
+        kept_models["tb"] = tb.pop("_models", {})
     except Exception as e:  # noqa: BLE001 - Zusatzkopf darf die Prognose nie verhindern
         log.debug("Ziel-vor-Stop-Modell: %s", e)
         tb = {}
@@ -643,6 +651,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]), "feature_names": names,
         **({"test": test_keep} if keep_test else {}),
         "move_min": move_min, "labeled": int(len(idx30)), "step_min": STEP, "horizons": HZ, "tb": tb,
+        "_models": kept_models,
         "sr_up_pct": _sr_pct(feats, "m5_sr_up"), "sr_dn_pct": _sr_pct(feats, "m5_sr_dn"),
         "model": {"l2": L2_, "half_life_days": round(HL_ * STEP / 1440, 1), "trees": mix,
                   "kind": "linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume"},
@@ -1120,6 +1129,58 @@ class Forecaster:
                 "checked": stats["n"], "weeks": [{"week": k, "hit": round(v[0] / v[1], 3), "n": v[1]}
                                                  for k, v in list(weekly.items())[-8:]]}
 
+    def _live_eval(self, sym: str, fc: dict, df: pd.DataFrame, now: int) -> dict:
+        """Die LAUFENDE Kerze mit den gelernten Modellen bewerten (alle 5 s): so reagiert die KI innerhalb von
+        Sekunden auf eine Bewegung statt erst beim Kerzenschluss. Die Sicherheit wird im selben Mass geschrumpft
+        wie bei der Prognose vom Kerzenschluss (gleiche Ehrlichkeit)."""
+        m = fc.get("_models")
+        if not m or not m.get("dir"):
+            return {}
+        key = f"liveeval|{sym}"
+        hit = self.cache.get(key)
+        last = float(df["close"].iloc[-1])
+        if hit and now - hit[0] < 5 and hit[1].get("_last") == last:
+            return {k: v for k, v in hit[1].items() if k != "_last"}
+        try:
+            tail = df.tail(3000).reset_index(drop=True)
+            lead = {}
+            if "XAU" not in sym and "XAG" not in sym:
+                for ls in self.leaders:
+                    if ls != sym and ls in self.fresh:
+                        lead[ls.split("/")[0].lower()] = self.fresh[ls][1]
+            funding = (self.cache.get(f"funding|{sym}") or (0, None))[1]
+            macro = (self.cache.get("macro") or (0, None))[1]
+            feats = make_features(tail, lead, funding, macro, "XAU" in sym or "XAG" in sym, self.step)
+            X = np.nan_to_num(feats.reindex(columns=m["names"]).to_numpy(float)[-1:], nan=0.0)
+            by_h, probs, raws = [], [], []
+            for h, (model, shrink) in m["dir"].items():
+                p_raw = float(_logit_p(model, X)[0])
+                if h == m["H"] and m.get("mix", 0) > 0 and m.get("boost") is not None:
+                    p_raw = (1 - m["mix"]) * p_raw + m["mix"] * float(m["boost"].proba(X)[0])
+                p_live = 0.5 + (p_raw - 0.5) * shrink
+                by_h.append({"min": h * m["step"], "p_up": round(p_live, 3)})
+                probs.append(p_live)
+                raws.append(p_raw)
+            best = max(range(len(probs)), key=lambda i: abs(probs[i] - 0.5))
+            if abs(probs[best] - 0.5) < 1e-9:
+                best = len(probs) - 1
+            p30, _ = _calibrate(probs[best], self.log.stats(sym))
+            lean = p30 if abs(p30 - 0.5) > 1e-9 else raws[best]
+            out = {"p_up": round(p30, 3), "p_up_raw": round(raws[best], 3), "confidence": round(max(p30, 1 - p30), 3),
+                   "decision": "LONG" if lean >= 0.5 else "SHORT", "decision_min": by_h[best]["min"], "by_horizon": by_h,
+                   "intrabar": True, "bar_age_s": max(0, now - int(fc.get("time") or now))}
+            tb = dict(fc.get("tb") or {})
+            for side, (model, cal) in (m.get("tb") or {}).items():
+                z = _logit_z(model, X)
+                p = float((_logit_p(cal, z[:, None]) if cal is not None else _logit_p(model, X))[0])
+                tb[side] = {**(tb.get(side) or {}), "p": round(p, 3)}
+            out["tb"] = tb
+            self.cache[key] = (now, {**out, "_last": last})
+            return out
+        except Exception as e:  # noqa: BLE001 - dann gilt die Prognose vom Kerzenschluss
+            log.debug("KI Live-Bewertung %s: %s", sym, e)
+            return {}
+
     def get(self, sym: str) -> dict:
         df = self._candles(sym)
         bar = int(df["ts"].iloc[-1]) // 1000
@@ -1147,7 +1208,10 @@ class Forecaster:
         now = int(time.time())
         seed = zlib.crc32(f"{sym}|{fc['time']}".encode())
         start = min(max(now, fc["time"]), fc["time"] + self.step * 60 - 1)
-        out = {k: v for k, v in fc.items() if k != "feature_names"}
+        out = {k: v for k, v in fc.items() if k != "feature_names" and not k.startswith("_")}
+        out.update(self._live_eval(sym, fc, df, now))
+        flow = self.cache.get(f"live|{sym}")
+        out["flow_now"] = flow[1] if flow and isinstance(flow[1], dict) else None
         return {"symbol": sym, "ok": True, **out, "price": price, "now": now,
                 # Start innerhalb der aktuellen 5-Minuten-Kerze (robust gegen Uhr-Abweichungen)
                 "path": path(fc, price, start, seed), "live": self.log.stats(sym), "learning": info,

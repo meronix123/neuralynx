@@ -2184,7 +2184,7 @@ def test_ki_autopilot_manages_position():
     ap = SpeedTrader(lambda s: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01}),
                      {"loop_s": 0.0}, forecast_fn=lambda s: fc, kind="ki")
     broker = PaperBroker(lambda s: ap.market[s], ap.p)
-    ap.cur, ap.broker = {**ap.p, "margin_usdt": 5, "leverage": 10}, broker
+    ap.cur, ap.broker = {**ap.p, "margin_usdt": 5, "leverage": 10, "entry_pullback_r": 0}, broker
     ap.session = {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 3600, "equity0": 35.0}
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
     sym = "BTC/USDT:USDT"
@@ -2260,7 +2260,7 @@ def test_ki_autopilot_safety_rules():
     with pytest.raises(ValueError, match="nur in der Simulation"):
         ap.start(["BTC/USDT:USDT"], broker, 35.0, "Testkonto", use_raw=True)
     # unbewaehrte KI (Sicherheit 50 %) handelt nicht - mit Rohsignal (nur Simulation) schon
-    ap.cur, ap.broker = {**ap.p, "margin_usdt": 5, "leverage": 10}, broker
+    ap.cur, ap.broker = {**ap.p, "margin_usdt": 5, "leverage": 10, "entry_pullback_r": 0}, broker
     ap.session = {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 3600, "equity0": 35.0}
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
     ap.step("BTC/USDT:USDT")
@@ -2374,6 +2374,7 @@ def test_ki_autopilot_fast_mode_uses_short_forecast_and_tight_stops():
     ap.thread.join(5)
     assert ap.cur["fast"] and ap.cur["loop_s"] == 1.5 and ap.cur["partial_r"] == 1.2
     ap.cur["loop_s"] = 0.0
+    ap.cur["entry_pullback_r"] = 0
     ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 35.0,
                                     "label": "Simulation", "stopping": False}
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
@@ -2436,7 +2437,7 @@ def _ap(fc, sd=None, cfg=None, last=100.0):
     ap = SpeedTrader(lambda s: (df, book, {"last": last, "bid": last - 0.01, "ask": last + 0.01}),
                      {"loop_s": 0.0, **(cfg or {})}, forecast_fn=lambda s: fc, kind="ki")
     ap.broker = PaperBroker(lambda s: ap.market[s], ap.p)
-    ap.cur = {**ap.p, "margin_usdt": 5, "leverage": 10, "chase_avoid_marks": False, **(cfg or {})}
+    ap.cur = {**ap.p, "margin_usdt": 5, "leverage": 10, "chase_avoid_marks": False, "entry_pullback_r": 0, **(cfg or {})}
     ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 100.0,
                                    "label": "Simulation", "stopping": False}
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
@@ -2560,6 +2561,7 @@ def test_turbo_one_minute_model_and_autopilot(tmp_path):
     ap.thread.join(5)
     assert ap.cur["turbo"] and ap.cur["loop_s"] == 1.0
     ap.cur["loop_s"] = 0.0
+    ap.cur["entry_pullback_r"] = 0
     ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 35.0,
                                    "label": "Simulation", "stopping": False}
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
@@ -2967,5 +2969,40 @@ def test_autopilot_anomaly_guards():
     assert "Kurssprung" in s["signal"]["votes"]["wartet"] and s["calm_until"] > time.time()
     # normal -> Einstieg
     ap = _ap(fc)
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "pending"
+
+
+def test_ki_evaluates_running_candle_and_autopilot_enters_on_pullback_with_flow_check(tmp_path):
+    from bot.forecast import Forecaster, build
+
+    df = _fc_frame(4000, 0.3, 1)
+    fc = build(df)
+    assert "_models" in fc and set(fc["_models"]["dir"]) == set(fc["horizons"]) and fc["_models"]["tb"]
+    feed = {"df": df}
+    fx = Forecaster(lambda s, tf, lim: feed["df"].reset_index(drop=True), tmp_path, "paper", background=False)
+    out1 = fx.get("BTC/USDT:USDT")
+    assert out1["ok"] and out1.get("intrabar") and not any(k.startswith("_") for k in out1)
+    assert "flow_now" in out1 and out1["by_horizon"] and "p" in out1["tb"]["long"]
+    moved = df.copy()                                         # laufende Kerze springt -> neue Bewertung ohne Neu-Lernen
+    moved.loc[moved.index[-1], "close"] = float(df["close"].iloc[-1]) * 1.01
+    moved.loc[moved.index[-1], "high"] = max(float(moved["high"].iloc[-1]), float(moved["close"].iloc[-1]))
+    feed["df"] = moved
+    fx.fresh.clear()
+    out2 = fx.get("BTC/USDT:USDT")
+    assert out2["time"] == out1["time"] and out2["p_up_raw"] != out1["p_up_raw"]   # ohne Neu-Lernen neu bewertet
+    # Einstieg im Ruecksetzer: Limit 0,15 R unter dem Kurs, Stop/Ziel wandern mit
+    fc2 = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc2, cfg={"entry_pullback_r": 0.15})
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    r = s["price"] - s["sl"]
+    assert s["state"] == "pending" and 99.99 - s["price"] == pytest.approx(0.15 * r, rel=1e-6)
+    assert s["tp"] - s["price"] == pytest.approx(2 * r, rel=0.05)
+    # Orderfluss klar dagegen -> warten; mit dem Fluss -> Einstieg
+    ap = _ap({**fc2, "flow_now": {"taker": -0.5}})
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "idle" and "Orderfluss" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    ap = _ap({**fc2, "flow_now": {"taker": 0.3}})
     ap.step("BTC/USDT:USDT")
     assert ap.slots["BTC/USDT:USDT"]["state"] == "pending"
