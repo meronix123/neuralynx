@@ -697,6 +697,13 @@ class SpeedTrader:
         side = (1 if p_up >= 0.5 else -1) if conf >= need else 0
         if side == 0 and conf >= self.cur["min_conf"]:
             votes["wartet"] = f"Kosten-Schutz: braucht {round(need * 100)} % Sicherheit"
+        elif side == 0:
+            q = next((x for x in fc.get("quality") or [] if x.get("min") == fc.get("decision_min")), None)
+            if conf < 0.505:
+                votes["wartet"] = ("KI sieht gerade keinen Vorteil gegenueber Zufall"
+                                   + (f" (Test: {round(q['hit'] * 100)} % Treffer, Vorsprung z={q['z']:+.1f})" if q else ""))
+            else:
+                votes["wartet"] = f"KI nur {round(conf * 100)} % sicher - braucht {round(need * 100)} %"
         # Ziel-vor-Stop-Modell: Erwartungswert nach Kosten in R muss positiv sein
         tb = fc.get("tb") or {}
         head = tb.get("long" if p_up >= 0.5 else "short")
