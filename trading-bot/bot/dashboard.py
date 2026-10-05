@@ -138,16 +138,14 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
                 return False
             return True
         broker = BitgetBroker(account.client, sp.p, bot.cfg.get("margin_mode", "isolated"))
+        from .exchange import apply_leverage
         for s in syms:          # Hebel/Margin-Modus fuer die Speed-Maerkte setzen
-            for fn in (lambda: account.client.set_margin_mode(broker.mm, s, {"marginCoin": "USDT"}),
-                       lambda: account.client.set_leverage(opts.get("leverage", sp.p["leverage"]), s,
-                                                           {"holdSide": "long", "marginMode": broker.mm}),
-                       lambda: account.client.set_leverage(opts.get("leverage", sp.p["leverage"]), s,
-                                                           {"holdSide": "short", "marginMode": broker.mm})):
-                try:
-                    fn()
-                except Exception:  # noqa: BLE001 - schon gesetzt
-                    pass
+            try:
+                account.client.set_margin_mode(broker.mm, s, {"marginCoin": "USDT"})
+            except Exception:  # noqa: BLE001 - schon gesetzt
+                pass
+            if opts.get("size_mode") != "auto":        # bei "auto" setzt die KI den Hebel je Trade
+                apply_leverage(account.client, s, int(opts.get("leverage", sp.p["leverage"])), broker.mm)
         equity = float((v.get("balance") or {}).get("free") or 0)
         label = "Testkonto" if account.demo else "ECHTES KONTO"
     else:

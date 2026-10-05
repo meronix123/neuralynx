@@ -342,7 +342,7 @@
       <div id="sp-status"></div>
     </div>
     <div class="speed">
-      <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, verkauft einen Teil bei +1,5 R, zieht den Stop nach, steigt aus wenn die KI klar dreht</small></div>
+      <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, sichert Gewinne (nie mehr als die Haelfte zurueckgeben, ATR-Stop, RSI/Umkehrkerzen), verkauft einen Teil bei +1,5 R, steigt aus wenn die KI klar dreht oder die Prognosezeit vorbei ist</small></div>
       <div class="speedform">
         <span id="ap-syms"></span>
         <label>Groesse <select id="ap-size" onchange="apSizeUnit()">
@@ -712,7 +712,7 @@ function renderPositions() {
       const acc = sp.label && sp.label !== "Simulation";
       return `<tr><td>${s.split(":")[0]}</td><td class="${sign > 0 ? "up" : "down"}">${sign > 0 ? "LONG" : "SHORT"}</td>
         <td>${name}${v.lev ? " x" + v.lev : ""} &middot; ${sp.label || ""}${v.partial ? " (Teil verkauft)" : ""}</td><td>${px(v.entry)}</td><td><b>${px(lp)}</b></td>
-        <td>${fmt(v.qty, 4)}</td><td>${lp == null ? "-" : fmt(lp * v.qty)}</td><td>${v.lev && lp ? fmt(lp * v.qty / v.lev) : "-"}</td><td><b>${usd(pnl)}</b></td><td colspan="2"></td>
+        <td>${fmt(v.qty, 4)}</td><td>${lp == null ? "-" : fmt(lp * v.qty)}</td><td>${v.lev && v.entry ? fmt(v.entry * v.qty / v.lev) : "-"}</td><td><b>${usd(pnl)}</b></td><td colspan="2"></td>
         <td class="down">${px(v.sl)}</td><td></td><td class="up">${px(v.tp)}</td><td colspan="4"></td>
         <td>${acc ? `<button class="btn sm red" onclick="act('/api/account/close', {symbol:'${s}', fraction:1}, '${s.split(":")[0]} komplett zum Marktpreis schliessen?')">Schliessen</button>` : ""}</td></tr>`;
     });

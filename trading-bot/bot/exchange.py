@@ -197,6 +197,28 @@ def place_size_tpsl(client, symbol: str, side: str, plan: str, trigger: float, s
         raise RuntimeError(f"{'Ziel' if plan == 'profit_plan' else 'Stop'} konnte nicht gesetzt werden: {e}") from e
 
 
+def apply_leverage(client, symbol: str, lev: int, margin_mode: str) -> int | None:
+    """Hebel setzen und danach bei Bitget nachlesen, was wirklich gilt (Rueckgabe: echter Hebel, None =
+    nicht lesbar). Bitget lehnt manchmal still ab (z. B. falscher holdSide im One-Way-Modus) - dann darf der
+    Bot nicht mit dem gewuenschten Hebel weiterrechnen, sonst stimmen Margin, Groesse und Liquidation nicht."""
+    tries = [{"holdSide": "long"}, {"holdSide": "short"}]
+    if not is_hedged(client):
+        tries.insert(0, {})
+    for extra in tries:
+        try:
+            client.set_leverage(int(lev), symbol, {"marginMode": margin_mode, **extra})
+        except Exception as e:  # noqa: BLE001 - "schon gesetzt" / nicht noetig
+            log.debug("Hebel %s %s: %s", symbol, extra, e)
+    try:
+        r = client.fetch_leverage(symbol, {"marginMode": margin_mode})
+        vals = [r.get("longLeverage"), r.get("shortLeverage")]
+        vals = [int(float(v)) for v in vals if v]
+        return min(vals) if vals else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("Hebel lesen %s: %s", symbol, e)
+        return None
+
+
 def cancel_plan(client, symbol: str, order_id: str) -> None:
     """Stop/Ziel stornieren: Bitget-TP/SL-Auftrag, sonst Ausloese-Auftrag oder Limit-Order (aeltere Versionen)."""
     market = client.market(symbol)
@@ -257,8 +279,7 @@ class BitgetExchange:
         for fn, desc in (
             (lambda: self.c.set_position_mode(False, symbol), "One-Way-Modus"),
             (lambda: self.c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"}), "Margin-Modus"),
-            (lambda: self.c.set_leverage(lev, symbol, {"holdSide": "long", "marginMode": mm}), "Hebel long"),
-            (lambda: self.c.set_leverage(lev, symbol, {"holdSide": "short", "marginMode": mm}), "Hebel short"),
+            (lambda: apply_leverage(self.c, symbol, lev, mm), "Hebel"),
         ):
             try:
                 fn()
@@ -313,11 +334,20 @@ class BitgetExchange:
         out = {}
         for p in self.c.fetch_positions(self.symbols):
             if float(p.get("contracts") or 0) > 0:
+                info = p.get("info") or {}
                 out[p["symbol"]] = {
                     "side": p["side"],
                     "amount": float(p["contracts"]),
                     "entry": float(p["entryPrice"]),
                 }
+                # echte Werte von Bitget (Hebel kann z. B. durch Schnell-Orders anders sein als eingestellt)
+                for k, v in (("margin", info.get("marginSize") or p.get("initialMargin")),
+                             ("lev", info.get("leverage") or p.get("leverage")), ("liq", p.get("liquidationPrice"))):
+                    try:
+                        if v is not None and float(v) > 0:
+                            out[p["symbol"]][k] = float(v)
+                    except (TypeError, ValueError):
+                        pass
         return out
 
     def set_stop(self, symbol: str, side: str, sl: float, tp: float | None) -> None:

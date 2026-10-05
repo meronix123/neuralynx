@@ -171,6 +171,20 @@ Stop von mind. 4x den Kosten eines Trades. Der Autopilot handelt deshalb nur sol
 - Lernt aus den eigenen Abschluessen: verliert ein Markt in den letzten 3 Tagen dauerhaft
   (Gewinnfaktor unter 0,7 bei mind. 12 Trades), pausiert er dort
 
+Gewinne sichern (laeuft nicht mehr endlos im Plus):
+
+- ab +1 R Stop auf Einstand; danach nie mehr als die Haelfte des besten Gewinns zurueckgeben (ab +2 R
+  hoechstens 30 %)
+- Nachzieh-Stop mit ATR der 5-Minuten-Kerzen (2,5 x ATR, mind. 0,8 R Abstand)
+- Erschoepfung erkannt (RSI ueber 72 / unter 28, Umkehrkerze wie Shooting Star oder Engulfing,
+  EMA 9 unter 21): Stop enger (1,2 x ATR, 70 % des Gewinns bleiben)
+- Prognosezeit doppelt vorbei und KI nicht mehr dafuer: Gewinn mitnehmen; viermal vorbei ohne klaren
+  Gewinn: schliessen
+- Ziel-Order fehlt auf Bitget: der Autopilot schliesst beim Ziel selbst
+
+Margin, Hebel und Liquidation werden aus den echten Bitget-Werten angezeigt; der Hebel wird nach dem
+Setzen bei Bitget nachgelesen und die Groesse damit gerechnet.
+
 Auf dem Bitget-Konto ist der Kosten-Schutz immer an, in der Simulation abschaltbar (zum Vergleichen).
 
 ## Handelszeiten Gold/Silber

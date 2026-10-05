@@ -872,7 +872,8 @@ class Bot:
             sl, tp = m.get("sl"), m.get("tp")
             r0 = m.get("r0") or (abs(entry - m["sl_init"]) if m.get("sl_init") else None)
             upnl = sign * (price - entry) * amount - price * amount * self.fee  # inkl. Ausstiegsgebuehr
-            margin = entry * amount / lev
+            plev = p.get("lev") or lev                        # echter Hebel laut Bitget, sonst eingestellt
+            margin = p.get("margin") or entry * amount / plev
             rows.append({
                 "symbol": sym, "side": p["side"], "tf": m.get("tf") or self.cfg["timeframe"],
                 "strategy": m.get("strategy"), "entry": entry, "price": price, "amount": amount,
@@ -883,7 +884,7 @@ class Bot:
                 "sl_dist_pct": 100 * abs(price - sl) / price if sl else None,
                 "tp_dist_pct": 100 * abs(tp - price) / price if tp else None,
                 # isoliert: Liquidation grob bei 1/Hebel minus 0,5 % Wartungsmarge
-                "liq": entry * (1 - sign * (1 / lev - 0.005)),
+                "liq": p.get("liq") or entry * (1 - sign * (1 / plev - 0.005)), "lev": plev,
                 "at_sl": sign * (sl - entry) * amount if sl else None,
                 "at_tp": sign * (tp - entry) * amount if tp else None,
                 "opened_ms": m.get("opened_ms"), "partial_done": m.get("partial_done", False),

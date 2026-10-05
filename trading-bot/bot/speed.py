@@ -56,6 +56,13 @@ AUTO_DEFAULTS = {
     "min_hold_frac": 0.5,      #   ... und fruehestens nach der halben Vorhersagezeit
     "learn_n": 12,             # Lernen aus eigenen Trades: ab 12 Abschluessen in einem Markt (letzte 3 Tage) ...
     "learn_pf": 0.7,           # ... und Gewinnfaktor darunter pausiert der Markt
+    # Gewinne sichern
+    "keep": 0.5,               # ab +1 R hoechstens die Haelfte des besten Gewinns wieder hergeben ...
+    "keep_2r": 0.7,            # ... ab +2 R hoechstens 30 %
+    "atr_k": 2.5,              # Nachzieh-Stop: bester Kurs minus 2,5 x ATR (5-Minuten-Kerzen) ...
+    "atr_k_tight": 1.2,        # ... bei Erschoepfung (RSI-Extrem, Umkehrkerze, EMA-Wende) nur 1,2 x ATR
+    "time_take_x": 2.0,        # nach 2 x Vorhersagezeit: Gewinn mitnehmen, wenn die KI nicht mehr dafuer ist
+    "time_stale_x": 4.0,       # nach 4 x Vorhersagezeit: Position ohne klaren Gewinn schliessen
 }
 # Rechnung (Simulation mit Bitget-Gebuehren 0,02 % Maker / 0,06 % Taker + Schlupf): ins Plus kommt die KI nur,
 # wenn sie bei 20-30 min Vorhersage mind. ~57 % trifft, bei 10-15 min mind. ~60 %; bei 1-5 min frisst der
@@ -102,6 +109,38 @@ def micro_signal(df1m: pd.DataFrame, book: dict | None, aggressiveness: int = 3)
     need = {1: 5, 2: 4, 3: 3, 4: 2}.get(int(aggressiveness), 3)   # wie viele Stimmen einig sein muessen
     side = 1 if score >= need else -1 if score <= -need else 0
     return side, min(1.0, abs(score) / 5), {**votes, "orderbuch": round(imb, 2), "punkte": score}
+
+
+def exit_view(df1m: pd.DataFrame, side: int) -> dict:
+    """Indikatoren fuer das Gewinn-Sichern auf abgeschlossenen 5-Minuten-Kerzen: ATR (Schwankung),
+    RSI (ueberkauft/-verkauft), EMA 9/21 (Trendwende) und Umkehrkerzen gegen die Position."""
+    from .indicators import rsi
+    from .patterns import candles
+    out = {"atr": None, "rsi": None, "ema_against": False, "reversal": "", "tired": False}
+    try:
+        d = df1m.reset_index(drop=True)
+        idx = pd.to_datetime(d["ts"], unit="ms", utc=True)
+        m5 = d.set_index(idx).resample("5min", label="left", closed="left").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna().iloc[:-1]
+        if len(m5) < 15:
+            return out
+        a = float(atr(m5.reset_index(drop=True), 14).iloc[-1])
+        out["atr"] = a if a == a and a > 0 else None
+        c = m5["close"].astype(float)
+        r = float(rsi(c, 14).iloc[-1])
+        out["rsi"] = round(r, 1) if r == r else None
+        out["ema_against"] = bool(side * (ema(c, 9).iloc[-1] - ema(c, 21).iloc[-1]) < 0)
+        cs = candles(*(m5[k].astype(float).to_numpy() for k in ("open", "high", "low", "close")))
+        against = ("shooting", "engulf_dn", "evening", "crows") if side == 1 else ("hammer", "engulf_up", "morning", "soldiers")
+        names = {"shooting": "Shooting Star", "engulf_dn": "Bearish Engulfing", "evening": "Evening Star",
+                 "crows": "3 schwarze Kraehen", "hammer": "Hammer", "engulf_up": "Bullish Engulfing",
+                 "morning": "Morning Star", "soldiers": "3 weisse Soldaten"}
+        out["reversal"] = next((names[k] for k in against if cs[k][-1]), "")
+        hot = out["rsi"] is not None and (out["rsi"] >= 72 if side == 1 else out["rsi"] <= 28)
+        out["tired"] = bool(hot or out["reversal"] or out["ema_against"])
+    except Exception as e:  # noqa: BLE001 - Indikatoren sind Hilfe, kein Muss
+        log.debug("exit_view: %s", e)
+    return out
 
 
 def levels(df1m: pd.DataFrame, price: float, side: int, p: dict) -> tuple[float, float]:
@@ -172,7 +211,7 @@ class PaperBroker:
         return last * (1 + side * self.p["slippage"])
 
     def set_leverage(self, sym, lev):
-        pass
+        return int(lev)
 
     def resize(self, sym, side, qty, prot):
         pass
@@ -237,7 +276,16 @@ class BitgetBroker:
             if prot["miss"] < self.MISS_CHECKS or time.time() - prot.get("t", 0) < self.GRACE_S:
                 return None
             self._cleanup(sym, prot, keep="sl")
-            return "stop", prot["sl"] * (1 - side * self.p["slippage"]), False
+            # Stop ausgeloest oder von aussen geschlossen (von Hand / "alle schliessen")? Am Kurs erkennen,
+            # damit das Ergebnis stimmt
+            try:
+                last = float(self.c.fetch_ticker(sym)["last"])
+            except Exception:  # noqa: BLE001
+                last = prot["sl"]
+            span = abs(prot["tp"] - prot["sl"]) or abs(prot["sl"]) * 0.01
+            if abs(last - prot["sl"]) <= 0.25 * span:
+                return "stop", prot["sl"] * (1 - side * self.p["slippage"]), False
+            return "von aussen geschlossen", last, False
         prot["miss"] = 0
         return None
 
@@ -267,16 +315,10 @@ class BitgetBroker:
         prot.update(sl=sl, sl_id=new)
 
     def set_leverage(self, sym, lev):
-        """Hebel fuer diesen Markt setzen (nur wenn er sich aendert)."""
-        cache = self.__dict__.setdefault("_lev", {})
-        if cache.get(sym) == lev:
-            return
-        for hs in ("long", "short"):
-            try:
-                self.c.set_leverage(int(lev), sym, {"holdSide": hs, "marginMode": self.mm})
-            except Exception as e:  # noqa: BLE001 - z. B. schon gesetzt
-                log.debug("Hebel %s: %s", sym, e)
-        cache[sym] = lev
+        """Hebel fuer diesen Markt setzen und den ECHTEN Hebel laut Bitget zurueckgeben (None = unbekannt).
+        Kein Zwischenspeicher: Schnell-Orders oder der Bot koennen den Hebel im selben Markt aendern."""
+        from .exchange import apply_leverage
+        return apply_leverage(self.c, sym, int(lev), self.mm)
 
     def balance(self):
         """(Gesamt, frei) in USDT - hoechstens alle 5 s neu abgefragt."""
@@ -600,9 +642,26 @@ class SpeedTrader:
             if p.get("size_mode") == "auto":
                 qty, lev = self._auto_size(sym, price, stop, votes.get("Sicherheit") or 0.55)
                 if qty > 0:
-                    self.broker.set_leverage(sym, lev)
+                    real = self.broker.set_leverage(sym, lev)
+                    if real and real != lev:
+                        # Bitget hat einen anderen Hebel: Groesse und Sicherheit damit neu pruefen
+                        stop_pct = abs(price - stop) / price
+                        if 1 / real < 2 * stop_pct + 0.005:
+                            sl["signal"]["votes"] = {**votes, "wartet": f"Hebel auf Bitget x{real} - Liquidation zu nah am Stop"}
+                            return
+                        if real < lev:
+                            qty = self._round(sym, qty * real / lev)
+                            if qty * price < p["min_notional"]:
+                                qty = 0.0
+                        lev = real
             else:
                 qty = self._qty(sym, price, stop)
+                real = self.broker.set_leverage(sym, lev) if qty > 0 else None
+                if real and real != lev:                  # Bitget-Hebel weicht ab -> Einsatz (Margin) beibehalten
+                    qty = self._round(sym, qty * real / lev)
+                    if qty * price < p["min_notional"]:
+                        qty = 0.0
+                    lev = real
             if qty <= 0:
                 sl["signal"]["votes"] = {**votes, "wartet": "zu wenig freies Guthaben fuer die Mindestgroesse"}
                 return
@@ -650,7 +709,7 @@ class SpeedTrader:
                 px = self.broker.close(sym, sl["side"], sl["qty"], sl["prot"])
                 self._book(sym, sl, px, "Zeit-Limit", maker=False)
             elif self.kind == "ki":
-                self._manage(sym, sl, tick, side, votes)
+                self._manage(sym, sl, tick, side, votes, df)
 
     def _chase(self, sym, sl, side, tick, now) -> bool:
         """Limit-Einstieg nicht ausgefuehrt, KI aber weiter dafuer und Kurs kaum weggelaufen -> zum Marktpreis
@@ -671,7 +730,7 @@ class SpeedTrader:
         self._event(f"{sym.split(':')[0]} Limit nicht gefuellt - zum Marktpreis eingestiegen @ {avg:.6g}")
         return True
 
-    def _manage(self, sym, sl, tick, side, votes) -> None:
+    def _manage(self, sym, sl, tick, side, votes, df=None) -> None:
         """KI-Autopilot fuehrt die Position: Einstand, Teilverkauf, Nachziehen, Ausstieg bei KI-Wende."""
         p = self.cur
         d = sl["side"]
@@ -716,18 +775,53 @@ class SpeedTrader:
                 sl["partial_done"] = True
                 self.broker.resize(sym, d, rest, sl["prot"])
                 self._event(f"{name} Teilverkauf {part:g} @ {px:.6g} (+{gain:.1f} R)")
-        # Stop auf Einstand (inkl. Gebuehren) und danach nachziehen
+        # Ziel erreicht, aber keine Ziel-Order auf Bitget (konnte nicht gesetzt werden) -> selbst schliessen
+        prot = sl.get("prot") or {}
+        if "tp_id" in prot and not prot.get("tp_id") and sl.get("tp") and d * (last - sl["tp"]) >= 0:
+            px = self.broker.close(sym, d, sl["qty"], prot)
+            self._book(sym, sl, px, "Ziel erreicht", False)
+            return
+        # Zeit: die Prognose gilt fuer h_min Minuten - danach ist ihr Vorteil weg
+        h = float(sl.get("h_min") or 30) * 60
+        if held >= p.get("time_take_x", 2.0) * h and gain >= 0.3 and side != d:
+            px = self.broker.close(sym, d, sl["qty"], prot)
+            self._book(sym, sl, px, f"Prognosezeit vorbei - Gewinn gesichert (+{gain:.1f} R)", False)
+            return
+        if held >= p.get("time_stale_x", 4.0) * h and gain < 1.0 and side != d:
+            px = self.broker.close(sym, d, sl["qty"], prot)
+            self._book(sym, sl, px, f"Prognosezeit lange vorbei ({gain:+.1f} R)", False)
+            return
+        # Gewinn sichern: Einstand, nie mehr als einen Teil des besten Gewinns hergeben, ATR-Nachzieh-Stop,
+        # bei Erschoepfung (RSI-Extrem, Umkehrkerze, EMA-Wende) enger
+        peak = d * (sl["best"] - sl["entry"]) / r0
+        ev = exit_view(df, d) if df is not None and peak >= 0.8 else {}
+        tired = bool(ev.get("tired"))
         be = sl["entry"] * (1 + d * (p["maker"] + p["taker"]))
-        want = None
-        if gain >= p["be_r"] and d * (sl["sl"] - be) < 0:
-            want = be
+        cands = []
+        if peak >= p["be_r"]:
+            cands.append(be)
+        if peak >= 1.0:
+            keep = p.get("keep_2r", 0.7) if peak >= 2.0 else p.get("keep", 0.5)
+            if tired:
+                keep = max(keep, 0.7)
+            cands.append(sl["entry"] + d * keep * peak * r0)
+            if ev.get("atr"):
+                tight = tired or sl.get("partial_done")
+                k = p.get("atr_k_tight", 1.2) if tight else p.get("atr_k", 2.5)
+                dist = max(k * ev["atr"], (0.5 if tight else 0.8) * r0)   # nie enger als 0,5 / 0,8 R
+                cands.append(sl["best"] - d * dist)
         if sl.get("partial_done"):
-            trail = sl["best"] - d * p["trail_r"] * r0
-            if d * (trail - (want if want is not None else sl["sl"])) > 0:
-                want = trail
-        if want is not None and d * (want - sl["sl"]) >= 0.1 * r0 and d * (last - want) > 0:
+            cands.append(sl["best"] - d * p["trail_r"] * r0)
+        ok = [c for c in cands if d * (last - c) > 0]                 # nur Stops, die unter (Long) dem Kurs liegen
+        want = (max(ok) if d == 1 else min(ok)) if ok else None
+        if want is not None and d * (want - sl["sl"]) >= 0.1 * r0:
             self.broker.move_stop(sym, d, sl["qty"], sl["prot"], want)
-            self._event(f"{name} Stop nachgezogen auf {want:.6g}")
+            why = ""
+            if tired:
+                hot = ev.get("rsi") is not None and (ev["rsi"] >= 72 if d == 1 else ev["rsi"] <= 28)
+                label = ev["reversal"] or ("RSI " + str(ev["rsi"]) if hot else "EMA-Wende")
+                why = f" ({label})"
+            self._event(f"{name} Gewinn gesichert: Stop auf {want:.6g}{why}")
             sl["sl"] = want
 
     def _round(self, sym, qty) -> float:

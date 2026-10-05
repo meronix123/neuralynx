@@ -14,7 +14,7 @@ import threading
 import time
 
 from .config import ROOT
-from .exchange import cancel_plan, is_hedged, make_client, place_pos_tpsl, place_size_tpsl
+from .exchange import apply_leverage, cancel_plan, is_hedged, make_client, place_pos_tpsl, place_size_tpsl
 
 log = logging.getLogger("bot")
 ENV_FILE = ROOT / ".env"
@@ -390,6 +390,17 @@ class Account:
         last = float(c.fetch_ticker(symbol)["last"])
         ref = float(price) if limit else last
         lev = int(leverage)
+        mm = self.cfg.get("margin_mode", "isolated")
+        try:
+            c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"})
+        except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
+            log.debug("Schnell-Order Margin-Modus %s: %s", symbol, e)
+        real = apply_leverage(c, symbol, lev, mm)
+        if real and real != lev:
+            # Bitget behaelt einen anderen Hebel (z. B. offene Position) -> damit rechnen, damit der
+            # Einsatz (Margin) stimmt und Stop/Ziel in % der Margin richtig liegen
+            log.warning("%s: Bitget nutzt Hebel %sx statt %sx", symbol, real, lev)
+            lev = real
         try:
             qty = float(c.amount_to_precision(symbol, margin * lev / ref))
         except Exception:  # noqa: BLE001 - ccxt: Menge rundet auf 0 -> unten verstaendlich melden
@@ -403,14 +414,6 @@ class Account:
                              f"Bitget verlangt in {symbol.split(':')[0]} mind. {max(MIN_NOTIONAL, min_amt * ref):.2f} USDT "
                              f"Positionswert - bei {lev}x also mind. ca. {need * 1.05:.2f} USDT Einsatz "
                              f"(verfuegbar {free:.2f} USDT).")
-        mm = self.cfg.get("margin_mode", "isolated")
-        for fn in (lambda: c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"}),
-                   lambda: c.set_leverage(lev, symbol, {"holdSide": "long", "marginMode": mm}),
-                   lambda: c.set_leverage(lev, symbol, {"holdSide": "short", "marginMode": mm})):
-            try:
-                fn()
-            except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
-                log.debug("Schnell-Order Vorbereitung %s: %s", symbol, e)
         o = c.create_order(symbol, "limit" if limit else "market", "buy" if side == "long" else "sell", qty,
                            ref if limit else None, {"marginMode": mm, "hedged": is_hedged(c)})
         base = dict(symbol=symbol, side=side, amount=qty, leverage=lev, sl_pct=sl_pct, tp_pct=tp_pct,
@@ -797,13 +800,11 @@ class Account:
             raise ValueError("Stop-Loss liegt auf der falschen Seite des Kurses")
         if tp and ((side == "long" and tp <= ref) or (side == "short" and tp >= ref)):
             raise ValueError("Take-Profit liegt auf der falschen Seite des Kurses")
-        for fn in (lambda: c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"}),
-                   lambda: c.set_leverage(int(leverage), symbol, {"holdSide": "long", "marginMode": mm}),
-                   lambda: c.set_leverage(int(leverage), symbol, {"holdSide": "short", "marginMode": mm})):
-            try:
-                fn()
-            except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
-                log.debug("Order-Vorbereitung %s: %s", symbol, e)
+        try:
+            c.set_margin_mode(mm, symbol, {"marginCoin": "USDT"})
+        except Exception as e:  # noqa: BLE001 - "schon gesetzt" / Position offen
+            log.debug("Order-Vorbereitung %s: %s", symbol, e)
+        apply_leverage(c, symbol, int(leverage), mm)
         qty = float(c.amount_to_precision(symbol, usdt / ref))
         if qty <= 0 or qty * ref < MIN_NOTIONAL:
             raise ValueError(f"Order zu klein: Bitget verlangt mind. {MIN_NOTIONAL:.0f} USDT Positionswert")

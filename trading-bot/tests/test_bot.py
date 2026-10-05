@@ -2119,7 +2119,12 @@ def test_speed_bitget_broker_orders():
     c.pos, prot["t"] = [], prot["t"] - 60                             # spaeter wirklich weg
     assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) is None     # 1. Fehlmeldung reicht nicht
     assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) is None
+    c.fetch_ticker = lambda sym: {"last": 59890.0}                   # Kurs am Stop -> Stop ausgeloest
     assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot)[0] == "stop"
+    prot = b.protect("BTC/USDT:USDT", 1, 0.001, 59900.0, 60200.0)     # weit weg vom Stop -> von Hand geschlossen
+    prot["t"], prot["miss"] = prot["t"] - 60, 5
+    c.fetch_ticker = lambda sym: {"last": 60150.0}
+    assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) == ("von aussen geschlossen", 60150.0, False)
 
 
 def test_boost_learns_interactions_linear_cannot():
@@ -2206,8 +2211,8 @@ def test_ki_autopilot_manages_position():
     assert s["partial_done"] and s["qty"] == pytest.approx(0.25, rel=0.01)
     assert ap.trades[-1]["why"] == "Teilverkauf" and ap.trades[-1]["net"] > 0
     feed["last"] = s["entry"] + 1.9 * s["r0"]
-    ap.step(sym)                                          # Stop zieht nach (1 R hinter dem besten Kurs)
-    assert s["sl"] == pytest.approx(s["entry"] + 0.9 * s["r0"], rel=1e-4)
+    ap.step(sym)                                          # Gewinn sichern: Stop zieht nach
+    assert s["entry"] + 0.9 * s["r0"] <= s["sl"] < feed["last"]
     fc.update(p_up=0.35)                                  # KI dreht auf SHORT - direkt nach dem Einstieg noch nicht
     ap.step(sym)
     assert s["state"] == "open"
@@ -2605,3 +2610,102 @@ def test_autopilot_cost_guard_chase_entry_and_learns_from_own_trades():
     ap3.step("BTC/USDT:USDT")
     assert ap3.slots["BTC/USDT:USDT"]["state"] == "idle"
     assert "57 %" in ap3.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+
+
+def test_autopilot_secures_profits():
+    from bot.speed import exit_view
+
+    up = _speed_df(300, 0.0012)                          # steiler Anstieg -> RSI ueberkauft
+    ev = exit_view(up, 1)
+    assert ev["atr"] > 0 and ev["rsi"] > 72 and ev["tired"]
+    assert not exit_view(_speed_df(300, -0.0012), -1)["ema_against"]
+
+    fc = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+
+    def opened(ap, entry=100.0, r0=0.5):
+        s = ap.slots["BTC/USDT:USDT"]
+        s.update(state="open", side=1, entry=entry, qty=0.5, sl=entry - r0, tp=entry + 2 * r0, r0=r0, best=entry,
+                 opened=time.time(), h_min=30, prot={"sl": entry - r0, "tp": entry + 2 * r0})
+        return s
+
+    # Gewinn lief bis +1,6 R und faellt zurueck: hoechstens die Haelfte wird wieder hergegeben
+    ap = _ap(fc, sd=_speed_df(120, 0.0), last=100.6)
+    s = opened(ap)
+    s["best"] = 100.8
+    ap.step("BTC/USDT:USDT")
+    assert s["sl"] >= 100.0 + 0.5 * 1.6 * 0.5 - 1e-9 and s["sl"] < 100.6
+    # erschoepft (RSI ueberkauft) -> enger: 70 % des besten Gewinns bleiben
+    ap = _ap(fc, sd=up, last=float(up["close"].iloc[-1]))
+    px = float(up["close"].iloc[-1])
+    s = opened(ap, entry=px - 0.6, r0=0.5)
+    s["best"] = px + 0.2
+    ap.step("BTC/USDT:USDT")
+    assert s["sl"] >= s["entry"] + 0.7 * 1.6 * 0.5 - 1e-9 and "Gewinn gesichert" in ap.events[-1]
+    # Prognosezeit (30 min) doppelt vorbei, im Plus, KI nicht mehr dafuer -> Gewinn mitnehmen
+    ap = _ap({**fc, "p_up": 0.5}, sd=_speed_df(120, 0.0), last=100.2)
+    s = opened(ap)
+    s["opened"] -= 61 * 60
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "idle" and ap.trades[-1]["why"].startswith("Prognosezeit vorbei")
+    # Prognosezeit lange vorbei, kaum Gewinn -> schliessen statt ewig laufen lassen
+    ap = _ap({**fc, "p_up": 0.5}, sd=_speed_df(120, 0.0), last=100.05)
+    s = opened(ap)
+    s["opened"] -= 121 * 60
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "idle" and ap.trades[-1]["why"].startswith("Prognosezeit lange vorbei")
+    # KI weiter dafuer -> laeuft weiter
+    ap = _ap(fc, sd=_speed_df(120, 0.0), last=100.05)
+    s = opened(ap)
+    s["opened"] -= 121 * 60
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "open"
+    # Ziel ohne Ziel-Order auf Bitget (konnte nicht gesetzt werden) -> selbst schliessen
+    ap = _ap(fc, sd=_speed_df(120, 0.0), last=99.5)
+    s = opened(ap, entry=99.0, r0=0.25)
+    s["prot"]["tp_id"] = ""
+    ap.market["BTC/USDT:USDT"] = {"last": 99.5}
+    ap.broker.exit_status = lambda *a: None
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "idle" and ap.trades[-1]["why"] == "Ziel erreicht"
+
+
+def test_leverage_is_verified_and_real_margin_shown():
+    from bot.exchange import apply_leverage
+    from bot.speed import BitgetBroker
+
+    class C:
+        _bot_hedged = False
+
+        def __init__(self, keep=None):
+            self.keep, self.lev, self.calls = keep, 10, []
+
+        def set_leverage(self, lev, sym, params):
+            self.calls.append(params)
+            if self.keep is None:
+                self.lev = lev
+
+        def fetch_leverage(self, sym, params):
+            return {"longLeverage": self.lev, "shortLeverage": self.lev}
+
+    c = C()
+    assert apply_leverage(c, "BTC/USDT:USDT", 5, "isolated") == 5
+    assert {"marginMode": "isolated"} in c.calls                       # One-Way: auch ohne holdSide versucht
+    stuck = C(keep=True)                                               # Bitget behaelt 10x (z. B. offene Position)
+    assert apply_leverage(stuck, "BTC/USDT:USDT", 5, "isolated") == 10
+    assert BitgetBroker(stuck, {}, "isolated").set_leverage("BTC/USDT:USDT", 5) == 10
+    # Autopilot rechnet mit dem echten Hebel: Liquidation zu nah -> kein Trade
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 5.0, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc, cfg={"size_mode": "auto", "risk_pct": 1.0, "leverage": 20})
+    ap.broker.set_leverage = lambda sym, lev: 20
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "idle" and "Liquidation" in s["signal"]["votes"]["wartet"]
+    # Bot-Tabelle: Margin/Hebel/Liquidation von Bitget statt aus der Einstellung
+    from bot.exchange import BitgetExchange
+    ex = BitgetExchange.__new__(BitgetExchange)
+    ex.symbols = ["BTC/USDT:USDT"]
+    ex.c = type("X", (), {"fetch_positions": lambda self, s: [
+        {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.01, "entryPrice": 60000, "liquidationPrice": 52000,
+         "info": {"marginSize": "30", "leverage": "20"}}]})()
+    pos = ex.positions()["BTC/USDT:USDT"]
+    assert pos["margin"] == 30 and pos["lev"] == 20 and pos["liq"] == 52000
