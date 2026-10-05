@@ -742,12 +742,12 @@ class SpeedTrader:
         need = p["min_conf"]
         if not (p.get("cost_guard", True) or self._real()) or p.get("use_raw"):
             return need
+        if self._has_tb:                        # Ziel-vor-Stop-Modell rechnet die Kosten je Trade selbst (EV-Gate)
+            return need
         floor = cost_need_conf(h_min)
-        if floor is None:                       # 1-5 min: nur mit Nachweis - live, oder das Ziel-vor-Stop-Modell
+        if floor is None:                       # 1-5 min ohne EV-Modell: nur mit Nachweis im Live-Test
             if live.get("n", 0) >= 200 and (live.get("hit") or 0) >= 0.60:
                 floor = 0.60
-            elif self._has_tb:                  # schnelle Trades: der Erwartungswert nach Kosten entscheidet
-                floor = need
             else:
                 return None
         if live.get("n", 0) >= 100 and (live.get("hit") or 0) >= 0.56:

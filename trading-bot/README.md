@@ -183,9 +183,10 @@ Quellen, bevorzugt begutachtete Studien) wurden ausgewertet. Nur Belegtes ist ei
   Lernkopf je Richtung lernt "Wird das 2-R-Ziel VOR dem 1-R-Stop erreicht (innerhalb 4 x Prognosezeit)?",
   Platt-kalibriert. Der Autopilot handelt nur bei positivem Erwartungswert nach Kosten und bestimmt die
   Groesse nach Viertel-Kelly (Deckel: Risiko %). Der KI-Bericht zeigt beides je Markt.
-- **Ehrlichkeit**: Vertrauen in die Richtung erst ab 2 Standardfehlern Vorsprung und nie hoeher als die
-  Trefferquote in den 20 % staerksten Momenten; staerkere Regularisierung zur Auswahl (viele Merkmale,
-  wenig Daten).
+- **Ehrlichkeit**: Sicherheit = Platt-kalibrierte Meinung (am Auswahl-Abschnitt geeicht; bei Zufall geht die
+  Steigung gegen 0), gedeckelt durch die Trefferquote der 20 % staerksten Testmomente minus zwei Standardfehler
+  (Zufall + Auswahl der besten von sechs Vorhersagezeiten). Live verdient sich die KI Vertrauen dazu: trifft
+  sie nachweislich (ab 30 geprueften Entscheidungen), hebt das den Deckel. Staerkere Regularisierung zur Auswahl.
 - **Schnelle Trades** (Fast/Turbo): nicht mehr pauschal gesperrt - das Ziel-vor-Stop-Modell rechnet je Trade
   den Erwartungswert nach Kosten; ist er positiv, darf auch eine 1-10-Minuten-Prognose gehandelt werden.
   Pruefung alle 3 s (normal), 1,5 s (Fast), 1 s (Turbo). Oberflaeche: der KI-Autopilot steht rechts neben dem

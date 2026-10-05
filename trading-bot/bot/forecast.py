@@ -558,7 +558,8 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         pl, pb = _logit_p(lin, X_all[idx30[va]]), bst.proba(X_all[idx30[va]])
         mix = min((0.0, 0.5, 1.0), key=lambda a_: _logloss((1 - a_) * pl + a_ * pb, y30_all[va]))
 
-    probs, raw, moves, quality = [], [], [], []
+    live = live or {}
+    probs, raw, moves, quality, caps = [], [], [], [], []
     test_keep: dict = {}
     kept_models: dict = {"names": names, "dir": {}, "mix": mix, "boost": None, "tb": {}, "H": H, "step": STEP}
     for h in HZ:
@@ -567,21 +568,34 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
             return None
         y = (ret > 0).astype(float)
         nn = len(idx)
-        t_end = int(nn * (1 - test_share))
-        tr_i, te_i = np.arange(t_end - h), np.arange(t_end, nn)
+        t_end, v_end = int(nn * (1 - test_share)), int(nn * (1 - test_share - 0.1))
+        tr_i, va_i, te_i = np.arange(v_end - h), np.arange(v_end, t_end - h), np.arange(t_end, nn)
         m = _logit_fit(X_all[idx[tr_i]], y[tr_i], weight[idx[tr_i]], L2_)
-        p_te = _logit_p(m, X_all[idx[te_i]])
         final = _logit_fit(X_all[idx], y, weight[idx], L2_)
+        p_va, p_te = _logit_p(m, X_all[idx[va_i]]), _logit_p(m, X_all[idx[te_i]])
         p_now = float(_logit_p(final, X_all[n_closed - 1:n_closed])[0])     # letzte ABGESCHLOSSENE Kerze
         if h == H and mix > 0:
             tb = tr_i[-BOOST_ROWS:]
-            b_te = Boost().fit(X_all[idx[tb]], y[tb], weight[idx[tb]]).proba(X_all[idx[te_i]])
-            p_te = (1 - mix) * p_te + mix * b_te
+            b_m = Boost().fit(X_all[idx[tb]], y[tb], weight[idx[tb]])
+            p_va = (1 - mix) * p_va + mix * b_m.proba(X_all[idx[va_i]])
+            p_te = (1 - mix) * p_te + mix * b_m.proba(X_all[idx[te_i]])
             fb = np.arange(len(idx))[-BOOST_ROWS:]
             b_final = Boost().fit(X_all[idx[fb]], y[fb], weight[idx[fb]])
             b_now = float(b_final.proba(X_all[n_closed - 1:n_closed])[0])
             p_now = (1 - mix) * p_now + mix * b_now
             kept_models["boost"] = b_final
+        # Platt-Kalibrierung (2 Parameter) am Auswahl-Abschnitt: wie viel von der Rohmeinung ist echt?
+        # Bei Zufall geht die Steigung gegen 0 (-> 50 %), bei echtem Vorsprung bleibt die Sicherheit erhalten.
+        cal = None
+        if len(va_i) >= 200:
+            z_va = np.log(np.clip(p_va, 1e-6, 1 - 1e-6) / (1 - np.clip(p_va, 1e-6, 1 - 1e-6)))
+            cal = _logit_fit(z_va[:, None], y[va_i], np.ones(len(va_i)), 0.01)
+
+            def platt(pp, cal=cal):
+                z = np.log(np.clip(pp, 1e-6, 1 - 1e-6) / (1 - np.clip(pp, 1e-6, 1 - 1e-6)))
+                return _logit_p(cal, np.asarray(z, float).reshape(-1, 1))
+            p_te = platt(p_te)
+            p_now = float(platt([p_now])[0])
         yt = y[te_i]
         hit = float(((p_te >= 0.5) == (yt == 1)).mean())
         base = max(y[tr_i].mean(), 1 - y[tr_i].mean())   # "immer die haeufigere Richtung"
@@ -591,10 +605,14 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         # Vorsprung gegen den Zufall in Standardfehlern (sich ueberlappende Zeitraeume zaehlen weniger)
         n_eff = max(1.0, len(te_i) / h)
         z = (hit - max(0.5, float(base))) / math.sqrt(0.25 / n_eff)
-        trust = max(0.0, min(1.0, (z - 2.0) / 2.0))        # erst ab 2 Standardfehlern Vorsprung ueberhaupt trauen
-        # Trefferquote in den 20 % sichersten Momenten (dort steigt der Autopilot ein)
+        # Trefferquote in den 20 % sichersten Momenten (dort steigt der Autopilot ein) - sie deckelt die
+        # Sicherheit: nie sicherer, als die KI dort an ungesehenen Daten wirklich war (bei wenig Daten Richtung 50 %)
         strong = np.abs(p_te - 0.5) >= np.quantile(np.abs(p_te - 0.5), 0.8)
         hit_top = float(((p_te[strong] >= 0.5) == (yt[strong] == 1)).mean()) if strong.any() else None
+        n_top = int(strong.sum())
+        se_top = math.sqrt(0.25 * h / max(n_top, 1))          # ueberlappende Fenster zaehlen 1/h
+        caps.append((hit_top, se_top))
+        trust = 0.0
         p_loc, z_loc, _ = _local_cal(p_te, yt, p_now, h)
         if keep_test:
             test_keep[h] = (p_te.copy(), yt.copy())
@@ -602,19 +620,23 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
                         "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0, "n_test": int(len(te_i)),
                         "trust": round(trust, 2), "z": round(z, 2),
                         "hit_top20": None if hit_top is None else round(hit_top, 3), "z_now": round(z_loc, 2)})
-        # Sicherheit: je Meinungsstaerke gemessen; die globale Messung zaehlt, wenn sie mehr hergibt - aber nie
-        # sicherer, als die KI in ihren 20 % staerksten Momenten an ungesehenen Daten wirklich getroffen hat
-        p_glob = 0.5 + (p_now - 0.5) * trust
-        if hit_top is not None:
-            cap = max(0.5, min(hit_top, 0.9))
-            p_glob = min(max(p_glob, 1 - cap), cap)
-        probs.append(p_loc if abs(p_loc - 0.5) > abs(p_glob - 0.5) else p_glob)
+        probs.append(p_now)                                  # Deckel kommt nach der Schleife (alle Zeiten bekannt)
         raw.append(p_now)
-        # fuer die Live-Bewertung der laufenden Kerze: Modell + wie stark die Rohmeinung geschrumpft wurde
-        shrink = (probs[-1] - 0.5) / (p_now - 0.5) if abs(p_now - 0.5) > 1e-6 else 0.0
-        kept_models["dir"][h] = (final, float(max(0.0, min(1.0, shrink))))
+        kept_models["dir"][h] = (final, 1.0, cal)             # Schrumpfung wird nach dem Deckeln eingetragen
         moves.append((float(np.mean(np.abs(ret_alive[-2000:]))), float(np.std(ret_alive[-2000:]))))
-    live = live or {}
+    # Sicherheit = Platt-kalibrierte Meinung, gedeckelt: nie sicherer als die Trefferquote der 20 % staerksten
+    # Momente an ungesehenen Daten, minus zwei Standardfehler (Zufall + Auswahl der besten von sechs Zeiten).
+    # Live verdient sich die KI Vertrauen dazu: trifft sie nachweislich, darf sie entsprechend sicher sein.
+    live_cap = 0.5 + (live["hit"] - 0.5) * live["n"] / (live["n"] + 50) \
+        if live.get("n", 0) >= 30 and (live.get("hit") or 0) > 0.5 else 0.5
+    for i, (hit_top, se_top) in enumerate(caps):
+        # zwei Standardfehler Abzug: einer fuer den Zufall, einer dafuer, dass die beste von sechs Zeiten gewaehlt wird
+        cap = 0.5 + max(0.0, ((hit_top or 0.5) - 0.5) - 2.0 * se_top)
+        cap = min(max(cap, live_cap), 0.9)
+        quality[i]["trust"] = round(cap - 0.5, 3)
+        probs[i] = min(max(probs[i], 1 - cap), cap)
+        model, _, cal_h = kept_models["dir"][HZ[i]]
+        kept_models["dir"][HZ[i]] = (model, cap, cal_h)        # Live-Bewertung: gleicher Deckel, gleiche Kalibrierung
     try:
         tb = tp_before_sl(df, X_all, flat_c, warm, n_closed, H, moves[-1][1], weight, L2_, test_share)
         kept_models["tb"] = tb.pop("_models", {})
@@ -1153,11 +1175,14 @@ class Forecaster:
             feats = make_features(tail, lead, funding, macro, "XAU" in sym or "XAG" in sym, self.step)
             X = np.nan_to_num(feats.reindex(columns=m["names"]).to_numpy(float)[-1:], nan=0.0)
             by_h, probs, raws = [], [], []
-            for h, (model, shrink) in m["dir"].items():
+            for h, (model, cap, cal_h) in m["dir"].items():
                 p_raw = float(_logit_p(model, X)[0])
                 if h == m["H"] and m.get("mix", 0) > 0 and m.get("boost") is not None:
                     p_raw = (1 - m["mix"]) * p_raw + m["mix"] * float(m["boost"].proba(X)[0])
-                p_live = 0.5 + (p_raw - 0.5) * shrink
+                if cal_h is not None:
+                    z = math.log(max(p_raw, 1e-6) / max(1 - p_raw, 1e-6))
+                    p_raw = float(_logit_p(cal_h, np.array([[z]]))[0])
+                p_live = min(max(p_raw, 1 - cap), cap)
                 by_h.append({"min": h * m["step"], "p_up": round(p_live, 3)})
                 probs.append(p_live)
                 raws.append(p_raw)
