@@ -156,6 +156,23 @@ Groesse im Autopilot: `auto` (KI waehlt), `risk` (x % des Kontos Verlust bis Sto
 Kontos als Einsatz), `usdt` (fester Einsatz). Teilkauf = erst ein Teil, Rest nur nachkaufen, wenn die
 Position im Gewinn ist (nie im Verlust). Teilverkauf % = wie viel beim ersten Ziel verkauft wird.
 
+## Kosten-Schutz (warum die KI nicht staendig handelt)
+
+Rechnung mit Bitget-Gebuehren (0,02 % Maker, 0,06 % Taker, dazu Schlupf beim Stop): Bei 1-5 min
+Vorhersage verliert jede Strategie, selbst wenn die KI 60 % trifft - die Bewegungen sind kleiner als die
+Kosten. Ins Plus kommt sie nur bei 20-30 min Vorhersage ab ~57 % Treffern (10-15 min: ~60 %), mit einem
+Stop von mind. 4x den Kosten eines Trades. Der Autopilot handelt deshalb nur solche Trades:
+
+- Mindest-Sicherheit je Vorhersagezeit (57 % / 60 %), 1-5 min nur mit live nachgewiesenen 60 % Treffern
+- Stop mind. 4x die Kosten; Einstand erst ab +1 R, Teilverkauf ab +1,5 R (frueher schnitt das Gewinner ab)
+- Ausstieg bei KI-Wende nur bei deutlich hoeherer Sicherheit und nicht direkt nach dem Einstieg
+- Limit nicht gefuellt, KI weiter dafuer -> Einstieg zum Marktpreis (sonst fuellen sich fast nur die
+  Verlierer-Trades)
+- Lernt aus den eigenen Abschluessen: verliert ein Markt in den letzten 3 Tagen dauerhaft
+  (Gewinnfaktor unter 0,7 bei mind. 12 Trades), pausiert er dort
+
+Auf dem Bitget-Konto ist der Kosten-Schutz immer an, in der Simulation abschaltbar (zum Vergleichen).
+
 ## Handelszeiten Gold/Silber
 
 Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in

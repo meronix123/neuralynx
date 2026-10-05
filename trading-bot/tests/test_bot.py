@@ -2196,16 +2196,22 @@ def test_ki_autopilot_manages_position():
     ap.step(sym)                                          # ausgefuehrt
     assert s["state"] == "open" and s["qty"] == pytest.approx(0.5, rel=0.01)
     feed["last"] = s["entry"] + 0.75 * s["r0"]
-    ap.step(sym)                                          # +0,75 R -> Stop auf Einstand
-    assert s["sl"] > s["entry"] and not s.get("partial_done")
+    ap.step(sym)                                          # +0,75 R -> noch nichts (Gewinner nicht abschneiden)
+    assert s["sl"] < s["entry"] and not s.get("partial_done")
     feed["last"] = s["entry"] + 1.1 * s["r0"]
-    ap.step(sym)                                          # +1,1 R -> Haelfte verkauft
+    ap.step(sym)                                          # +1,1 R -> Stop auf Einstand
+    assert s["sl"] > s["entry"] and not s.get("partial_done")
+    feed["last"] = s["entry"] + 1.6 * s["r0"]
+    ap.step(sym)                                          # +1,6 R -> Haelfte verkauft
     assert s["partial_done"] and s["qty"] == pytest.approx(0.25, rel=0.01)
     assert ap.trades[-1]["why"] == "Teilverkauf" and ap.trades[-1]["net"] > 0
-    feed["last"] = s["entry"] + 1.8 * s["r0"]
+    feed["last"] = s["entry"] + 1.9 * s["r0"]
     ap.step(sym)                                          # Stop zieht nach (1 R hinter dem besten Kurs)
-    assert s["sl"] == pytest.approx(s["entry"] + 0.8 * s["r0"], rel=1e-4)
-    fc.update(p_up=0.35)                                  # KI dreht klar auf SHORT -> ganz verkaufen
+    assert s["sl"] == pytest.approx(s["entry"] + 0.9 * s["r0"], rel=1e-4)
+    fc.update(p_up=0.35)                                  # KI dreht auf SHORT - direkt nach dem Einstieg noch nicht
+    ap.step(sym)
+    assert s["state"] == "open"
+    s["opened"] -= 3600                                   # spaeter: KI dreht klar -> ganz verkaufen
     ap.step(sym)
     assert s["state"] == "idle" and ap.trades[-1]["why"].startswith("KI dreht") and ap.trades[-1]["net"] > 0
     assert sum(t["net"] for t in ap.trades) > 0
@@ -2361,13 +2367,16 @@ def test_ki_autopilot_fast_mode_uses_short_forecast_and_tight_stops():
     ap.start(["BTC/USDT:USDT"], broker, 35.0, "Simulation", margin_usdt=5, leverage=10, fast=True, min_conf=0.56)
     ap.stop(close=True)
     ap.thread.join(5)
-    assert ap.cur["fast"] and ap.cur["loop_s"] == 1.5 and ap.cur["partial_r"] == 0.8
+    assert ap.cur["fast"] and ap.cur["loop_s"] == 1.5 and ap.cur["partial_r"] == 1.2
     ap.cur["loop_s"] = 0.0
     ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 35.0,
                                     "label": "Simulation", "stopping": False}
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
     ap.step("BTC/USDT:USDT")
     s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "idle" and "Kosten-Schutz" in s["signal"]["votes"]["wartet"]   # 5 min: frisst Gebuehren
+    ap.cur["cost_guard"] = False                                         # nur in der Simulation abschaltbar
+    ap.step("BTC/USDT:USDT")
     assert s["state"] == "pending" and s["side"] == 1                   # 5-min-Prognose 60 % -> LONG
     assert 99.99 - s["sl"] == pytest.approx(0.3, rel=0.05)               # Stop = 5-Minuten-Schwankung (eng)
     assert s["tp"] - 99.99 == pytest.approx(0.45, rel=0.05)              # Ziel 1,5 R
@@ -2438,7 +2447,7 @@ def test_autopilot_sizes_by_risk_and_picks_safe_leverage():
     loss_at_stop = s["qty"] * s["price"] * stop_pct
     assert loss_at_stop == pytest.approx(1.0, rel=0.1)                    # 1 % von 100 USDT bei voller Sicherheit
     assert 1 <= s["lev"] <= 20 and 1 / s["lev"] >= 2 * stop_pct           # Liquidation weit hinter dem Stop
-    ap2 = _ap({**fc, "p_up": 0.56}, cfg={"size_mode": "auto", "risk_pct": 1.0, "leverage": 20})
+    ap2 = _ap({**fc, "p_up": 0.575}, cfg={"size_mode": "auto", "risk_pct": 1.0, "leverage": 20})
     ap2.step("BTC/USDT:USDT")
     s2 = ap2.slots["BTC/USDT:USDT"]
     assert s2["qty"] < s["qty"] * 0.7                                      # unsicherer -> kleiner
@@ -2533,7 +2542,8 @@ def test_turbo_one_minute_model_and_autopilot(tmp_path):
     lg.resolve("X", pd.DataFrame({"ts": [(1_000_000 + 120) * 1000], "close": [100.2]}))   # nach 3 min geprueft
     assert lg.stats("X")["n"] == 1
     # Autopilot im Turbo-Modus nimmt das 1-Minuten-Modell und den engen Stop
-    fc = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.3, "sd_5m_pct": 0.2, "decision": "LONG"}
+    fc = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.3, "sd_5m_pct": 0.2, "decision": "LONG",
+          "decision_min": 3}
     df = _speed_df(120, 0.0)
     book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
     ap = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.0},
@@ -2550,6 +2560,48 @@ def test_turbo_one_minute_model_and_autopilot(tmp_path):
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
     ap.step("BTC/USDT:USDT")
     s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "idle" and "Kosten-Schutz" in s["signal"]["votes"]["wartet"]   # 3 min ohne Nachweis
+    fc["live"] = {"n": 250, "hit": 0.61}                                    # live nachgewiesen -> darf handeln
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "pending" and 99.99 - s["sl"] == pytest.approx(0.44, rel=0.05)   # Stop >= 4x Kosten
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    fc.pop("live")
+    ap.cur["cost_guard"] = False                                            # Simulation ohne Kosten-Schutz
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
     assert s["state"] == "pending" and s["side"] == 1                       # normale KI 50 % - Turbo 60 % zaehlt
     assert 99.99 - s["sl"] == pytest.approx(0.3, rel=0.05)                  # 1,5 x 1-Minuten-Schwankung
     assert 1 / s["lev"] >= 2 * (99.99 - s["sl"]) / 99.99                    # Liquidation weit hinter dem Stop
+
+
+def test_autopilot_cost_guard_chase_entry_and_learns_from_own_trades():
+    from bot.speed import cost_need_conf
+
+    assert cost_need_conf(3) is None and cost_need_conf(15) == 0.60 and cost_need_conf(30) == 0.57
+    fc = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.1, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc)
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "pending"
+    assert 99.99 - s["sl"] == pytest.approx(0.44, rel=0.05)      # enges Band (0,1 %) -> Stop mind. 4x die Kosten
+    # Limit nicht gefuellt, KI weiter dafuer, Kurs kaum weg -> zum Marktpreis einsteigen
+    s["placed"] -= 3600
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "open" and s.get("taker_in") and s["entry"] > 100.0
+    assert s["sl"] == pytest.approx(s["entry"] - s["r0"]) and s["r0"] == pytest.approx(0.44, rel=0.05)
+    # Lernen: Markt hat in den letzten 3 Tagen dauerhaft verloren -> pausiert
+    now = int(time.time() * 1000)
+    ap2 = _ap(fc)
+    ap2.history = [{"symbol": "BTC/USDT:USDT", "net": -0.1 if i % 4 else 0.05, "time": now - i * 60000, "why": "stop"}
+                   for i in range(14)]
+    ap2.step("BTC/USDT:USDT")
+    s2 = ap2.slots["BTC/USDT:USDT"]
+    assert s2["state"] == "idle" and "gelernt" in s2["signal"]["votes"]["wartet"]
+    ap2.history = [dict(t, time=now - 4 * 86400 * 1000) for t in ap2.history]   # alt -> zaehlt nicht mehr
+    ap2.step("BTC/USDT:USDT")
+    assert s2["state"] == "pending"
+    # zu unsicher fuer die Kosten: 56 % reicht bei 30 min nicht
+    ap3 = _ap({**fc, "p_up": 0.56})
+    ap3.step("BTC/USDT:USDT")
+    assert ap3.slots["BTC/USDT:USDT"]["state"] == "idle"
+    assert "57 %" in ap3.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]

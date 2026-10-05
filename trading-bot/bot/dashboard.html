@@ -342,7 +342,7 @@
       <div id="sp-status"></div>
     </div>
     <div class="speed">
-      <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft, verkauft die Haelfte bei +1 R, zieht den Stop nach, steigt aus wenn die KI dreht</small></div>
+      <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, verkauft einen Teil bei +1,5 R, zieht den Stop nach, steigt aus wenn die KI klar dreht</small></div>
       <div class="speedform">
         <span id="ap-syms"></span>
         <label>Groesse <select id="ap-size" onchange="apSizeUnit()">
@@ -351,10 +351,11 @@
           <input id="ap-sizeval" value="1" style="width:52px"> <span id="ap-unit">% Risiko</span></label>
         <label>max. Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
         <label title="Erst einen Teil kaufen, den Rest nur im Gewinn nachkaufen - nie im Verlust"><input type="checkbox" id="ap-scale"> Teilkauf</label>
-        <label>Teilverkauf bei +1 R <select id="ap-part"><option value="0">aus</option><option value="25">25 %</option><option value="50" selected>50 %</option><option value="75">75 %</option></select></label>
+        <label>Teilverkauf bei +1,5 R <select id="ap-part"><option value="0">aus</option><option value="25">25 %</option><option value="50" selected>50 %</option><option value="75">75 %</option></select></label>
         <label>Tempo <select id="ap-fast"><option value="0">normal (bis 30 min)</option><option value="1">Fast (5-10 min)</option><option value="2">Turbo: Hebel-Speed-KI (1-Minuten-Modell)</option></select></label>
         <label>KI-Sicherheit ab <select id="ap-conf"><option value="53">53 %</option><option value="54">54 %</option><option value="55">55 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
-        <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
+        <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = document.getElementById('ap-cost-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
+        <label id="ap-cost-l" title="Nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleiben kann (mind. 57-60 % Sicherheit je nach Vorhersagezeit, Stop mind. 4x die Kosten). Auf dem Bitget-Konto immer an."><input type="checkbox" id="ap-cost" checked> Kosten-Schutz</label>
         <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
         <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
         <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)">Aus</button>
@@ -1383,7 +1384,7 @@ function renderSession(k) {
   if (syms.join() !== sessSymsKey[k]) {                  // Markt-Auswahl nur bei Aenderung neu bauen
     sessSymsKey[k] = syms.join();
     document.getElementById(k + "-syms").innerHTML = syms.map((x, i) =>
-      `<label class="spsym"><input type="checkbox" class="${k}-sym" value="${x}" ${i === 0 ? "checked" : ""}>${x.split("/")[0]}</label>`).join("");
+      `<label class="spsym"><input type="checkbox" class="${k}-sym" value="${x}" ${i === 0 || k === "ap" ? "checked" : ""}>${x.split("/")[0]}</label>`).join("");
   }
   const out = html => {
     const el = document.getElementById(k + "-status");
@@ -1415,7 +1416,7 @@ async function pollSession() {
   for (const k of Object.keys(SESS)) {
     const sp = (data[SESS[k].key] || {});
     if (!sp.active && Date.now() > (pollSession.until[k] || 0)) continue;   // nur waehrend/kurz nach einer Sitzung
-    try { const v = await (await fetch(SESS[k].api)).json(); sessFresh[k] = { at: Date.now(), v }; data[SESS[k].key] = v; renderSession(k); }
+    try { const v = await (await fetch(SESS[k].api)).json(); sessFresh[k] = { at: Date.now(), v }; data[SESS[k].key] = v; renderSession(k); renderPositions(); }
     catch (e) { /* Bot kurz nicht erreichbar */ }
   }
 }
@@ -1445,7 +1446,7 @@ async function sessionStart(k) {
     body.scale_in = document.getElementById("ap-scale").checked;
     body.partial_frac = val("ap-part");
   }
-  if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.turbo = val("ap-fast") === "2"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; }
+  if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.turbo = val("ap-fast") === "2"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; body.cost_guard = body.target !== "paper" || document.getElementById("ap-cost").checked; }
   const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
   if (body.target === "account") {
     if (!acc || !acc.connected) return toast("Erst im Reiter Bitget-Konto ein Konto verbinden", false);

@@ -109,12 +109,14 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
     opts["use_raw"] = bool(body.get("use_raw"))
     opts["fast"] = bool(body.get("fast"))
     opts["turbo"] = bool(body.get("turbo"))
-    if body.get("size_mode") in ("usdt", "pct", "risk"):
+    if body.get("size_mode") in ("auto", "usdt", "pct", "risk"):
         opts["size_mode"] = body["size_mode"]
     for k in ("size_pct", "risk_pct", "partial_frac"):
         v = _num(body.get(k))
         if v is not None:
             opts[k] = float(v) / 100 if k == "partial_frac" and float(v) > 1 else float(v)
+    if body.get("cost_guard") is not None:
+        opts["cost_guard"] = bool(body.get("cost_guard"))    # auf dem Konto immer an (siehe speed.py)
     if body.get("scale_in") is not None:
         opts["scale_in"] = bool(body.get("scale_in"))
     if body.get("target") == "account":

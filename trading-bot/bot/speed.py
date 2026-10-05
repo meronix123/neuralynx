@@ -37,8 +37,8 @@ AUTO_DEFAULTS = {
     "use_raw": False,          # Rohsignal auch ohne nachgewiesene Treffsicherheit (nur Simulation)
     "sl_band": 1.0,            # Stop = 1 x die 80-%-Schwankung der naechsten 30 min
     "tp_r": 2.0,               # Ziel = 2 x Risiko
-    "be_r": 0.7,               # ab +0,7 R Stop auf Einstand (inkl. Gebuehren)
-    "partial_r": 1.0,          # ab +1 R ...
+    "be_r": 1.0,               # ab +1 R Stop auf Einstand (inkl. Gebuehren) - frueher schneidet Gewinner ab
+    "partial_r": 1.5,          # ab +1,5 R ...
     "partial_frac": 0.5,       # ... die Haelfte verkaufen
     "trail_r": 1.0,            # danach Stop im Abstand 1 R hinter dem besten Kurs nachziehen
     "fast": False,             # Fast-Modus: 5-10-min-Prognose, enge Stops/Ziele, sehr schnelle Reaktion
@@ -47,10 +47,28 @@ AUTO_DEFAULTS = {
     "add_at_r": 0.5,           #   Rest bei +0,5 R, wenn die KI weiter dafuer ist
     "gate_min_n": 150,         # Markt-Sperre: ab so vielen live geprueften KI-Entscheidungen ...
     "gate_min_hit": 0.5,       # ... und Trefferquote darunter handelt der Autopilot dort nicht
+    # Kosten-Schutz: nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleiben kann
+    "cost_guard": True,
+    "fee_r_x": 4.0,            # Stop mind. 4 x die Kosten eines Trades (Gebuehren + Schlupf) entfernt
+    "chase": True,             # Limit nicht ausgefuehrt, Signal steht noch -> zum Marktpreis einsteigen
+    "chase_max_r": 0.15,       #   ... wenn der Kurs hoechstens 0,15 R weggelaufen ist
+    "flip_extra": 0.03,        # Ausstieg bei KI-Wende nur mit 3 Punkten mehr Sicherheit als fuer den Einstieg
+    "min_hold_frac": 0.5,      #   ... und fruehestens nach der halben Vorhersagezeit
+    "learn_n": 12,             # Lernen aus eigenen Trades: ab 12 Abschluessen in einem Markt (letzte 3 Tage) ...
+    "learn_pf": 0.7,           # ... und Gewinnfaktor darunter pausiert der Markt
 }
-FAST_AUTO = {"loop_s": 1.5, "entry_timeout_s": 20, "be_r": 0.5, "partial_r": 0.8, "trail_r": 0.7, "tp_r": 1.5}
+# Rechnung (Simulation mit Bitget-Gebuehren 0,02 % Maker / 0,06 % Taker + Schlupf): ins Plus kommt die KI nur,
+# wenn sie bei 20-30 min Vorhersage mind. ~57 % trifft, bei 10-15 min mind. ~60 %; bei 1-5 min frisst der
+# Handel selbst bei 60 % Treffern mehr Gebuehren als er bringt. Diese Grenzen setzt der Kosten-Schutz durch.
+def cost_need_conf(h_min: float | None) -> float | None:
+    """Mindest-Sicherheit je Vorhersagezeit, damit nach Kosten etwas uebrig bleibt (None = lohnt nie)."""
+    h = float(h_min or 30)
+    if h < 10:
+        return None
+    return 0.60 if h < 20 else 0.57
+FAST_AUTO = {"loop_s": 1.5, "entry_timeout_s": 20, "be_r": 1.0, "partial_r": 1.2, "trail_r": 0.8, "tp_r": 1.5}
 # Hebel-Speed-KI (Turbo): eigenes 1-Minuten-Modell, noch engere Stops, Pruefung jede Sekunde
-TURBO_AUTO = {"loop_s": 1.0, "entry_timeout_s": 15, "be_r": 0.5, "partial_r": 0.8, "trail_r": 0.6, "tp_r": 1.5,
+TURBO_AUTO = {"loop_s": 1.0, "entry_timeout_s": 15, "be_r": 1.0, "partial_r": 1.2, "trail_r": 0.8, "tp_r": 1.5,
               "fast": True}
 TFS = {"1m": 1, "2m": 2, "3m": 3, "5m": 5}
 
@@ -353,6 +371,7 @@ class SpeedTrader:
                                                                                  "scale_in", "partial_frac")}}
             self.slots = {s: {"state": "idle"} for s in symbols}
             self.trades, self.events = [], []
+            self.history = self._load_history(label)
             self.active = True
             self._event(f"Ein: {', '.join(x.split(':')[0] for x in symbols)} ({label})")
             self.thread = threading.Thread(target=self._run, daemon=True, name=self.kind)
@@ -468,26 +487,80 @@ class SpeedTrader:
             return 0, {"KI": f"Markt gesperrt: trifft live nur {round((live.get('hit') or 0) * 100)} % "
                              f"von {live['n']}"}, fc
         p_up = fc["p_up_raw"] if self.cur.get("use_raw") else fc["p_up"]
+        h_min = fc.get("decision_min")
         if self.cur.get("fast") and not self.cur.get("turbo") and not self.cur.get("use_raw"):
             # Fast-Modus: die staerkste Prognose auf 5-10 Minuten
             short = [x for x in fc.get("by_horizon") or [] if x["min"] <= 10]
             if short:
-                p_up = max(short, key=lambda x: abs(x["p_up"] - 0.5))["p_up"]
+                best = max(short, key=lambda x: abs(x["p_up"] - 0.5))
+                p_up, h_min = best["p_up"], best["min"]
         conf = max(p_up, 1 - p_up)
-        side = (1 if p_up >= 0.5 else -1) if conf >= self.cur["min_conf"] else 0
-        return side, {"KI": "LONG" if p_up >= 0.5 else "SHORT", "Sicherheit": round(conf, 3)}, fc
+        votes = {"KI": "LONG" if p_up >= 0.5 else "SHORT", "Sicherheit": round(conf, 3)}
+        need = self._need_conf(sym, h_min, live)
+        if need is None:
+            return 0, {**votes, "wartet": f"Kosten-Schutz: {h_min:g}-min-Prognose bringt nach Gebuehren nichts "
+                                          f"(erst ab nachgewiesenen 60 % Treffern)"}, fc
+        blocked = self._learned_block(sym)
+        if blocked:
+            return 0, {**votes, "wartet": blocked}, fc
+        side = (1 if p_up >= 0.5 else -1) if conf >= need else 0
+        if side == 0 and conf >= self.cur["min_conf"]:
+            votes["wartet"] = f"Kosten-Schutz: braucht {round(need * 100)} % Sicherheit"
+        return side, votes, fc
+
+    def _real(self) -> bool:
+        return isinstance(self.broker, BitgetBroker)
+
+    def _need_conf(self, sym, h_min, live) -> float | None:
+        """Benoetigte Sicherheit: eingestellte Mindest-Sicherheit, mit Kosten-Schutz mindestens so viel, wie
+        bei dieser Vorhersagezeit nach Gebuehren noetig ist. Auf dem Konto ist der Kosten-Schutz immer an."""
+        p = self.cur
+        need = p["min_conf"]
+        if not (p.get("cost_guard", True) or self._real()) or p.get("use_raw"):
+            return need
+        floor = cost_need_conf(h_min)
+        if floor is None:                       # 1-5 min: nur mit Nachweis im Live-Test
+            if live.get("n", 0) >= 200 and (live.get("hit") or 0) >= 0.60:
+                floor = 0.60
+            else:
+                return None
+        if live.get("n", 0) >= 100 and (live.get("hit") or 0) >= 0.56:
+            floor -= 0.01                       # Markt hat sich live bewaehrt -> etwas oefter handeln
+        return max(need, floor)
+
+    def _learned_block(self, sym) -> str:
+        """Lernen aus den eigenen Abschluessen: Markt pausieren, solange er in den letzten 3 Tagen
+        dauerhaft Geld verliert (Gewinnfaktor unter learn_pf bei mind. learn_n Abschluessen)."""
+        p = self.cur
+        if not p.get("learn_n"):
+            return ""
+        since = (time.time() - 3 * 86400) * 1000
+        rows = [t for t in list(getattr(self, "history", [])) + self.trades
+                if t.get("symbol") == sym and (t.get("time") or 0) >= since and t.get("why") != "Teilverkauf"]
+        if len(rows) < p["learn_n"]:
+            return ""
+        win = sum(t["net"] for t in rows if t["net"] > 0)
+        loss = -sum(t["net"] for t in rows if t["net"] < 0)
+        pf = win / loss if loss > 0 else 9.0
+        if pf < p["learn_pf"]:
+            return f"gelernt: hier zuletzt {len(rows)} Trades mit Verlust (Gewinnfaktor {pf:.2f}) - pausiert"
+        return ""
 
     def _levels(self, df, price, side, fc):
         p = self.cur
         if self.kind != "ki" or not fc:
             return levels(df, price, side, p)
         fees = price * (p["maker"] + p["taker"])
+        # Kosten-Schutz: Stop so weit, dass Gebuehren + Schlupf hoechstens ~1/4 des Risikos ausmachen
+        floor = p.get("fee_r_x", 4.0) * (fees + price * p["slippage"]) \
+            if (p.get("cost_guard", True) or self._real()) and not p.get("use_raw") else 0.0
         if p.get("turbo"):         # Turbo: Stop aus der 1-Minuten-Schwankung (x1,5), mind. 2x Gebuehren
             r = max(price * float(fc.get("sd_5m_pct") or 0.05) / 100 * 1.5, price * 0.0005, 2 * fees)
         elif p.get("fast"):        # enge Stops aus der 5-Minuten-Schwankung
             r = max(price * float(fc.get("sd_5m_pct") or 0.1) / 100, price * 0.0008, 2 * fees)
         else:
             r = max(price * fc["band_pct"] / 100 * p["sl_band"], price * 0.0015, 2 * fees)
+        r = max(r, floor)
         tp_d = max(r * p["tp_r"], p["min_tp_fee_x"] * fees)
         # Ziel vor dem naechsten Widerstand (Long) / der naechsten Unterstuetzung (Short) - lohnt es nicht, kein Trade
         wall = fc.get("sr_up_pct") if side == 1 else fc.get("sr_dn_pct")
@@ -558,6 +631,8 @@ class SpeedTrader:
                     sl.update(state="open", entry=avg, qty=filled, opened=now, r0=abs(avg - sl["sl"]), best=avg,
                               prot=self.broker.protect(sym, sl["side"], filled, sl["sl"], sl["tp"]))
                     self._event(f"{sym.split(':')[0]} teilweise ausgefuehrt ({filled:g}) - abgesichert")
+                elif self._chase(sym, sl, side, tick, now):
+                    pass
                 else:
                     sl.clear()
                     sl["state"] = "idle"
@@ -577,6 +652,25 @@ class SpeedTrader:
             elif self.kind == "ki":
                 self._manage(sym, sl, tick, side, votes)
 
+    def _chase(self, sym, sl, side, tick, now) -> bool:
+        """Limit-Einstieg nicht ausgefuehrt, KI aber weiter dafuer und Kurs kaum weggelaufen -> zum Marktpreis
+        einsteigen. Sonst fuellen sich Limit-Orders fast nur, wenn der Kurs GEGEN die Richtung laeuft, und die
+        guten Trades werden verpasst."""
+        p = self.cur
+        if self.kind != "ki" or not p.get("chase") or side != sl["side"] or self.session.get("stopping"):
+            return False
+        r0 = abs(sl["price"] - sl["sl"])
+        px_now = tick["ask"] if side == 1 else tick["bid"]
+        if r0 <= 0 or side * (px_now - sl["price"]) > p.get("chase_max_r", 0.15) * r0:
+            return False
+        avg = self.broker.add(sym, side, sl["qty"])
+        shift = avg - sl["price"]
+        stop, target = sl["sl"] + shift, sl["tp"] + shift
+        sl.update(state="open", entry=avg, opened=now, sl=stop, tp=target, r0=abs(avg - stop), best=avg, taker_in=True,
+                  prot=self.broker.protect(sym, side, sl["qty"], stop, target))
+        self._event(f"{sym.split(':')[0]} Limit nicht gefuellt - zum Marktpreis eingestiegen @ {avg:.6g}")
+        return True
+
     def _manage(self, sym, sl, tick, side, votes) -> None:
         """KI-Autopilot fuehrt die Position: Einstand, Teilverkauf, Nachziehen, Ausstieg bei KI-Wende."""
         p = self.cur
@@ -586,8 +680,12 @@ class SpeedTrader:
         sl["best"] = max(sl.get("best", last), last) if d == 1 else min(sl.get("best", last), last)
         gain = d * (last - sl["entry"]) / r0
         name = sym.split(":")[0]
-        # KI dreht klar in die Gegenrichtung -> ganz verkaufen
-        if side == -d:
+        # KI dreht klar in die Gegenrichtung -> ganz verkaufen (nur mit deutlich mehr Sicherheit und nicht
+        # sofort nach dem Einstieg - sonst kostet staendiges Rein/Raus nur Gebuehren)
+        held = time.time() - sl.get("opened", time.time())
+        min_hold = max(60.0, float(sl.get("h_min") or 5) * 60 * p.get("min_hold_frac", 0.5))
+        if side == -d and (votes.get("Sicherheit") or 0) >= p["min_conf"] + p.get("flip_extra", 0.0) \
+                and held >= min_hold:
             px = self.broker.close(sym, d, sl["qty"], sl["prot"])
             self._book(sym, sl, px, f"KI dreht ({votes.get('KI')} {round((votes.get('Sicherheit') or 0) * 100)} %)", False)
             return
@@ -641,7 +739,7 @@ class SpeedTrader:
     def _book_part(self, sym, sl, px, part) -> None:
         p = self.cur
         gross = sl["side"] * (px - sl["entry"]) * part
-        fees = sl["entry"] * part * p["maker"] + px * part * p["taker"]
+        fees = sl["entry"] * part * (p["taker"] if sl.get("taker_in") else p["maker"]) + px * part * p["taker"]
         self.trades.append({"symbol": sym, "side": "long" if sl["side"] == 1 else "short", "entry": sl["entry"],
                             "exit": px, "qty": part, "gross": round(gross, 6), "fees": round(fees, 6),
                             "net": round(gross - fees, 6), "why": "Teilverkauf",
@@ -705,7 +803,8 @@ class SpeedTrader:
     def _book(self, sym, sl, px, why, maker) -> None:
         p = self.cur
         gross = sl["side"] * (px - sl["entry"]) * sl["qty"]
-        fees = sl["entry"] * sl["qty"] * p["maker"] + px * sl["qty"] * (p["maker"] if maker else p["taker"])
+        fees = sl["entry"] * sl["qty"] * (p["taker"] if sl.get("taker_in") else p["maker"]) \
+            + px * sl["qty"] * (p["maker"] if maker else p["taker"])
         t = {"symbol": sym, "side": "long" if sl["side"] == 1 else "short", "entry": sl["entry"], "exit": px,
              "qty": sl["qty"], "gross": round(gross, 6), "fees": round(fees, 6), "net": round(gross - fees, 6),
              "why": why, "secs": round(time.time() - sl.get("opened", time.time())), "time": int(time.time() * 1000),
@@ -716,6 +815,27 @@ class SpeedTrader:
         self._event(f"{sym.split(':')[0]} {why}: netto {t['net']:+.4f} USDT")
         sl.clear()
         sl["state"] = "idle"
+
+    def _load_history(self, label: str) -> list[dict]:
+        """Fruehere Abschluesse (gleiche Art, Simulation getrennt vom Konto) - daraus lernt der Autopilot."""
+        path = self.cur.get("log_path")
+        if not path:
+            return []
+        import json
+        from pathlib import Path
+        sim = label == "Simulation"
+        out = []
+        try:
+            for line in Path(path).read_text(encoding="utf-8").splitlines()[-2000:]:
+                try:
+                    t = json.loads(line)
+                except ValueError:
+                    continue
+                if t.get("kind") == self.kind and (t.get("label") == "Simulation") == sim and "net" in t:
+                    out.append(t)
+        except OSError:
+            return []
+        return out
 
     def _save_trade(self, t: dict) -> None:
         """Jeden Abschluss dauerhaft speichern (fuer python run.py handelsbericht)."""
