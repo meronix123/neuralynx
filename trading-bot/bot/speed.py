@@ -403,8 +403,9 @@ class SpeedTrader:
         self.market: dict[str, dict] = {}
 
     # --- Steuerung -------------------------------------------------------
-    def start(self, symbols: list[str], broker, equity: float, label: str, free_fn=None, **opts) -> str:
-        """free_fn(sym) -> True, wenn im Konto in diesem Markt nichts anderes offen ist (sonst wird dort gewartet)."""
+    def start(self, symbols: list[str], broker, equity: float, label: str, free_fn=None, scan_fn=None, **opts) -> str:
+        """free_fn(sym) -> True, wenn im Konto in diesem Markt nichts anderes offen ist (sonst wird dort gewartet).
+        scan_fn() -> aktuelle Markt-Liste des Scanners; die Sitzung tauscht Maerkte dann alle 10 min aus (Rotation)."""
         with self.lock:
             if self.active:
                 raise RuntimeError(f"{self.name} laeuft bereits")
@@ -427,7 +428,7 @@ class SpeedTrader:
                     raise ValueError(f"Einsatz x Hebel muss mind. {p['min_notional']:g} USDT sein (Bitget-Minimum)")
                 if p["margin_usdt"] > free:
                     raise ValueError(f"Einsatz {p['margin_usdt']:g} USDT ist mehr als verfuegbar ({free:.2f})")
-            self.cur, self.broker, self.free_fn = p, broker, free_fn
+            self.cur, self.broker, self.free_fn, self.scan_fn = p, broker, free_fn, scan_fn
             now = time.time()
             self.session = {"symbols": list(symbols), "start": now, "label": label, "stopping": False,
                             "end": now + minutes * 60 if minutes > 0 else float("inf"),
@@ -580,8 +581,9 @@ class SpeedTrader:
                     self._cancel_pending()
                     if not any(v.get("state") == "open" for v in self.slots.values()):
                         break                                   # nichts mehr offen -> Sitzung zu Ende
+                self._rotate()
                 wait = self.cur["loop_s"]
-                for sym in ses["symbols"]:
+                for sym in list(ses["symbols"]):
                     try:
                         self.step(sym)
                     except Exception as e:  # noqa: BLE001 - ein Fehler darf die Sitzung nicht beenden
@@ -591,6 +593,35 @@ class SpeedTrader:
                 time.sleep(wait)
         finally:
             self._wind_down(close=bool(self.session.get("close_now")))
+
+    def _rotate(self) -> None:
+        """Markt-Scanner: alle 10 min neue Maerkte aufnehmen, nicht mehr gelistete ohne Position entfernen.
+        Die fest eingestellten Maerkte bleiben immer."""
+        fn = getattr(self, "scan_fn", None)
+        if not fn or self.session.get("stopping") or time.time() - self.session.get("scan_at", 0) < 600:
+            return
+        self.session["scan_at"] = time.time()
+        try:
+            wanted = list(fn() or [])
+        except Exception as e:  # noqa: BLE001
+            log.debug("Scanner: %s", e)
+            return
+        fixed = self.session.setdefault("fixed", list(self.session["symbols"]))
+        added, dropped = [], []
+        for s in wanted:
+            if s not in self.slots:
+                self.slots[s] = {"state": "idle"}
+                self.session["symbols"].append(s)
+                added.append(s.split("/")[0])
+        for s in list(self.slots):
+            if s not in fixed and s not in wanted and self.slots[s].get("state") == "idle":
+                del self.slots[s]
+                self.session["symbols"].remove(s)
+                dropped.append(s.split("/")[0])
+        if added or dropped:
+            self._event("Scanner: " + (f"neu {', '.join(added)}" if added else "") + (" · " if added and dropped else "")
+                        + (f"raus {', '.join(dropped)}" if dropped else ""))
+            self._persist()
 
     def _backoff(self, e: Exception) -> float:
         """Bitget bremst (Ratenlimit) oder Netz weg -> kurz Pause statt weiter hammern (sonst IP-Sperre)."""

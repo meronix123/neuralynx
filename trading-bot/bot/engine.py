@@ -962,14 +962,19 @@ class Bot:
         return df, book, {"last": last, "bid": bid, "ask": ask, "mark": mark, "ts": tk.get("timestamp")}
 
     def scan_markets(self, n: int = 10, min_volume: float = 20e6, max_spread: float = 0.0005,
-                     min_age_days: float = 3.0) -> dict:
+                     min_age_days: float = 3.0, new_slots: int = 3) -> dict:
         """Markt-Scanner: alle Bitget-USDT-Futures nach 24-h-Umsatz, enge Spreads, mind. 3 Tage alt -> die
         Top-n zusaetzlich zu den eingestellten Maerkten. Frische Listings werden nur angezeigt (keine Historie,
         riesige Spreads) - ab min_age_days nimmt der Scanner sie auf. Hoechstens einmal je Stunde abgefragt."""
         cache = self.__dict__.setdefault("_scan", {"at": 0.0, "out": {"top": [], "new": [], "symbols": []}})
-        if time.time() - cache["at"] < 3600 and cache["out"]["symbols"]:
-            out = cache["out"]
-            return {**out, "symbols": [x["symbol"] for x in out["top"][:n]]}
+
+        def pick(out):
+            # feste Plaetze fuer neue Listings (mind. 1 Tag Daten, sonst kann die KI nichts lernen), Rest nach Umsatz
+            fresh = [x["symbol"] for x in out["new"] if (x.get("age_days") or 0) >= 1.0][:new_slots]
+            top = [x["symbol"] for x in out["top"] if x["symbol"] not in fresh][:max(0, n - len(fresh))]
+            return {**out, "symbols": fresh + top, "fresh_slots": fresh}
+        if time.time() - cache["at"] < 3600 and (cache["out"]["top"] or cache["out"]["new"]):
+            return pick(cache["out"])
         rows, fresh = [], []
         try:
             self.ex.c.load_markets()
@@ -988,16 +993,17 @@ class Bot:
                 age = (now_ms - float(launch)) / 86_400_000 if launch else None
                 row = {"symbol": sym, "volume": round(vol), "spread": round((ask - bid) / last, 5), "age_days": None if age is None else round(age, 1)}
                 if age is not None and age < min_age_days:
-                    fresh.append(row)
+                    if row["spread"] <= 4 * max_spread:            # neue Listings: Spread darf etwas weiter sein
+                        fresh.append(row)
                 elif row["spread"] <= max_spread:
                     rows.append(row)
         except Exception as e:  # noqa: BLE001 - Scanner ist Zusatz
             log.warning("Markt-Scanner: %s", e)
-            return {**cache["out"], "symbols": [x["symbol"] for x in cache["out"]["top"][:n]]}
+            return pick(cache["out"])
         rows.sort(key=lambda r: -r["volume"])
-        fresh.sort(key=lambda r: (r["age_days"] or 0))
+        fresh.sort(key=lambda r: -(r["age_days"] or 0))          # die mit den meisten Daten zuerst
         cache.update(at=time.time(), out={"top": rows[:30], "new": fresh[:10], "symbols": []})
-        return {**cache["out"], "symbols": [x["symbol"] for x in rows[:n]]}
+        return pick(cache["out"])
 
     def market_status(self, sym: str) -> str | None:
         """Status des Marktes laut Bitget ('normal', 'maintain', ...) - alle 10 min neu geladen. Vor und waehrend

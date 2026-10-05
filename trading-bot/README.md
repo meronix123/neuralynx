@@ -262,9 +262,11 @@ Auf dem Bitget-Konto ist der Kosten-Schutz immer an, in der Simulation abschaltb
 Im KI-Autopilot: "+ Top N Maerkte nach Umsatz (Scanner)". Stuendlich werden alle Bitget-USDT-Futures nach
 24-h-Umsatz sortiert; nur enge Spreads (<= 0,05 %), mind. 20 Mio USDT Umsatz und mind. 3 Tage alt. Die Top-N
 kommen zu den eingestellten Maerkten dazu; die KI laedt dort 70 Tage Historie nach und lernt sie wie die
-anderen. Die Live-Sperre sortiert Maerkte ohne Vorteil wieder aus. Frische Listings (unter 3 Tage) werden nur
-angezeigt ("zeigen"), nicht gehandelt: keine Historie, riesige Spreads, oft manipuliert. Nicht alle ~500
-Maerkte: Bitget erlaubt 20 Anfragen/s, und das Lernen muss hinterherkommen - 10-20 zusaetzliche sind realistisch.
+anderen. **3 Plaetze sind fuer neue Listings reserviert** (mind. 1 Tag Daten, sonst kann die KI nichts
+lernen; unter 1 Tag nur Anzeige). **Rotation alle 10 min**: neue Maerkte kommen dazu, nicht mehr gelistete
+ohne offene Position fallen raus, die fest eingestellten bleiben immer. Die Live-Sperre sortiert Maerkte ohne
+Vorteil aus. Nicht alle ~500 Maerkte: Bitget erlaubt 20 Anfragen/s, und das Lernen muss hinterherkommen -
+10-20 zusaetzliche sind realistisch (bei mehr wird die Pruefrunde langsamer).
 
 ## Handelszeiten Gold/Silber
 

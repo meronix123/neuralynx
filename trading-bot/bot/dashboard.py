@@ -103,15 +103,21 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
     other = bot.autopilot if sp is bot.speed else bot.speed
     syms = [s for s in body.get("symbols") or [] if s]
     scan_n = _num(body.get("scan_top"))
+    scan_fn = None
     if scan_n and int(scan_n) > 0 and sp is getattr(bot, "autopilot", None):
-        for s in bot.scan_markets(int(scan_n))["symbols"]:          # Markt-Scanner: Top-Maerkte nach Umsatz dazu
+        scan_fn = (lambda n=int(scan_n): bot.scan_markets(n)["symbols"])
+        opts_scan = int(scan_n)
+        for s in scan_fn():                                          # Markt-Scanner: Top-Maerkte nach Umsatz dazu
             if s not in syms:
                 syms.append(s)
+    else:
+        opts_scan = None
     opts = {k: _num(body.get(k)) for k in ("minutes", "margin_usdt", "leverage", "aggressiveness", "min_conf")}
     opts = {k: (int(v) if k in ("minutes", "leverage", "aggressiveness") else float(v)) for k, v in opts.items() if v}
     if "min_conf" in opts and opts["min_conf"] > 1:
         opts["min_conf"] /= 100                     # 56 -> 0,56
     opts["use_raw"] = bool(body.get("use_raw"))
+    opts["scan_top"] = opts_scan
     opts["fast"] = bool(body.get("fast"))
     opts["turbo"] = bool(body.get("turbo"))
     if body.get("size_mode") in ("auto", "usdt", "pct", "risk"):
@@ -161,7 +167,8 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
         broker = PaperBroker(lambda s: sp.market.get(s) or bot.speed_data(s)[2], sp.p)
         equity = float(bot.cfg.get("paper", {}).get("start_equity", 35))
         label = "Simulation"
-    return sp.start(syms, broker, equity, label, free_fn=free if body.get("target") == "account" else None, **opts)
+    return sp.start(syms, broker, equity, label, free_fn=free if body.get("target") == "account" else None,
+                    scan_fn=scan_fn, **opts)
 
 
 def resume_sessions(bot, account) -> list[str]:
@@ -192,6 +199,8 @@ def resume_sessions(bot, account) -> list[str]:
         try:
             broker = BitgetBroker(account.client, sp.p, bot.cfg.get("margin_mode", "isolated"))
             snap["session"]["resumed"] = True
+            n_scan = (snap.get("cur") or {}).get("scan_top")
+            sp.scan_fn = (lambda n=int(n_scan): bot.scan_markets(n)["symbols"]) if n_scan else None
             out.append(sp.resume(snap, broker, free_fn=free))
         except Exception as e:  # noqa: BLE001
             log.warning("%s: Sitzung nicht fortgesetzt: %s", sp.name, e)
