@@ -162,6 +162,8 @@ class PaperBroker:
 
 class BitgetBroker:
     """Echtes Bitget-Konto (ccxt-Client mit mode_safe). Stop = an die Position gebundener Bitget-Stop."""
+    GRACE_S = 10       # so lange nach dem Absichern gilt eine "fehlende" Position noch nicht als geschlossen
+    MISS_CHECKS = 3    # so oft hintereinander muss die Position fehlen
 
     def __init__(self, client, p: dict, margin_mode: str = "isolated"):
         self.c, self.p, self.mm = client, p, margin_mode
@@ -197,7 +199,7 @@ class BitgetBroker:
         except Exception as e:  # noqa: BLE001 - Ziel nicht setzbar: Stop bleibt, Zeit-Limit schliesst
             log.warning("Speed: Ziel %s nicht gesetzt: %s", sym, e)
             tp_o = {"id": ""}
-        return {"sl": sl, "tp": tp, "sl_id": sl_id, "tp_id": str(tp_o.get("id") or "")}
+        return {"sl": sl, "tp": tp, "sl_id": sl_id, "tp_id": str(tp_o.get("id") or ""), "t": time.time(), "miss": 0}
 
     def _pos_size(self, sym, side):
         want = "long" if side == 1 else "short"
@@ -209,9 +211,16 @@ class BitgetBroker:
             if o.get("status") == "closed":
                 self._cleanup(sym, prot, keep="tp")
                 return "ziel", float(o.get("average") or prot["tp"]), True
-        if self._pos_size(sym, side) < qty * 0.5:          # Stop ausgeloest (Position weg)
+        if self._pos_size(sym, side) < qty * 0.5:          # Stop ausgeloest (Position weg)?
+            # Bitget meldet eine neue Position oft erst nach ein paar Sekunden: erst nach mehreren
+            # Fehlmeldungen hintereinander (und nicht direkt nach dem Kauf) als geschlossen werten,
+            # sonst wuerde die Position vergessen, obwohl sie auf Bitget offen ist.
+            prot["miss"] = prot.get("miss", 0) + 1
+            if prot["miss"] < self.MISS_CHECKS or time.time() - prot.get("t", 0) < self.GRACE_S:
+                return None
             self._cleanup(sym, prot, keep="sl")
             return "stop", prot["sl"] * (1 - side * self.p["slippage"]), False
+        prot["miss"] = 0
         return None
 
     def _cleanup(self, sym, prot, keep=""):

@@ -2109,6 +2109,18 @@ def test_speed_bitget_broker_orders():
     assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) == ("ziel", 60200.0, True)
     assert prot["sl_id"] not in c.plans                               # Stop nach dem Ziel storniert
 
+    # Bitget meldet eine frische Position verspaetet: nicht sofort als "Stop ausgeloest" vergessen
+    prot = b.protect("BTC/USDT:USDT", 1, 0.001, 59900.0, 60200.0)
+    pos, c.pos = c.pos, []
+    for _ in range(5):
+        assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) is None   # direkt nach dem Kauf: abwarten
+    c.pos = pos
+    assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) is None and prot["miss"] == 0
+    c.pos, prot["t"] = [], prot["t"] - 60                             # spaeter wirklich weg
+    assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) is None     # 1. Fehlmeldung reicht nicht
+    assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot) is None
+    assert b.exit_status("BTC/USDT:USDT", 1, 0.001, prot)[0] == "stop"
+
 
 def test_boost_learns_interactions_linear_cannot():
     from bot.forecast import Boost, _logit_fit, _logit_p
