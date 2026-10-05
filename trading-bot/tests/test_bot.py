@@ -2436,7 +2436,7 @@ def _ap(fc, sd=None, cfg=None, last=100.0):
     ap = SpeedTrader(lambda s: (df, book, {"last": last, "bid": last - 0.01, "ask": last + 0.01}),
                      {"loop_s": 0.0, **(cfg or {})}, forecast_fn=lambda s: fc, kind="ki")
     ap.broker = PaperBroker(lambda s: ap.market[s], ap.p)
-    ap.cur = {**ap.p, "margin_usdt": 5, "leverage": 10, **(cfg or {})}
+    ap.cur = {**ap.p, "margin_usdt": 5, "leverage": 10, "chase_avoid_marks": False, **(cfg or {})}
     ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 100.0,
                                    "label": "Simulation", "stopping": False}
     ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}

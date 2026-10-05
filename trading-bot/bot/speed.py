@@ -53,6 +53,7 @@ AUTO_DEFAULTS = {
     "fee_r_x": 4.0,            # Stop mind. 4 x die Kosten eines Trades (Gebuehren + Schlupf) entfernt
     "chase": True,             # Limit nicht ausgefuehrt, Signal steht noch -> zum Marktpreis einsteigen
     "chase_max_r": 0.15,       #   ... wenn der Kurs hoechstens 0,15 R weggelaufen ist
+    "chase_avoid_marks": True, #   ... nicht um :00/:15/:30/:45 und Funding (Spread springt dort)
     "flip_extra": 0.03,        # Ausstieg bei KI-Wende nur mit 3 Punkten mehr Sicherheit als fuer den Einstieg
     "min_hold_frac": 0.5,      #   ... und fruehestens nach der halben Vorhersagezeit
     "learn_n": 12,             # Lernen aus eigenen Trades: ab 12 Abschluessen in einem Markt (letzte 3 Tage) ...
@@ -699,11 +700,15 @@ class SpeedTrader:
         # Ziel-vor-Stop-Modell: Erwartungswert nach Kosten in R muss positiv sein
         tb = fc.get("tb") or {}
         head = tb.get("long" if p_up >= 0.5 else "short")
-        if side != 0 and head and not self.cur.get("use_raw"):
+        guard = self.cur.get("cost_guard", True) or self._real()        # Simulation ohne Kosten-Schutz: alles sehen
+        if side != 0 and head and not self.cur.get("use_raw") and guard:
             p = float(head["p"])
             tp_r = float(tb.get("tp_r") or self.cur["tp_r"])
-            cost_r = (self.cur["maker"] + self.cur["taker"] + self.cur["slippage"]) / max(float(tb.get("r_pct") or 0.3) / 100, 1e-4)
+            r_frac = max(float(tb.get("r_pct") or 0.3) / 100, 1e-4)
+            # Kosten je Trade in R: Einstieg Maker; Ziel = Maker-Limit, Stop = Taker + Schlupf
+            cost_r = (self.cur["maker"] + p * self.cur["maker"] + (1 - p) * (self.cur["taker"] + self.cur["slippage"])) / r_frac
             ev = p * tp_r - (1 - p) - cost_r
+            votes["Kosten"] = f"{cost_r:.2f} R"
             votes["Ziel vor Stop"] = round(p, 3)
             votes["EV"] = round(ev, 2)
             if ev < self.cur.get("ev_min_r", 0.05):
@@ -952,7 +957,8 @@ class SpeedTrader:
         if self.kind != "ki" or not p.get("chase") or side != sl["side"] or self.session.get("stopping"):
             return False
         secs = int(now) % 900
-        if secs < 30 or secs > 870 or (int(now) % 28800) < 120 or (int(now) % 28800) > 28680:
+        if p.get("chase_avoid_marks", True) and (secs < 30 or secs > 870 or (int(now) % 28800) < 120
+                                                 or (int(now) % 28800) > 28680):
             return False                              # um :00/:15/:30/:45 und Funding (00/08/16 UTC) springt der Spread
         r0 = abs(sl["price"] - sl["sl"])
         px_now = tick["ask"] if side == 1 else tick["bid"]
