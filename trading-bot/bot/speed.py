@@ -55,7 +55,7 @@ AUTO_DEFAULTS = {
     "chase_max_r": 0.3,        #   ... wenn der Kurs hoechstens 0,3 R vom Limit weggelaufen ist (Limit liegt 0,15 R tiefer)
     "chase_avoid_marks": True, #   ... nicht um :00/:15/:30/:45 und Funding (Spread springt dort)
     "entry_pullback_r": 0.15,  # Limit 0,15 R unter dem Kurs (Long) / darueber (Short): Einstieg im kleinen Ruecksetzer
-    "flow_confirm": 0.15,      # Einstieg nur, wenn der Taker-Fluss nicht klar dagegen laeuft (unter -0,15 = dagegen)
+    "flow_confirm": 0.30,      # Einstieg nur, wenn der Taker-Fluss nicht KLAR dagegen laeuft (unter -0,30 = dagegen)
     "flip_extra": 0.03,        # Ausstieg bei KI-Wende nur mit 3 Punkten mehr Sicherheit als fuer den Einstieg
     "min_hold_frac": 0.5,      #   ... und fruehestens nach der halben Vorhersagezeit
     "learn_n": 12,             # Lernen aus eigenen Trades: ab 12 Abschluessen in einem Markt (letzte 3 Tage) ...
