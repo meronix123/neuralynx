@@ -705,7 +705,7 @@ class SpeedTrader:
                 votes["wartet"] = ("KI sieht gerade keinen Vorteil gegenueber Zufall"
                                    + (f" (Test: {round(q['hit'] * 100)} % Treffer, Vorsprung z={q['z']:+.1f})" if q else ""))
             else:
-                votes["wartet"] = f"KI nur {round(conf * 100)} % sicher - braucht {round(need * 100)} %"
+                votes["wartet"] = f"KI nur {conf * 100:.1f} % sicher - braucht {need * 100:.0f} %"
         # Orderfluss-Bestaetigung: aggressive Kaeufe/Verkaeufe der letzten Trades duerfen nicht klar dagegen sein
         flow = (fc.get("flow_now") or {}).get("taker")
         thr = self.cur.get("flow_confirm")
