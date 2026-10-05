@@ -162,6 +162,46 @@ kombiniert: OI rauf + Kurs rauf = neue Longs, OI runter + Kurs rauf = Eindeckung
 (aggressive Kaeufe minus Verkaeufe) und **Basis** (Mark- minus Indexpreis). Diese Merkmale greifen,
 sobald etwa 800 Kerzen (knapp 3 Tage) aufgezeichnet sind - der Ordner `data` muss dafuer erhalten bleiben.
 
+## Was die KI gelernt hat - aus der Forschung (Stand Oktober 2026)
+
+Vier Recherchen (Mikrostruktur, Lernmethodik, Indikatoren/Strategien, Nachrichten/Stimmung; ueber 150
+Quellen, bevorzugt begutachtete Studien) wurden ausgewertet. Nur Belegtes ist eingebaut:
+
+- **Viertelstunden-Effekt** (3 Studien, auch ausserhalb der Stichprobe): Bewegung und Volumen konzentrieren
+  sich auf die Minuten :00/:15/:30/:45; der Taker-Fluss direkt nach der Marke sagt die naechsten Stunden
+  voraus. Merkmale: Kerze enthaelt Stunden-/Viertelstunden-Marke, Taker-Fluss nach der Marke (live aufgezeichnet).
+- **Handelsfenster** statt glatter Uhrzeit: US-Eroeffnung 13:30 UTC, US-Schluss, 21-23 UTC (beste BTC-Stunden),
+  02-05 UTC (tot), Wochenende, Funding 00/08/16 UTC; Gold/Silber: COMEX-Eroeffnung/-Schluss, London-Fixing
+  (Londoner Zeit), Ueberlappung London/New York.
+- **Momentum nur bei hohem Volumen/hoher Schwankung, sonst Rueckkehr zum Mittel** - das Kernergebnis der
+  Krypto-Intraday-Forschung: Wechselwirkungen Rendite x Volumen-Z-Wert, Rendite x Volatilitaets-Regime,
+  Varianz-Verhaeltnis, ADX, VWAP-Abstand, Ertrag seit Tagesbeginn/US-Eroeffnung.
+- **Volatilitaet**: Garman-Klass (schlaegt GARCH bei Krypto), Verhaeltnis kurz/lang, Dochtigkeit, Bollinger-Breite.
+- **Basis Letztkurs/Index** (theoretisch verankert, mean-reverting zum Funding) - ueber Bitgets Index-Kerzen fuer
+  die ganzen 70 Tage rueckwirkend geladen; dazu Open Interest und Taker-Fluss (live).
+- **Zielwerte wie die Handelsregel** (Triple-Barrier, in BTC/ETH-Studien nach Kosten besser): ein zweiter
+  Lernkopf je Richtung lernt "Wird das 2-R-Ziel VOR dem 1-R-Stop erreicht (innerhalb 4 x Prognosezeit)?",
+  Platt-kalibriert. Der Autopilot handelt nur bei positivem Erwartungswert nach Kosten und bestimmt die
+  Groesse nach Viertel-Kelly (Deckel: Risiko %). Der KI-Bericht zeigt beides je Markt.
+- **Ehrlichkeit**: Vertrauen in die Richtung erst ab 2 Standardfehlern Vorsprung und nie hoeher als die
+  Trefferquote in den 20 % staerksten Momenten; staerkere Regularisierung zur Auswahl (viele Merkmale,
+  wenig Daten).
+- **Ausstiege** (Studienlage): Einstand erst ab +1,3 R; ATR-Nachzieh-Stop nur im Trend (ADX >= 20) oder bei
+  Erschoepfung; Zeit-Ausstiege wie bisher.
+- **Not-Aus**: stimmt die versprochene Sicherheit ueber 20 Trades nicht mit den Ergebnissen ueberein
+  (Log-Loss-Vergleich), pausiert der Markt 12 h - ohne Neu-Training (Drift-Detektoren als Retrain-Ausloeser
+  sind laut Studien eine Illusion).
+- **Schutz vor Boersen-Anomalien** (dokumentierte Bitget-Vorfaelle: zurueckgerollte Trades, Flash-Wicks,
+  Wartungen): kein Einstieg bei Wartungsstatus, zu weitem Spread, Kurssprung > 4 Sigma in einer Minute (10 min
+  Pause) oder Letztkurs > 0,3 % vom Mark-Preis entfernt; keine Markt-Einstiege um :00/:15/:30/:45 und Funding.
+
+Bewusst NICHT eingebaut (keine oder negative Belege fuer 5-30 min): Fibonacci-Level, harmonische Muster,
+Elliott-Wellen, Wyckoff, Ichimoku, Supertrend, Heikin-Ashi, Stochastik/CCI/Williams, Pivot-Punkte, Liquidity
+Sweeps als Umkehrsignal, Long/Short-Verhaeltnis, Twitter/Reddit-Stimmung, Google Trends, ETF-Fluesse als
+Intraday-Signal, Whale-Alerts, Polymarket/FedWatch (laufen dem Kurs hinterher), Hurst-Regimefilter, LSTM/
+Transformer auf 20k Kerzen. Realistische Erwartung laut ehrlichen Studien: wenige, selektive Trades mit
+kleinem Vorteil - keine hohe Trefferquote.
+
 ## Kosten-Schutz (warum die KI nicht staendig handelt)
 
 Rechnung mit Bitget-Gebuehren (0,02 % Maker, 0,06 % Taker, dazu Schlupf beim Stop): Bei 1-5 min

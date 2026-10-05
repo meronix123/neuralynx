@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .indicators import atr, bollinger, ema, macd_hist, rsi
+from .indicators import adx, atr, bollinger, ema, macd_hist, rsi
 from .orderblocks import detect as ob_detect
 from .patterns import analyze as pattern_analyze
 
@@ -38,7 +38,8 @@ BAND_Z = 1.28                            # 80-%-Band
 BOOST_ROWS = 12_000                      # Baum-Modell lernt aus den neuesten 12.000 Kerzen (Rechenzeit)
 MIN_BOOK_BARS = 800                      # Orderbuch-Druck erst ab ~3 Tagen Aufzeichnung als Merkmal
 BACKFILL_DAYS = 70                       # beim ersten Start so viel Vergangenheit von Bitget laden
-GRID = [(0.5, 1500), (2.0, 1500), (2.0, 6000), (8.0, 6000), (8.0, 20000)]   # (L2, Halbwertszeit in Kerzen)
+# (L2, Halbwertszeit in Kerzen) - mit vielen Merkmalen und wenig Daten darf die Auswahl auch stark buendeln
+GRID = [(0.5, 1500), (2.0, 1500), (2.0, 6000), (8.0, 6000), (8.0, 20000), (32.0, 6000), (32.0, 20000), (128.0, 20000)]
 
 
 def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = None,
@@ -76,6 +77,9 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
     t = pd.to_datetime(df["ts"], unit="ms", utc=True)
     hours = t.dt.hour + t.dt.minute / 60
     f["hour_sin"], f["hour_cos"] = np.sin(2 * np.pi * hours / 24), np.cos(2 * np.pi * hours / 24)
+    for name, val in {**_session_features(df, t, gold, step_min or STEP_MIN),
+                      **_regime_features(df, c, h, lo, o, vol, a, f, step_min or STEP_MIN)}.items():
+        f[name] = val
     leaders = {"btc": leader} if isinstance(leader, pd.DataFrame) else (leader or {})
     for name, ld in leaders.items():
         if ld is None or not len(ld):
@@ -159,7 +163,103 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
         bs = df["basis"].astype(float)
         f["basis"] = bs.ffill().fillna(0.0) / 5                                             # in 5-Bp-Schritten
         f["basis_chg"] = (bs.ffill() - bs.ffill().shift(12)).fillna(0.0) / 5
+    if "index" in df and df["index"].notna().sum() >= 300:                                # rueckwirkend geladen
+        ix = df["index"].astype(float)
+        bp = ((c / ix - 1) * 1e4).where(ix.notna())                                       # Basis Letztkurs/Index
+        per_day = max(1, 1440 // (step_min or STEP_MIN))
+        f["basis_ix"] = (bp / 5).clip(-10, 10)
+        f["basis_ix_z"] = ((bp - bp.rolling(per_day, min_periods=48).mean())
+                           / (bp.rolling(per_day, min_periods=48).std() + 1e-6)).clip(-4, 4)
+        f["basis_ix_chg"] = ((bp - bp.shift(12)) / 5).clip(-10, 10)
+        if "s_to_funding" in f:
+            f["basis_x_fund"] = f["basis_ix_z"] * (1 - f["s_to_funding"])                   # Basis schliesst zum Funding
+    if "q_taker" in df and df["q_taker"].notna().sum() >= 200:
+        q = df["q_taker"].astype(float)
+        f["q_taker"] = q.fillna(0.0) * 3
+        f["q_taker_h"] = q.ffill(limit=11).fillna(0.0) * 3                                  # letzte Marke, bis 1 h
     return f.replace([np.inf, -np.inf], np.nan).clip(-10, 10)
+
+
+def _session_features(df: pd.DataFrame, t: pd.Series, gold: bool, step: int) -> dict:
+    """Handelsfenster statt glatter Uhrzeit (belegt: US-Eroeffnung, 21-23 UTC, tote Asien-Stunden, Wochenende;
+    Viertelstunden-Effekt: Bewegung konzentriert sich auf die Minuten :00/:15/:30/:45; Gold/Silber: COMEX,
+    London-Fixing, Ueberlappung London/New York, Funding-Zeiten 00/08/16 UTC)."""
+    m = (t.dt.hour * 60 + t.dt.minute).to_numpy()
+    wd = t.dt.dayofweek.to_numpy()
+    mins_in_bar = max(step, 1)
+
+    def window(a, b):                       # Kerze beginnt im Fenster [a, b) Minuten des Tages (UTC)
+        return ((m >= a) & (m < b)).astype(float)
+    out = {
+        "s_us_open": window(13 * 60 + 25, 14 * 60 + 30), "s_us_close": window(19 * 60 + 30, 21 * 60 + 5),
+        "s_late_us": window(21 * 60, 24 * 60), "s_asia_dead": window(2 * 60, 5 * 60),
+        "s_london": window(7 * 60, 8 * 60 + 30), "s_weekend": (wd >= 5).astype(float),
+        "s_hour_open": ((m % 60) < mins_in_bar).astype(float),             # Kerze enthaelt die volle Stunde
+        "s_q15": (((m % 15) < mins_in_bar) & ((m % 60) >= mins_in_bar)).astype(float),
+        "s_funding": (((m + 10) % 480) < 20).astype(float),                # +-10 min um 00/08/16 UTC
+        "s_to_funding": (((480 - m % 480) % 480) / 480.0),                 # Anteil bis zum naechsten Funding
+    }
+    if gold:
+        try:
+            lon = t.dt.tz_convert("Europe/London")
+            ml = (lon.dt.hour * 60 + lon.dt.minute).to_numpy()
+        except Exception:  # noqa: BLE001 - ohne Zeitzonen-Daten: UTC-Naeherung (Winterzeit)
+            ml = m
+        out.update({
+            "s_comex_open": window(13 * 60 + 15, 13 * 60 + 45), "s_overlap": window(13 * 60, 17 * 60),
+            "s_comex_close": window(18 * 60 + 25, 18 * 60 + 35),
+            "s_fix_am": ((ml >= 10 * 60 + 25) & (ml < 10 * 60 + 40)).astype(float),
+            "s_fix_pm": ((ml >= 14 * 60 + 55) & (ml < 15 * 60 + 10)).astype(float),
+        })
+    return out
+
+
+def _regime_features(df, c, h, lo, o, vol, a, f, step: int) -> dict:
+    """Regime: Momentum zaehlt nur bei hohem Volumen/hoher Schwankung, sonst Rueckkehr zum Mittel (belegt).
+    Dazu Varianz-Verhaeltnis (Trend/Seitwaerts), ADX, Garman-Klass-Volatilitaet (schlaegt GARCH bei Krypto),
+    Dochtigkeit (Parkinson/Close-Vol), Bollinger-Breite (Verdichtung), VWAP-Abstand (Tag) und der Ertrag
+    der ersten halben Stunde des Tages / der US-Sitzung (Intraday-Momentum)."""
+    per_day = max(1, 1440 // step)
+    out = {}
+    lr1 = np.log(c).diff()
+    vz = ((vol - vol.rolling(60, min_periods=20).mean()) / (vol.rolling(60, min_periods=20).std() + 1e-9)).clip(-3, 3)
+    volr = (a / a.rolling(per_day, min_periods=48).mean()).clip(0, 4)
+    for n in (1, 3, 6):
+        out[f"r{n}_x_volz"] = f[f"r{n}"] * vz
+        out[f"r{n}_x_volr"] = f[f"r{n}"] * volr
+    v1 = lr1.rolling(60, min_periods=30).var()
+    v4 = (np.log(c) - np.log(c).shift(4)).rolling(60, min_periods=30).var()
+    out["var_ratio"] = (v4 / (4 * v1 + 1e-12) - 1).clip(-1, 2)              # < 0 Rueckkehr, > 0 Trend
+    out["adx"] = (adx(df, 14) - 20) / 20
+    gk = 0.5 * np.log(h / lo) ** 2 - (2 * np.log(2) - 1) * np.log(c / o) ** 2
+    gk_s = np.sqrt(gk.clip(lower=0).rolling(12, min_periods=6).mean())
+    out["gk_z"] = ((gk_s - gk_s.rolling(per_day, min_periods=48).mean())
+                   / (gk_s.rolling(per_day, min_periods=48).std() + 1e-9)).clip(-3, 3)
+    rv_s = lr1.rolling(6, min_periods=3).std()
+    out["rv_ratio"] = np.log((rv_s + 1e-9) / (lr1.rolling(per_day, min_periods=48).std() + 1e-9))
+    park = np.sqrt((np.log(h / lo) ** 2).rolling(12, min_periods=6).mean() / (4 * np.log(2)))
+    out["wick_ratio"] = (park / (lr1.rolling(12, min_periods=6).std() + 1e-9)).clip(0, 5) - 1
+    up, dn = bollinger(c, 20, 2.0)
+    bbw = (up - dn) / c
+    out["bbw_pct"] = bbw.rolling(100, min_periods=30).rank(pct=True) - 0.5
+    # Tages-VWAP (ab 00:00 UTC) in ATR-Einheiten
+    day = (df["ts"].astype("int64") // 86_400_000).to_numpy()
+    pv = (c * vol).groupby(day).cumsum()
+    vv = vol.groupby(day).cumsum().replace(0, np.nan)
+    out["vwap_dev"] = ((c - pv / vv) / a).clip(-6, 6)
+    # Ertrag seit Tagesbeginn / seit US-Eroeffnung und die erste halbe Stunde (Intraday-Momentum)
+    t = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    mins = (t.dt.hour * 60 + t.dt.minute).to_numpy()
+    lc = np.log(c.to_numpy())
+    first = pd.Series(lc).groupby(day).transform("first").to_numpy()
+    out["day_ret"] = (lc - first) * 100
+    bars30 = max(1, 30 // step)
+    r30 = pd.Series(lc).groupby(day).transform(lambda x: x.iloc[min(bars30, len(x) - 1)] - x.iloc[0]).to_numpy()
+    out["first30"] = np.where(mins >= 30, r30 * 100, 0.0)
+    us = np.where(mins >= 13 * 60 + 30, mins - (13 * 60 + 30), -1)
+    us_open_lc = pd.Series(np.where(us == 0, lc, np.nan)).groupby(day).transform("first").to_numpy()
+    out["us_ret"] = np.where((us >= 0) & ~np.isnan(us_open_lc), (lc - us_open_lc) * 100, 0.0)
+    return out
 
 
 def _logit_fit(X: np.ndarray, y: np.ndarray, w: np.ndarray, l2: float = L2, iters: int = 25):
@@ -286,6 +386,64 @@ def _sr_pct(feats: pd.DataFrame, col: str) -> float | None:
 def _logloss(p, y):
     p = np.clip(p, 1e-6, 1 - 1e-6)
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def _logit_z(m, X: np.ndarray) -> np.ndarray:
+    p = np.clip(_logit_p(m, X), 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p))
+
+
+def tp_before_sl(df: pd.DataFrame, X_all: np.ndarray, flat_c: np.ndarray, warm: int, n_closed: int, H: int,
+                 sd_h_pct: float, weight: np.ndarray, l2: float, test_share: float = 0.2, tp_r: float = 2.0) -> dict:
+    """Lernen, was der Autopilot wirklich braucht (Triple-Barrier-Methode): Wird das Ziel (tp_r x R) VOR dem
+    Stop (1 R) erreicht - innerhalb von 4 x Vorhersagezeit, so lange haelt der Autopilot hoechstens? R = Schwankung
+    ueber die Vorhersagezeit. Bei Zufall liegt die Basisrate um 20-25 %; Zeitablauf zaehlt konservativ als
+    Verlust (der Autopilot sichert dann meist nur einen kleinen Gewinn oder kommt bei null raus). Je Seite ein Modell;
+    die Sicherheit wird per Platt-Kalibrierung (2 Parameter) am Auswahl-Abschnitt geeicht - bei wenigen Daten
+    besser als feine Stufen. Konservativ: liegen Ziel und Stop in derselben Kerze, zaehlt der Stop."""
+    R = max(sd_h_pct / 100, 1e-4)
+    HB = 4 * H                                           # Haltefrist des Autopiloten (time_stale_x = 4)
+    c, h, lo = (df[k].astype(float).to_numpy() for k in ("close", "high", "low"))
+    idx = np.arange(warm, n_closed - HB)
+    idx = idx[(flat_c[idx + HB + 1] - flat_c[idx]) == 0]
+    out = {"r_pct": round(R * 100, 4), "tp_r": tp_r, "hold_bars": HB}
+    n = len(idx)
+    if n < 600:
+        return out
+    t_end, v_end = int(n * (1 - test_share)), int(n * (1 - test_share - 0.1))
+    tr, va, te = np.arange(v_end - HB), np.arange(v_end, t_end - HB), np.arange(t_end, n)
+    for side, name in ((1, "long"), (-1, "short")):
+        tp, sl = c[idx] * (1 + side * tp_r * R), c[idx] * (1 - side * R)
+        y, done = np.zeros(n), np.zeros(n, bool)
+        for j in range(1, HB + 1):
+            hi_j, lo_j = h[idx + j], lo[idx + j]
+            hit_sl = (lo_j <= sl) if side == 1 else (hi_j >= sl)
+            hit_tp = (hi_j >= tp) if side == 1 else (lo_j <= tp)
+            new_sl = hit_sl & ~done
+            new_tp = hit_tp & ~done & ~new_sl
+            y[new_tp] = 1.0
+            done |= new_sl | new_tp
+        m = _logit_fit(X_all[idx[tr]], y[tr], weight[idx[tr]], l2)
+        cal = None
+        if len(va) >= 300:
+            cal = _logit_fit(_logit_z(m, X_all[idx[va]])[:, None], y[va], np.ones(len(va)), 0.01)
+
+        def prob(model, X, cal=cal):
+            z = _logit_z(model, X)
+            return _logit_p(cal, z[:, None]) if cal is not None else _logit_p(model, X)
+        p_te = prob(m, X_all[idx[te]])
+        final = _logit_fit(X_all[idx], y, weight[idx], l2)
+        p_now = float(prob(final, X_all[n_closed - 1:n_closed])[0])
+        yt = y[te]
+        strong = p_te >= np.quantile(p_te, 0.8)
+        base = float(y[tr].mean())
+        brier, brier0 = float(np.mean((p_te - yt) ** 2)), float(np.mean((base - yt) ** 2))
+        out[name] = {"p": round(p_now, 3), "base": round(base, 3), "n_test": int(len(te)),
+                     "hit_top20": round(float(yt[strong].mean()), 3) if strong.any() else None,
+                     "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0,
+                     "ev_top20_r": round(float(yt[strong].mean()) * tp_r - (1 - float(yt[strong].mean())), 2)
+                     if strong.any() else None}
+    return out
 
 
 def _local_cal(p_te: np.ndarray, yt: np.ndarray, p_now: float, h: int) -> tuple[float, float, int]:
@@ -429,7 +587,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         # Vorsprung gegen den Zufall in Standardfehlern (sich ueberlappende Zeitraeume zaehlen weniger)
         n_eff = max(1.0, len(te_i) / h)
         z = (hit - max(0.5, float(base))) / math.sqrt(0.25 / n_eff)
-        trust = max(0.0, min(1.0, (z - 1.0) / 2.0))
+        trust = max(0.0, min(1.0, (z - 2.0) / 2.0))        # erst ab 2 Standardfehlern Vorsprung ueberhaupt trauen
         # Trefferquote in den 20 % sichersten Momenten (dort steigt der Autopilot ein)
         strong = np.abs(p_te - 0.5) >= np.quantile(np.abs(p_te - 0.5), 0.8)
         hit_top = float(((p_te[strong] >= 0.5) == (yt[strong] == 1)).mean()) if strong.any() else None
@@ -440,12 +598,21 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
                         "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0, "n_test": int(len(te_i)),
                         "trust": round(trust, 2), "z": round(z, 2),
                         "hit_top20": None if hit_top is None else round(hit_top, 3), "z_now": round(z_loc, 2)})
-        # Sicherheit: je Meinungsstaerke gemessen; die globale Messung zaehlt, wenn sie mehr hergibt
+        # Sicherheit: je Meinungsstaerke gemessen; die globale Messung zaehlt, wenn sie mehr hergibt - aber nie
+        # sicherer, als die KI in ihren 20 % staerksten Momenten an ungesehenen Daten wirklich getroffen hat
         p_glob = 0.5 + (p_now - 0.5) * trust
+        if hit_top is not None:
+            cap = max(0.5, min(hit_top, 0.9))
+            p_glob = min(max(p_glob, 1 - cap), cap)
         probs.append(p_loc if abs(p_loc - 0.5) > abs(p_glob - 0.5) else p_glob)
         raw.append(p_now)
         moves.append((float(np.mean(np.abs(ret_alive[-2000:]))), float(np.std(ret_alive[-2000:]))))
     live = live or {}
+    try:
+        tb = tp_before_sl(df, X_all, flat_c, warm, n_closed, H, moves[-1][1], weight, L2_, test_share)
+    except Exception as e:  # noqa: BLE001 - Zusatzkopf darf die Prognose nie verhindern
+        log.debug("Ziel-vor-Stop-Modell: %s", e)
+        tb = {}
     # Entscheidung auf der Vorhersagezeit, auf der die KI gerade nachweislich am staerksten ist
     best = max(range(len(HZ)), key=lambda i: abs(probs[i] - 0.5))
     if abs(probs[best] - 0.5) < 1e-9:
@@ -475,7 +642,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         "quality": quality, "hit_30m": q30["hit"], "base_30m": q30["base"], "useful": bool(useful),
         "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]), "feature_names": names,
         **({"test": test_keep} if keep_test else {}),
-        "move_min": move_min, "labeled": int(len(idx30)), "step_min": STEP, "horizons": HZ,
+        "move_min": move_min, "labeled": int(len(idx30)), "step_min": STEP, "horizons": HZ, "tb": tb,
         "sr_up_pct": _sr_pct(feats, "m5_sr_up"), "sr_dn_pct": _sr_pct(feats, "m5_sr_dn"),
         "model": {"l2": L2_, "half_life_days": round(HL_ * STEP / 1440, 1), "trees": mix,
                   "kind": "linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume"},
@@ -603,7 +770,57 @@ class CandleMemory:
         except OSError as e:
             log.debug("KI-Meta: %s", e)
 
-    LIVE_COLS = ("book_imb", "wall_bid", "wall_ask", "oi", "taker", "basis")   # live je Kerze aufgezeichnet
+    LIVE_COLS = ("book_imb", "wall_bid", "wall_ask", "oi", "taker", "basis", "q_taker")   # live je Kerze aufgezeichnet
+    HIST_COLS = ("index",)                                                       # rueckwirkend ladbar (Index-Kerzen)
+
+    def set_col(self, sym: str, ts: np.ndarray, values: np.ndarray, col: str) -> int:
+        """Werte einer rueckwirkend ladbaren Spalte (z. B. Index-Schlusskurs) an die Kerzen haengen."""
+        base = self.mem.get(sym)
+        if base is None or not len(ts):
+            return 0
+        ser = pd.Series(values, index=ts.astype("int64"))
+        ser = ser[~ser.index.duplicated()]
+        have = base[col].to_numpy() if col in base else np.full(len(base), np.nan)
+        new = ser.reindex(base["ts"].astype("int64").to_numpy()).to_numpy()
+        merged = np.where(np.isnan(new), have, new)
+        changed = int(np.sum(np.isnan(have) & ~np.isnan(new)))
+        base[col] = merged
+        self.mem[sym] = base
+        f = self._file(sym)
+        if changed and f is not None:
+            try:
+                base.to_csv(f, index=False)
+            except OSError as e:
+                log.debug("Kerzen-Gedaechtnis %s: %s", sym, e)
+        return changed
+
+    def backfill_col(self, sym: str, fetch_fn, col: str, days: int, ref_ms: int | None = None) -> int:
+        """Spalte rueckwirkend aus Kerzen einer zweiten Quelle fuellen (Schlusskurs), z. B. Index-Kerzen."""
+        base = self.mem.get(sym)
+        if base is None or not len(base):
+            return 0
+        ref = ref_ms or int(base["ts"].iloc[-1])
+        start = max(int(base["ts"].iloc[0]), ref - days * 86_400_000)
+        if col in base:
+            missing = base.loc[base["ts"] >= start, col].isna()
+            if not missing.any():
+                return 0
+            start = int(base.loc[base["ts"] >= start].loc[missing, "ts"].iloc[0])
+        rows, since = [], start
+        while since <= ref:
+            batch = fetch_fn(sym, self.tf, since, 200)
+            if not batch:
+                since += 200 * self.step * 60_000
+                continue
+            rows += batch
+            nxt = batch[-1][0] + self.step * 60_000
+            if nxt <= since:
+                break
+            since = nxt
+        if not rows:
+            return 0
+        arr = np.array(rows, dtype=float)
+        return self.set_col(sym, arr[:, 0], arr[:, 4], col)
 
     def record(self, sym: str, bar_ts: int, values: dict) -> None:
         """Live-Werte waehrend einer Kerze sammeln (Mittelwert wird beim Kerzenschluss gespeichert):
@@ -630,6 +847,10 @@ class CandleMemory:
             except (OSError, ValueError):
                 old = None
         closed = fresh.iloc[:-1].copy()
+        if old is not None:
+            for col in self.HIST_COLS:                 # rueckwirkend geladene Spalten bleiben erhalten
+                if col in old and col not in closed:
+                    closed[col] = np.nan
         acc = self.book_acc.get(sym, {})
         for col in self.LIVE_COLS:
             closed[col] = [acc[t][col][0] / acc[t][col][1] if t in acc and acc[t].get(col, (0, 0))[1] else np.nan
@@ -704,8 +925,10 @@ class Forecaster:
                  price_fn=None, ohlcv_fn=None, book_fn=None, funding_fn=None, macro_fn=None,
                  leaders: list[str] | None = None, background: bool = True, tf: str = "5m",
                  step_min: int = STEP_MIN, horizons: list[int] | None = None, build_opts: dict | None = None,
-                 backfill_days: int = BACKFILL_DAYS, max_rows: int | None = None, name: str = "ki"):
+                 backfill_days: int = BACKFILL_DAYS, max_rows: int | None = None, name: str = "ki",
+                 index_fn=None, trades_fn=None):
         self.candles_fn, self.price_fn, self.leader = candles_fn, price_fn, leader
+        self.index_fn, self.trades_fn = index_fn, trades_fn           # Index-Kerzen (Basis), rohe Trades (Viertelstunde)
         self.tf, self.step, self.horizons = tf, step_min, horizons or HORIZONS
         self.build_opts, self.backfill_days, self.max_rows = build_opts or {}, backfill_days, max_rows
         self.ohlcv_fn, self.book_fn, self.funding_fn, self.macro_fn = ohlcv_fn, book_fn, funding_fn, macro_fn
@@ -753,6 +976,22 @@ class Forecaster:
             extra = self._cached(f"live|{sym}", 30, lambda: live_fn(sym))
             if extra:
                 vals.update(extra)
+        # Viertelstunden-Effekt (belegt): der Taker-Fluss in der ersten Minute nach :00/:15/:30/:45 sagt die
+        # naechsten Stunden voraus -> genau dann die Trades holen und je Kerze festhalten
+        if self.trades_fn:
+            now = time.time()
+            mark = int(now // 900) * 900
+            done = self.__dict__.setdefault("_qmark", {})
+            if 5 <= now - mark < 75 and done.get(sym) != mark:
+                done[sym] = mark
+                try:
+                    from .flow import taker_flow
+                    trades = [t for t in self.trades_fn(sym) if (t.get("timestamp") or 0) >= mark * 1000]
+                    q = taker_flow(trades) if len(trades) >= 5 else None
+                    if q is not None:
+                        vals["q_taker"] = q
+                except Exception as e:  # noqa: BLE001
+                    log.debug("KI Viertelstunde %s: %s", sym, e)
         if vals:
             self.memory.record(sym, bar_ts, vals)
 
@@ -766,6 +1005,8 @@ class Forecaster:
             self.filled.add(sym)
             self._spawn(self._backfill, sym, int(raw["ts"].iloc[0]))
         df = self.memory.merge(sym, raw)
+        if self.index_fn:
+            self._index_update(sym, int(raw["ts"].iloc[-1]))
         self.fresh[sym] = (time.time(), df)
         return df
 
@@ -774,6 +1015,42 @@ class Forecaster:
             threading.Thread(target=fn, args=args, daemon=True).start()
         else:
             fn(*args)
+
+    def _index_update(self, sym: str, last_ts: int) -> None:
+        """Index-Schlusskurse (Basis = Letztkurs/Index) nachfuehren: einmalig rueckwirkend, dann laufend."""
+        key = f"idx|{sym}"
+        if sym not in self.__dict__.setdefault("_idx_filled", set()):
+            self._idx_filled.add(sym)
+            self._spawn(self._backfill_index, sym, last_ts)
+            return
+        hit = self.cache.get(key)
+        if hit and time.time() - hit[0] < 240:
+            return
+        self.cache[key] = (time.time(), True)
+        try:
+            rows = self.index_fn(sym, self.tf, last_ts - 40 * self.step * 60_000, 40)
+            if rows:
+                arr = np.array(rows, dtype=float)
+                n = self.memory.set_col(sym, arr[:, 0], arr[:, 4], "index")
+                if n:
+                    self.fresh.pop(sym, None)
+        except Exception as e:  # noqa: BLE001
+            log.debug("KI Index %s: %s", sym, e)
+
+    def _backfill_index(self, sym: str, ref_ms: int) -> None:
+        try:
+            for _ in range(60):                       # auf das Kerzen-Backfill warten (laeuft parallel)
+                have = self.memory.mem.get(sym)
+                if have is not None and len(have) and int(have["ts"].iloc[0]) <= ref_ms - (self.backfill_days - 1) * 86_400_000:
+                    break
+                time.sleep(2)
+            n = self.memory.backfill_col(sym, self.index_fn, "index", self.backfill_days, ref_ms)
+            if n:
+                log.info("KI %s: %d Index-Kerzen nachgeladen (Basis)", sym, n)
+                self.fresh.pop(sym, None)
+                self.models.pop(sym, None)
+        except Exception as e:  # noqa: BLE001
+            log.warning("KI %s: Index-Kerzen nicht ladbar (%s)", sym, e)
 
     def _backfill(self, sym: str, ref_ms: int | None = None) -> None:
         try:
@@ -976,6 +1253,16 @@ def report(folder: Path, mode: str, symbols: list[str] | None = None, name: str 
             w(f"   {h * step_min:>2} min: " + " | ".join(
                 f"ab {round(r['min_conf'] * 100)} %: {r['per_day']:.1f}/Tag, richtig {pct(r['hit'])}" for r in sel[1:]))
         _ = best
+        tb = fc.get("tb") or {}
+        if tb.get("long") and tb.get("short"):
+            w(f"Ziel vor Stop (Ziel {tb['tp_r']:g} R, Stop 1 R = {tb['r_pct']:.2f} %, bis {tb['hold_bars'] * step_min} min; "
+              f"Zufall ~{pct(tb['long']['base'])}): in den 20 % besten Momenten")
+            for side in ("long", "short"):
+                h = tb[side]
+                ev = h.get("ev_top20_r")
+                w(f"   {side:<5}: Ziel erreicht {pct(h.get('hit_top20'))} -> Erwartungswert {ev:+.2f} R vor Kosten"
+                  if ev is not None else f"   {side:<5}: zu wenig Daten")
+            w("   (der Autopilot handelt nur, wenn p*Ziel - (1-p)*Stop - Kosten >= +0,05 R; Groesse nach Viertel-Kelly)")
         w(f"Jetzt: {fc['decision']} mit {pct(fc['confidence'])} (auf {fc['decision_min']} min)")
     w("")
     w("Faustregel: Eine Schwelle lohnt sich, wenn 'richtig' dort klar ueber 55 % liegt und genug Trades/Tag kommen.")

@@ -11,6 +11,7 @@
 - Laeuft in der Simulation (echte Kurse, Spielgeld) oder auf dem verbundenen Bitget-Konto.
 """
 import logging
+import math
 import threading
 import time
 
@@ -37,7 +38,7 @@ AUTO_DEFAULTS = {
     "use_raw": False,          # Rohsignal auch ohne nachgewiesene Treffsicherheit (nur Simulation)
     "sl_band": 1.0,            # Stop = 1 x die 80-%-Schwankung der naechsten 30 min
     "tp_r": 2.0,               # Ziel = 2 x Risiko
-    "be_r": 1.0,               # ab +1 R Stop auf Einstand (inkl. Gebuehren) - frueher schneidet Gewinner ab
+    "be_r": 1.3,               # ab +1,3 R Stop auf Einstand (Studien: frueherer Einstand kostet Rendite)
     "partial_r": 1.5,          # ab +1,5 R ...
     "partial_frac": 0.5,       # ... die Haelfte verkaufen
     "trail_r": 1.0,            # danach Stop im Abstand 1 R hinter dem besten Kurs nachziehen
@@ -65,6 +66,17 @@ AUTO_DEFAULTS = {
     "time_stale_x": 4.0,       # nach 4 x Vorhersagezeit: Position ohne klaren Gewinn schliessen
     "max_open_risk_pct": 3.0,  # alle offenen Positionen zusammen hoechstens 3 % des Kontos am Stop (gleiche Wette!)
     "unprotected_s": 60,       # Stop laesst sich so lange nicht setzen -> Position zur Sicherheit schliessen
+    # Erwartungswert und Groesse (Ziel-vor-Stop-Modell der KI, Platt-kalibriert)
+    "ev_min_r": 0.05,          # Trade nur, wenn p*Ziel - (1-p)*Stop - Kosten >= 0,05 R
+    "kelly_frac": 0.25,        # Viertel-Kelly auf die kalibrierte Wahrscheinlichkeit (Rest: risk_pct als Deckel)
+    "trail_adx": 20,           # ATR-Nachzieh-Stop nur im Trend (ADX ab 20) - im Seitwaertsmarkt kostet er Rendite
+    # Schutz vor Boersen-Anomalien (Bitget-Vorfaelle: Flash-Wicks, zurueckgerollte Trades, Wartung)
+    "spread_max": {"BTC": 0.0003, "ETH": 0.0003, "SOL": 0.0006, "XRP": 0.0006, "XAU": 0.0005, "XAG": 0.001},
+    "move_sigma_x": 4.0,       # 1-Minuten-Bewegung ueber 4 x ihrer Schwankung -> 10 min keine neuen Einstiege
+    "calm_s": 600,
+    "mark_div_max": 0.003,     # Letztkurs weicht > 0,3 % vom Mark-Preis ab -> Anomalie, kein Einstieg
+    "ki_err_n": 20,            # Not-Aus: ueber 20 Trades liegt der echte Fehler der KI-Sicherheit ...
+    "ki_err_x": 0.15,          # ... um 0,15 (Log-Loss) ueber dem erwarteten -> Markt 12 h pausieren
 }
 # Rechnung (Simulation mit Bitget-Gebuehren 0,02 % Maker / 0,06 % Taker + Schlupf): ins Plus kommt die KI nur,
 # wenn sie bei 20-30 min Vorhersage mind. ~57 % trifft, bei 10-15 min mind. ~60 %; bei 1-5 min frisst der
@@ -118,7 +130,7 @@ def exit_view(df1m: pd.DataFrame, side: int) -> dict:
     RSI (ueberkauft/-verkauft), EMA 9/21 (Trendwende) und Umkehrkerzen gegen die Position."""
     from .indicators import rsi
     from .patterns import candles
-    out = {"atr": None, "rsi": None, "ema_against": False, "reversal": "", "tired": False}
+    out = {"atr": None, "rsi": None, "ema_against": False, "reversal": "", "tired": False, "adx": None}
     try:
         d = df1m.reset_index(drop=True)
         idx = pd.to_datetime(d["ts"], unit="ms", utc=True)
@@ -132,6 +144,9 @@ def exit_view(df1m: pd.DataFrame, side: int) -> dict:
         r = float(rsi(c, 14).iloc[-1])
         out["rsi"] = round(r, 1) if r == r else None
         out["ema_against"] = bool(side * (ema(c, 9).iloc[-1] - ema(c, 21).iloc[-1]) < 0)
+        from .indicators import adx as _adx
+        av = float(_adx(m5.reset_index(drop=True), 14).iloc[-1])
+        out["adx"] = round(av, 1) if av == av else None
         cs = candles(*(m5[k].astype(float).to_numpy() for k in ("open", "high", "low", "close")))
         against = ("shooting", "engulf_dn", "evening", "crows") if side == 1 else ("hammer", "engulf_up", "morning", "soldiers")
         names = {"shooting": "Shooting Star", "engulf_dn": "Bearish Engulfing", "evening": "Evening Star",
@@ -680,6 +695,19 @@ class SpeedTrader:
         side = (1 if p_up >= 0.5 else -1) if conf >= need else 0
         if side == 0 and conf >= self.cur["min_conf"]:
             votes["wartet"] = f"Kosten-Schutz: braucht {round(need * 100)} % Sicherheit"
+        # Ziel-vor-Stop-Modell: Erwartungswert nach Kosten in R muss positiv sein
+        tb = fc.get("tb") or {}
+        head = tb.get("long" if p_up >= 0.5 else "short")
+        if side != 0 and head and not self.cur.get("use_raw"):
+            p = float(head["p"])
+            tp_r = float(tb.get("tp_r") or self.cur["tp_r"])
+            cost_r = (self.cur["maker"] + self.cur["taker"] + self.cur["slippage"]) / max(float(tb.get("r_pct") or 0.3) / 100, 1e-4)
+            ev = p * tp_r - (1 - p) - cost_r
+            votes["Ziel vor Stop"] = round(p, 3)
+            votes["EV"] = round(ev, 2)
+            if ev < self.cur.get("ev_min_r", 0.05):
+                side = 0
+                votes["wartet"] = f"Erwartungswert nach Kosten {ev:+.2f} R (Ziel vor Stop {round(p * 100)} %)"
         return side, votes, fc
 
     def _real(self) -> bool:
@@ -711,6 +739,18 @@ class SpeedTrader:
         since = (time.time() - 3 * 86400) * 1000
         rows = [t for t in list(getattr(self, "history", [])) + self.trades
                 if t.get("symbol") == sym and (t.get("time") or 0) >= since and t.get("why") != "Teilverkauf"]
+        # Not-Aus: stimmt die KI-Sicherheit hier noch? Echter Log-Loss der Trades gegen den erwarteten
+        # (bei richtig kalibrierter Sicherheit sind beide gleich); deutlich schlechter -> 12 h Pause
+        n_err = p.get("ki_err_n", 20)
+        recent = [t for t in rows if (t.get("why_in") or {}).get("Sicherheit")][-n_err:]
+        if len(recent) >= n_err:
+            exc = 0.0
+            for t in recent:
+                q = min(0.99, max(0.01, float(t["why_in"]["Sicherheit"])))
+                hit = t["net"] > 0
+                exc += (-math.log(q if hit else 1 - q)) - (-(q * math.log(q) + (1 - q) * math.log(1 - q)))
+            if exc / len(recent) > p.get("ki_err_x", 0.15) and (recent[-1].get("time") or 0) >= (time.time() - 12 * 3600) * 1000:
+                return f"gelernt: KI-Sicherheit stimmt hier nicht mehr (Fehler +{exc / len(recent):.2f}) - 12 h Pause"
         if len(rows) < p["learn_n"]:
             return ""
         win = sum(t["net"] for t in rows if t["net"] > 0)
@@ -768,6 +808,10 @@ class SpeedTrader:
             if not ok or recently_flat(df):
                 sl["signal"]["votes"] = {**votes, "wartet": why or "Markt steht still (geschlossen?)"}
                 return
+            blocked = self._anomaly(sym, sl, df, tick, now)
+            if blocked:
+                sl["signal"]["votes"] = {**votes, "wartet": blocked}
+                return
             price = tick["bid"] if side == 1 else tick["ask"]
             stop, target = self._levels(df, price, side, fc)
             if stop is None:
@@ -775,7 +819,7 @@ class SpeedTrader:
                 return
             lev = p["leverage"]
             if p.get("size_mode") == "auto":
-                qty, lev = self._auto_size(sym, price, stop, votes.get("Sicherheit") or 0.55)
+                qty, lev = self._auto_size(sym, price, stop, votes.get("Sicherheit") or 0.55, votes.get("Ziel vor Stop"))
                 if qty > 0:
                     real = self.broker.set_leverage(sym, lev)
                     if real and real != lev:
@@ -857,6 +901,46 @@ class SpeedTrader:
             elif self.kind == "ki":
                 self._manage(sym, sl, tick, side, votes, df)
 
+    def _anomaly(self, sym, sl, df, tick, now) -> str:
+        """Schutz vor Boersen-Anomalien (belegte Bitget-Vorfaelle): Wartung, zu weiter Spread, Kurs-Sprung in
+        einer Minute, Letztkurs weit weg vom Mark-Preis. Dann kein neuer Einstieg."""
+        p = self.cur
+        status_fn = getattr(self, "status_fn", None)
+        if status_fn:
+            try:
+                st = status_fn(sym)
+            except Exception:  # noqa: BLE001
+                st = None
+            if st and st != "normal":
+                return f"Markt bei Bitget nicht normal ({st}) - Wartung?"
+        if now < sl.get("calm_until", 0):
+            return "nach Kurssprung noch keine neuen Einstiege"
+        bid, ask, last = tick.get("bid"), tick.get("ask"), tick.get("last")
+        if bid and ask and last:
+            spread = (ask - bid) / last
+            base = sym.split("/")[0]
+            cap = (p.get("spread_max") or {}).get(base, 0.001)
+            hist = sl.setdefault("spreads", [])
+            hist.append(spread)
+            del hist[:-120]
+            limit = max(cap, 2.5 * sorted(hist)[len(hist) // 2]) if len(hist) >= 20 else cap
+            if spread > limit:
+                return f"Spread zu weit ({spread * 100:.3f} %)"
+            mark = tick.get("mark")
+            if mark and abs(last - mark) / mark > p.get("mark_div_max", 0.003):
+                return f"Letztkurs {abs(last - mark) / mark * 100:.2f} % vom Mark-Preis entfernt - Anomalie"
+        try:
+            c = df["close"].astype(float).to_numpy()
+            if len(c) > 30:
+                r = np.diff(np.log(c[-61:]))
+                sd = float(np.std(r[:-1])) or 1e-9
+                if abs(r[-1]) > p.get("move_sigma_x", 4.0) * sd and abs(r[-1]) > 0.002:
+                    sl["calm_until"] = now + p.get("calm_s", 600)
+                    return f"Kurssprung {r[-1] * 100:+.2f} % in einer Minute - {p.get('calm_s', 600) // 60} min Pause"
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
     def _chase(self, sym, sl, side, tick, now) -> bool:
         """Limit-Einstieg nicht ausgefuehrt, KI aber weiter dafuer und Kurs kaum weggelaufen -> zum Marktpreis
         einsteigen. Sonst fuellen sich Limit-Orders fast nur, wenn der Kurs GEGEN die Richtung laeuft, und die
@@ -864,6 +948,9 @@ class SpeedTrader:
         p = self.cur
         if self.kind != "ki" or not p.get("chase") or side != sl["side"] or self.session.get("stopping"):
             return False
+        secs = int(now) % 900
+        if secs < 30 or secs > 870 or (int(now) % 28800) < 120 or (int(now) % 28800) > 28680:
+            return False                              # um :00/:15/:30/:45 und Funding (00/08/16 UTC) springt der Spread
         r0 = abs(sl["price"] - sl["sl"])
         px_now = tick["ask"] if side == 1 else tick["bid"]
         if r0 <= 0 or side * (px_now - sl["price"]) > p.get("chase_max_r", 0.15) * r0:
@@ -965,7 +1052,8 @@ class SpeedTrader:
             keep = max(keep, 0.7)
         if peak >= 1.0:
             cands.append(sl["entry"] + d * keep * peak * r0)
-            if ev.get("atr"):
+            trending = (ev.get("adx") or 0) >= p.get("trail_adx", 20)
+            if ev.get("atr") and (trending or tired or sl.get("partial_done")):
                 tight = tired or sl.get("partial_done")
                 k = p.get("atr_k_tight", 1.2) if tight else p.get("atr_k", 2.5)
                 dist = max(k * ev["atr"], (0.5 if tight else 0.8) * r0)   # nie enger als 0,5 / 0,8 R
@@ -1021,7 +1109,7 @@ class SpeedTrader:
                    for v in self.slots.values() if v.get("state") in ("open", "pending"))
         return total, total - used
 
-    def _auto_size(self, sym, price, stop, conf) -> tuple[float, int]:
+    def _auto_size(self, sym, price, stop, conf, p_tp=None) -> tuple[float, int]:
         """KI entscheidet Groesse und Hebel: Risiko = risk_pct % vom Konto am Stop, je nach Sicherheit
         halb bis voll; Hebel nur so hoch wie noetig, hoechstens `leverage`, und die Liquidation liegt
         mindestens doppelt so weit weg wie der Stop."""
@@ -1032,6 +1120,11 @@ class SpeedTrader:
             return 0.0, p["leverage"]
         factor = max(0.5, min(1.0, 0.5 + (float(conf) - 0.55) / 0.14))     # 55 % -> halb, ab ~62 % -> voll
         risk = total * p["risk_pct"] / 100 * factor
+        if p_tp is not None:                                                # Viertel-Kelly, risk_pct als Deckel
+            kelly = max(0.0, float(p_tp) - (1 - float(p_tp)) / float(p["tp_r"])) * p.get("kelly_frac", 0.25)
+            risk = min(risk, total * kelly)
+            if risk <= 0:
+                return 0.0, p["leverage"]
         notional = risk / stop_pct
         lev_safe = max(1, int(1 / (2 * stop_pct + 0.005)))                # Liquidation >= 2x so weit wie der Stop
         cap = max(1, min(int(p["leverage"]), lev_safe))

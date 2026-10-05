@@ -80,6 +80,7 @@ class Bot:
                                                        "log_path": str(ROOT / "data" / f"sitzungen_{cfg['mode']}.jsonl")},
                                      forecast_fn=self.forecast, kind="ki")
         self.autopilot.turbo_fn = self.forecast_turbo
+        self.autopilot.status_fn = self.market_status
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
         self.views: dict = {}
@@ -935,11 +936,27 @@ class Bot:
         bid, ask = float(book["bids"][0][0]), float(book["asks"][0][0])
         tk = self.ex.c.fetch_ticker(sym)
         last = float(tk.get("last") or (bid + ask) / 2)
+        info = tk.get("info") or {}
+        mark = float(info.get("markPrice") or 0) or None
         df = hit[1].copy()
         df.loc[df.index[-1], ["close"]] = last                  # offene Kerze mit dem aktuellen Kurs
         df.loc[df.index[-1], "high"] = max(float(df["high"].iloc[-1]), last)
         df.loc[df.index[-1], "low"] = min(float(df["low"].iloc[-1]), last)
-        return df, book, {"last": last, "bid": bid, "ask": ask}
+        return df, book, {"last": last, "bid": bid, "ask": ask, "mark": mark, "ts": tk.get("timestamp")}
+
+    def market_status(self, sym: str) -> str | None:
+        """Status des Marktes laut Bitget ('normal', 'maintain', ...) - alle 10 min neu geladen. Vor und waehrend
+        einer Wartung handelt der Autopilot dort nicht (Stops koennen dann nicht ausgeloest werden)."""
+        cache = self.__dict__.setdefault("_mstat", [0.0])
+        if time.time() - cache[0] > 600:
+            cache[0] = time.time()
+            try:
+                self.ex.c.load_markets(True)
+            except Exception as e:  # noqa: BLE001 - alter Stand bleibt
+                log.debug("Markt-Status: %s", e)
+        m = (getattr(self.ex.c, "markets", None) or {}).get(sym) or {}
+        st = (m.get("info") or {}).get("symbolStatus")
+        return str(st) if st else None
 
     def forecast_turbo(self, sym: str) -> dict:
         """Hebel-Speed-KI: eigenes 1-Minuten-Modell (1, 2, 3, 5 min voraus), nur fuer sehr schnelles Handeln."""
@@ -953,7 +970,8 @@ class Bot:
                 self._candles, ROOT / "data", self.cfg["mode"], base.leader, base.price_fn,
                 ohlcv_fn=base.ohlcv_fn, book_fn=base.book_fn, funding_fn=base.funding_fn, macro_fn=base.macro_fn,
                 leaders=base.leaders, tf="1m", step_min=1, horizons=[1, 2, 3, 5],
-                build_opts={"boost": False, "move_min": 0.05}, backfill_days=10, max_rows=12_000, name="ki1m")
+                build_opts={"boost": False, "move_min": 0.05}, backfill_days=10, max_rows=12_000, name="ki1m",
+                index_fn=base.index_fn, trades_fn=base.trades_fn)
             self._turbo.live_fn = getattr(self, "_live_fn", None)
         with self.__dict__.setdefault("_turbo_lock", __import__("threading").Lock()):
             fc = self._turbo.get(sym)
@@ -1005,7 +1023,9 @@ class Bot:
                 ohlcv_fn=lambda s, tf, since, limit: self.ex.c.fetch_ohlcv(s, tf, since=since, limit=limit),
                 book_fn=lambda s: self.ex.c.fetch_order_book(s, 100),
                 funding_fn=lambda s: fetch_funding_history(self.ex.c, s, 75),
-                macro_fn=macro, leaders=[x for x in (leader, eth) if x])
+                macro_fn=macro, leaders=[x for x in (leader, eth) if x],
+                index_fn=lambda s, tf, since, limit: self.ex.c.fetch_index_ohlcv(s, tf, since=since, limit=limit),
+                trades_fn=lambda s: self.ex.c.fetch_trades(s, limit=200))
             self._forecaster.live_fn = live
         from .forecast import ki_active
         with self.__dict__.setdefault("_fc_lock", __import__("threading").Lock()):

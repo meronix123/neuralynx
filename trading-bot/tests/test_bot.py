@@ -2894,3 +2894,78 @@ def test_ki_records_and_learns_live_values(tmp_path):
         assert col in f.columns, col
     assert f["basis"].iloc[-1] == pytest.approx(0.5) and abs(f["oi_chg"].dropna()).max() < 1
     assert "oi_chg" not in make_features(df).columns                     # ohne Aufzeichnung keine Spalten
+
+
+def test_ki_session_regime_features_and_target_before_stop_head():
+    from bot.forecast import build, make_features
+
+    df = _fc_frame(1500, 0.3, 4)
+    f = make_features(df, gold=True)
+    for col in ("s_us_open", "s_late_us", "s_weekend", "s_hour_open", "s_q15", "s_funding", "s_to_funding", "s_comex_open",
+                "s_fix_pm", "r3_x_volz", "var_ratio", "adx", "gk_z", "rv_ratio", "wick_ratio", "bbw_pct", "vwap_dev", "day_ret"):
+        assert col in f.columns and f[col].notna().sum() > 100, col
+    assert "s_comex_open" not in make_features(df, gold=False).columns
+    assert f["s_q15"].mean() == pytest.approx(0.25, abs=0.05) and f["s_hour_open"].mean() == pytest.approx(1 / 12, abs=0.03)
+    fc = build(_fc_frame(6000, 0.3, 2))
+    tb = fc["tb"]
+    assert tb["hold_bars"] == 24 and 0 < tb["r_pct"] < 5 and set(tb) >= {"long", "short"}
+    for side in ("long", "short"):
+        assert 0 <= tb[side]["p"] <= 1 and 0 < tb[side]["base"] < 0.6 and tb[side]["n_test"] > 300
+
+
+def test_autopilot_ev_gate_kelly_and_kill_switch():
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30,
+          "tb": {"r_pct": 0.5, "tp_r": 2.0, "long": {"p": 0.30}, "short": {"p": 0.20}}}
+    ap = _ap(fc, cfg={"size_mode": "auto", "risk_pct": 1.0})
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "idle" and "Erwartungswert" in s["signal"]["votes"]["wartet"]   # 0,3*2 - 0,7 - Kosten < 0
+    fc["tb"]["long"]["p"] = 0.45                                                        # EV = 0,9 - 0,55 - 0,2 = +0,15
+    ap = _ap(fc, cfg={"size_mode": "auto", "risk_pct": 5.0, "leverage": 20, "max_margin_pct": 100, "max_open_risk_pct": 10})
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "pending" and s["signal"]["votes"]["EV"] > 0
+    risk = s["qty"] * (s["price"] - s["sl"])
+    kelly = (0.45 - 0.55 / 2.0) * 0.25                                                  # Viertel-Kelly = 4,4 %
+    assert risk == pytest.approx(100.0 * kelly, rel=0.1)                                # unter dem 5-%-Deckel
+    # Not-Aus: KI-Sicherheit stimmt nicht mehr (20 Trades mit 60 % Sicherheit, fast alle verloren)
+    now = int(time.time() * 1000)
+    ap2 = _ap(fc)
+    ap2.history = [{"symbol": "BTC/USDT:USDT", "net": (0.2 if i % 10 == 0 else -0.1), "time": now - i * 60000,
+                    "why": "stop", "why_in": {"Sicherheit": 0.6}} for i in range(20)]
+    ap2.cur["learn_n"] = 99                                                             # PF-Regel aus, nur Not-Aus
+    ap2.step("BTC/USDT:USDT")
+    assert "KI-Sicherheit stimmt hier nicht mehr" in ap2.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    ap2.history = [dict(t, net=0.2) for t in ap2.history]                               # trifft wie versprochen
+    ap2.step("BTC/USDT:USDT")
+    assert ap2.slots["BTC/USDT:USDT"]["state"] == "pending"
+
+
+def test_autopilot_anomaly_guards():
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    # Wartung laut Bitget
+    ap = _ap(fc)
+    ap.status_fn = lambda s: "maintain"
+    ap.step("BTC/USDT:USDT")
+    assert "Wartung" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    # Spread zu weit
+    ap = _ap(fc)
+    ap.data_fn = lambda s: (_speed_df(120, 0.0), {}, {"last": 100.0, "bid": 99.9, "ask": 100.1})
+    ap.step("BTC/USDT:USDT")
+    assert "Spread" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    # Letztkurs weit vom Mark-Preis
+    ap = _ap(fc)
+    ap.data_fn = lambda s: (_speed_df(120, 0.0), {}, {"last": 100.0, "bid": 99.99, "ask": 100.01, "mark": 100.5})
+    ap.step("BTC/USDT:USDT")
+    assert "Mark-Preis" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    # Kurssprung in einer Minute -> Pause
+    df = _speed_df(120, 0.0)
+    df.loc[df.index[-1], "close"] = float(df["close"].iloc[-2]) * 1.01
+    ap = _ap(fc, sd=df, last=float(df["close"].iloc[-1]))
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert "Kurssprung" in s["signal"]["votes"]["wartet"] and s["calm_until"] > time.time()
+    # normal -> Einstieg
+    ap = _ap(fc)
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "pending"
