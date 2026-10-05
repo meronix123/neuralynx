@@ -102,6 +102,11 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
     sp = sp or bot.speed
     other = bot.autopilot if sp is bot.speed else bot.speed
     syms = [s for s in body.get("symbols") or [] if s]
+    scan_n = _num(body.get("scan_top"))
+    if scan_n and int(scan_n) > 0 and sp is getattr(bot, "autopilot", None):
+        for s in bot.scan_markets(int(scan_n))["symbols"]:          # Markt-Scanner: Top-Maerkte nach Umsatz dazu
+            if s not in syms:
+                syms.append(s)
     opts = {k: _num(body.get(k)) for k in ("minutes", "margin_usdt", "leverage", "aggressiveness", "min_conf")}
     opts = {k: (int(v) if k in ("minutes", "leverage", "aggressiveness") else float(v)) for k, v in opts.items() if v}
     if "min_conf" in opts and opts["min_conf"] > 1:
@@ -197,6 +202,11 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     """Alle Knoepfe der Oberflaeche. Rueckgabe: Meldung fuer den Nutzer (Fehler -> Exception)."""
     if path == "/api/bot/reset_peak":
         return bot.reset_peak()
+    if path == "/api/bot/scan":
+        r = bot.scan_markets(int(_num(body.get("n")) or 10))
+        top = ", ".join(f"{x['symbol'].split('/')[0]} ({x['volume'] / 1e6:.0f} Mio)" for x in r["top"][:int(_num(body.get("n")) or 10)])
+        new = ", ".join(f"{x['symbol'].split('/')[0]} ({x['age_days']} T)" for x in r["new"]) or "keine"
+        return f"Scanner: {top or 'keine passenden Maerkte'} | frische Listings (nur Anzeige): {new}"
     if path == "/api/bot/pause":
         if body.get("on"):
             stop_file.write_text("Pause ueber die Oberflaeche\n", encoding="utf-8")

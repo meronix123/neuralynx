@@ -961,6 +961,44 @@ class Bot:
         df.loc[df.index[-1], "low"] = min(float(df["low"].iloc[-1]), last)
         return df, book, {"last": last, "bid": bid, "ask": ask, "mark": mark, "ts": tk.get("timestamp")}
 
+    def scan_markets(self, n: int = 10, min_volume: float = 20e6, max_spread: float = 0.0005,
+                     min_age_days: float = 3.0) -> dict:
+        """Markt-Scanner: alle Bitget-USDT-Futures nach 24-h-Umsatz, enge Spreads, mind. 3 Tage alt -> die
+        Top-n zusaetzlich zu den eingestellten Maerkten. Frische Listings werden nur angezeigt (keine Historie,
+        riesige Spreads) - ab min_age_days nimmt der Scanner sie auf. Hoechstens einmal je Stunde abgefragt."""
+        cache = self.__dict__.setdefault("_scan", {"at": 0.0, "out": {"top": [], "new": [], "symbols": []}})
+        if time.time() - cache["at"] < 3600 and cache["out"]["symbols"]:
+            out = cache["out"]
+            return {**out, "symbols": [x["symbol"] for x in out["top"][:n]]}
+        rows, fresh = [], []
+        try:
+            self.ex.c.load_markets()
+            tickers = self.ex.c.fetch_tickers(params={"type": "swap"})
+            now_ms = time.time() * 1000
+            for sym, tk in tickers.items():
+                m = (self.ex.c.markets or {}).get(sym) or {}
+                if not (m.get("swap") and m.get("quote") == "USDT" and m.get("settle") == "USDT") or sym in self.ex.symbols:
+                    continue
+                bid, ask = float(tk.get("bid") or 0), float(tk.get("ask") or 0)
+                last = float(tk.get("last") or 0)
+                vol = float(tk.get("quoteVolume") or 0)
+                if not (bid and ask and last) or vol < min_volume:
+                    continue
+                launch = (m.get("info") or {}).get("launchTime") or (m.get("info") or {}).get("listTime")
+                age = (now_ms - float(launch)) / 86_400_000 if launch else None
+                row = {"symbol": sym, "volume": round(vol), "spread": round((ask - bid) / last, 5), "age_days": None if age is None else round(age, 1)}
+                if age is not None and age < min_age_days:
+                    fresh.append(row)
+                elif row["spread"] <= max_spread:
+                    rows.append(row)
+        except Exception as e:  # noqa: BLE001 - Scanner ist Zusatz
+            log.warning("Markt-Scanner: %s", e)
+            return {**cache["out"], "symbols": [x["symbol"] for x in cache["out"]["top"][:n]]}
+        rows.sort(key=lambda r: -r["volume"])
+        fresh.sort(key=lambda r: (r["age_days"] or 0))
+        cache.update(at=time.time(), out={"top": rows[:30], "new": fresh[:10], "symbols": []})
+        return {**cache["out"], "symbols": [x["symbol"] for x in rows[:n]]}
+
     def market_status(self, sym: str) -> str | None:
         """Status des Marktes laut Bitget ('normal', 'maintain', ...) - alle 10 min neu geladen. Vor und waehrend
         einer Wartung handelt der Autopilot dort nicht (Stops koennen dann nicht ausgeloest werden)."""

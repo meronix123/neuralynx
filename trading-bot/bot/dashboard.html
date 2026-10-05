@@ -356,6 +356,7 @@
       <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, sichert Gewinne (nie mehr als die Haelfte zurueckgeben, ATR-Stop, RSI/Umkehrkerzen), verkauft einen Teil bei +1,5 R, steigt aus wenn die KI klar dreht oder die Prognosezeit vorbei ist</small></div>
       <div class="speedform">
         <span id="ap-syms"></span>
+        <label title="Stuendlich alle Bitget-USDT-Futures nach 24-h-Umsatz sortieren (enge Spreads, mind. 3 Tage alt) und die Top-N zusaetzlich handeln. Die Live-Sperre sortiert Maerkte ohne Vorteil aus."><input type="checkbox" id="ap-scan" autocomplete="off"> + Top <input id="ap-scan-n" value="10" style="width:36px" autocomplete="off"> Maerkte nach Umsatz (Scanner) <button class="btn sm" onclick="act('/api/bot/scan', {n: val('ap-scan-n')})">zeigen</button></label>
         <label>Groesse <select id="ap-size" autocomplete="off" onchange="apSizeUnit()">
           <option value="auto" selected>KI entscheidet (Risiko/Hebel)</option><option value="risk">Risiko % je Trade</option>
           <option value="pct">% vom Konto</option><option value="usdt">fester Einsatz</option></select>
@@ -1483,6 +1484,7 @@ async function sessionStart(k) {
     const v = val("ap-sizeval").replace(",", ".");
     if (body.size_mode === "usdt") body.margin_usdt = v; else if (body.size_mode === "pct") body.size_pct = v; else body.risk_pct = v;
     body.scale_in = document.getElementById("ap-scale").checked;
+    if (document.getElementById("ap-scan").checked) body.scan_top = val("ap-scan-n");
     body.partial_frac = val("ap-part");
   }
   if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.turbo = val("ap-fast") === "2"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; body.cost_guard = document.getElementById("ap-cost").checked; }

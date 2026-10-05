@@ -257,6 +257,15 @@ Sicherheit und Dauerbetrieb:
 
 Auf dem Bitget-Konto ist der Kosten-Schutz immer an, in der Simulation abschaltbar (zum Vergleichen).
 
+## Markt-Scanner
+
+Im KI-Autopilot: "+ Top N Maerkte nach Umsatz (Scanner)". Stuendlich werden alle Bitget-USDT-Futures nach
+24-h-Umsatz sortiert; nur enge Spreads (<= 0,05 %), mind. 20 Mio USDT Umsatz und mind. 3 Tage alt. Die Top-N
+kommen zu den eingestellten Maerkten dazu; die KI laedt dort 70 Tage Historie nach und lernt sie wie die
+anderen. Die Live-Sperre sortiert Maerkte ohne Vorteil wieder aus. Frische Listings (unter 3 Tage) werden nur
+angezeigt ("zeigen"), nicht gehandelt: keine Historie, riesige Spreads, oft manipuliert. Nicht alle ~500
+Maerkte: Bitget erlaubt 20 Anfragen/s, und das Lernen muss hinterherkommen - 10-20 zusaetzliche sind realistisch.
+
 ## Handelszeiten Gold/Silber
 
 Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in
