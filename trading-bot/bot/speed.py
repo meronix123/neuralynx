@@ -716,7 +716,7 @@ class SpeedTrader:
         # Ziel-vor-Stop-Modell: Erwartungswert nach Kosten in R muss positiv sein
         tb = fc.get("tb") or {}
         head = tb.get("long" if p_up >= 0.5 else "short")
-        guard = self.cur.get("cost_guard", True) or self._real()        # Simulation ohne Kosten-Schutz: alles sehen
+        guard = self.cur.get("cost_guard", True)                       # ohne Kosten-Schutz: bewusst freigeschaltet
         if side != 0 and head and not self.cur.get("use_raw") and guard:
             p = float(head["p"])
             tp_r = float(tb.get("tp_r") or self.cur["tp_r"])
@@ -740,7 +740,7 @@ class SpeedTrader:
         bei dieser Vorhersagezeit nach Gebuehren noetig ist. Auf dem Konto ist der Kosten-Schutz immer an."""
         p = self.cur
         need = p["min_conf"]
-        if not (p.get("cost_guard", True) or self._real()) or p.get("use_raw"):
+        if not p.get("cost_guard", True) or p.get("use_raw"):
             return need
         if self._has_tb:                        # Ziel-vor-Stop-Modell rechnet die Kosten je Trade selbst (EV-Gate)
             return need
@@ -791,7 +791,7 @@ class SpeedTrader:
         fees = price * (p["maker"] + p["taker"])
         # Kosten-Schutz: Stop so weit, dass Gebuehren + Schlupf hoechstens ~1/4 des Risikos ausmachen
         floor = p.get("fee_r_x", 4.0) * (fees + price * p["slippage"]) \
-            if (p.get("cost_guard", True) or self._real()) and not p.get("use_raw") else 0.0
+            if p.get("cost_guard", True) and not p.get("use_raw") else 0.0
         if p.get("turbo"):         # Turbo: Stop aus der 1-Minuten-Schwankung (x1,5), mind. 2x Gebuehren
             r = max(price * float(fc.get("sd_5m_pct") or 0.05) / 100 * 1.5, price * 0.0005, 2 * fees)
         elif p.get("fast"):        # enge Stops aus der 5-Minuten-Schwankung

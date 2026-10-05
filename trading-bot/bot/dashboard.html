@@ -366,8 +366,8 @@
         <label>Tempo <select id="ap-fast"><option value="0">normal (bis 30 min)</option><option value="1">Fast (5-10 min)</option><option value="2">Turbo: Hebel-Speed-KI (1-Minuten-Modell)</option></select></label>
         <small class="sub" id="ap-tempo-note">Fast/Turbo: Stops so eng, dass die Gebuehren meist ueber 1 R kosten - handelt nur bei positivem Erwartungswert, auf dem Konto also selten. In der Simulation mit Kosten-Schutz aus siehst du alle Trades.</small>
         <label>KI-Sicherheit ab <select id="ap-conf"><option value="53">53 %</option><option value="54">54 %</option><option value="55">55 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
-        <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = document.getElementById('ap-cost-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
-        <label id="ap-cost-l" title="Nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleiben kann (mind. 57-60 % Sicherheit je nach Vorhersagezeit, Stop mind. 4x die Kosten). Auf dem Bitget-Konto immer an."><input type="checkbox" id="ap-cost" checked> Kosten-Schutz</label>
+        <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
+        <label id="ap-cost-l" title="Nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleiben kann (Erwartungswert nach Kosten, Stop mind. 4x die Kosten). Auf dem Konto abschaltbar - nur mit Bestaetigung OHNE SCHUTZ; Tagesverlust-Limit und Gesamt-Risiko bleiben."><input type="checkbox" id="ap-cost" checked> Kosten-Schutz</label>
         <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
         <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
         <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)">Aus</button>
@@ -1485,7 +1485,7 @@ async function sessionStart(k) {
     body.scale_in = document.getElementById("ap-scale").checked;
     body.partial_frac = val("ap-part");
   }
-  if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.turbo = val("ap-fast") === "2"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; body.cost_guard = body.target !== "paper" || document.getElementById("ap-cost").checked; }
+  if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.turbo = val("ap-fast") === "2"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; body.cost_guard = document.getElementById("ap-cost").checked; }
   const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
   if (body.target === "account") {
     if (!acc || !acc.connected) return toast("Erst im Reiter Bitget-Konto ein Konto verbinden", false);
@@ -1494,6 +1494,11 @@ async function sessionStart(k) {
       const r = await askBox(`ACHTUNG: ${name} mit ECHTEM GELD einschalten (${size} je Trade, max. ${body.leverage}x, laeuft bis Aus). Zum Bestaetigen JA eintippen:`, [["Bestaetigung", ""]]);
       if (!r || r[0].trim().toUpperCase() !== "JA") return toast("Nicht gestartet - Bestaetigung JA fehlt", false);
       body.confirm = "JA";
+    }
+    if (k === "ap" && body.cost_guard === false) {
+      const r2 = await askBox("OHNE KOSTEN-SCHUTZ auf dem Konto: Die KI handelt dann auch Trades, bei denen die Gebuehren rechnerisch mehr kosten als der Stop (Turbo/Fast). Tagesverlust-Limit 5 % und Gesamt-Risiko 3 % bleiben. Zum Bestaetigen OHNE SCHUTZ eintippen:", [["Bestaetigung", ""]]);
+      if (!r2 || r2[0].trim().toUpperCase() !== "OHNE SCHUTZ") return toast("Nicht gestartet - Bestaetigung OHNE SCHUTZ fehlt", false);
+      body.confirm_nocost = "OHNE SCHUTZ";
     }
   }
   const ok = await act(SESS[k].api + "/start", body, body.target === "account" && acc.demo ? `${name} auf dem TESTKONTO einschalten?` : null);

@@ -116,7 +116,9 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
         if v is not None:
             opts[k] = float(v) / 100 if k == "partial_frac" and float(v) > 1 else float(v)
     if body.get("cost_guard") is not None:
-        opts["cost_guard"] = bool(body.get("cost_guard"))    # auf dem Konto immer an (siehe speed.py)
+        opts["cost_guard"] = bool(body.get("cost_guard"))
+        if not opts["cost_guard"] and body.get("target") == "account" and body.get("confirm_nocost") != "OHNE SCHUTZ":
+            raise RuntimeError("Ohne Kosten-Schutz auf dem Konto nur mit Bestaetigung OHNE SCHUTZ")
     if body.get("scale_in") is not None:
         opts["scale_in"] = bool(body.get("scale_in"))
     if body.get("target") == "account":

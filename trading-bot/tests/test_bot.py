@@ -3041,3 +3041,38 @@ def test_deposit_or_withdrawal_does_not_count_as_profit_or_loss(tmp_path, monkey
     client.i = 404
     bot.step()
     assert bot.status["block"] != "Max. Gesamtverlust erreicht"
+
+
+def test_cost_guard_off_on_account_needs_typed_confirmation():
+    from bot.dashboard import speed_start
+
+    class Acc:
+        connected, demo = True, True
+
+        class client:
+            @staticmethod
+            def set_margin_mode(*a, **k):
+                pass
+
+            @staticmethod
+            def set_leverage(*a, **k):
+                pass
+
+        def view(self):
+            return {"balance": {"total": 100.0, "free": 90.0}, "positions": []}
+
+        def tickets(self):
+            return type("T", (), {"active": lambda self: []})()
+    fc = {"ok": True, "p_up": 0.5, "p_up_raw": 0.5, "band_pct": 0.5}
+    ap = _ap(fc)
+    ap.active = False
+    bot = type("Bot", (), {"autopilot": ap, "speed": _ap(fc), "cfg": {}, "state": {"meta": {}}})()
+    bot.speed.active = False
+    body = {"symbols": ["BTC/USDT:USDT"], "target": "account", "cost_guard": False, "turbo": False}
+    with pytest.raises(RuntimeError, match="OHNE SCHUTZ"):
+        speed_start(bot, Acc(), body, ap)
+    assert not ap.active
+    msg = speed_start(bot, Acc(), {**body, "confirm_nocost": "OHNE SCHUTZ"}, ap)
+    assert "an" in msg and ap.active and ap.cur["cost_guard"] is False
+    ap.stop(close=True)
+    ap.thread.join(5)
