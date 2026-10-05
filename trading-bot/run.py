@@ -244,6 +244,10 @@ def main() -> None:
         print("\n!!! ACHTUNG: ECHTES GELD, Hebel", cfg["leverage"], "!!!")
         if os.environ.pop("BOT_LIVE_OK", "") == "1":
             print("Echtgeld in der Oberflaeche mit JA bestaetigt.")
+        elif os.getenv("BOT_LIVE_CONFIRMED") == "1":
+            print("Echtgeld per BOT_LIVE_CONFIRMED=1 in der .env freigegeben (Dienst-Betrieb).")
+        elif not sys.stdin.isatty():
+            sys.exit("Echtgeld ohne Tastatur (Dienst): zum Freigeben in die .env die Zeile BOT_LIVE_CONFIRMED=1 eintragen.")
         elif input("Zum Starten JA eingeben: ").strip() != "JA":
             sys.exit("Abgebrochen.")
 

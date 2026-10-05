@@ -520,7 +520,9 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     # Nur aus Bewegungen lernen, die nach Gebuehren zaehlen (|Bewegung| >= move_min %), und nie aus
     # Zeitraeumen, in denen der Markt still stand / geschlossen war (Gold/Silber nachts, Wochenende)
     from .hours import flat_mask
-    flat_c = np.r_[0, np.cumsum(flat_mask(df))]
+    ts_ = df["ts"].astype("int64").to_numpy()
+    gap = np.r_[False, np.diff(ts_) > 2 * STEP * 60_000]       # Luecke (Bot war aus): kein Lernen darueber hinweg
+    flat_c = np.r_[0, np.cumsum(flat_mask(df) | gap)]
 
     def labeled(idx, h):
         ret_ = (lr[idx + h] - lr[idx]) * 100
@@ -825,6 +827,48 @@ class CandleMemory:
                 log.debug("Kerzen-Gedaechtnis %s: %s", sym, e)
         return changed
 
+    def gaps(self, sym: str, max_days: float = 30.0) -> list[tuple[int, int]]:
+        """Luecken im Gedaechtnis (mehr als 2 Kerzen fehlen), als (letzte ts davor, erste ts danach)."""
+        base = self.mem.get(sym)
+        if base is None or len(base) < 2:
+            return []
+        ts = base["ts"].astype("int64").to_numpy()
+        d = np.diff(ts)
+        out = []
+        for i in np.where(d > 2 * self.step * 60_000)[0]:
+            if d[i] <= max_days * 86_400_000:
+                out.append((int(ts[i]), int(ts[i + 1])))
+        return out
+
+    def fill_gaps(self, sym: str, ohlcv_fn, max_gaps: int = 20) -> int:
+        """Luecken von Bitget nachladen (z. B. nach einer Pause des Bots)."""
+        rows = []
+        for a, b in self.gaps(sym)[-max_gaps:]:
+            since = a + self.step * 60_000
+            while since < b:
+                batch = ohlcv_fn(sym, self.tf, since, 200)
+                if not batch:
+                    break
+                rows += [r for r in batch if a < r[0] < b]
+                nxt = batch[-1][0] + self.step * 60_000
+                if nxt <= since:
+                    break
+                since = nxt
+        if not rows:
+            return 0
+        hist = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]).drop_duplicates("ts")
+        base = self.mem[sym]
+        allc = hist.set_index("ts").combine_first(base.set_index("ts")).reset_index()
+        allc = allc.sort_values("ts").tail(self.max_rows).reset_index(drop=True)
+        self.mem[sym] = allc
+        f = self._file(sym)
+        if f is not None:
+            try:
+                allc.to_csv(f, index=False)
+            except OSError as e:
+                log.debug("Kerzen-Gedaechtnis %s: %s", sym, e)
+        return len(hist)
+
     def backfill_col(self, sym: str, fetch_fn, col: str, days: int, ref_ms: int | None = None) -> int:
         """Spalte rueckwirkend aus Kerzen einer zweiten Quelle fuellen (Schlusskurs), z. B. Index-Kerzen."""
         base = self.mem.get(sym)
@@ -892,12 +936,8 @@ class CandleMemory:
         else:
             allc = closed
         allc = allc.sort_values("ts").tail(self.max_rows).reset_index(drop=True)
-        # nur lueckenlose Daten verwenden (nach laengerer Pause, > 2 h, beginnt das Gedaechtnis dort neu)
-        gaps = np.where(np.diff(allc["ts"].to_numpy()) > 2 * 3_600_000)[0]
-        if len(gaps):
-            allc = allc.iloc[gaps[-1] + 1:].reset_index(drop=True)
-        if len(allc) < len(closed):
-            allc = closed.reset_index(drop=True)
+        # Luecken (Bot war aus) bleiben im Gedaechtnis und werden nachgeladen (fill_gaps); beim Lernen werden
+        # Zeitfenster ueber eine Luecke hinweg ausgeschlossen - die gesammelten Live-Daten gehen nie verloren
         self.mem[sym] = allc
         m = self.meta.setdefault(sym, {})
         m.setdefault("since", int(time.time()))
@@ -1075,7 +1115,8 @@ class Forecaster:
                 if have is not None and len(have) and int(have["ts"].iloc[0]) <= ref_ms - (self.backfill_days - 1) * 86_400_000:
                     break
                 time.sleep(2)
-            n = self.memory.backfill_col(sym, self.index_fn, "index", self.backfill_days, ref_ms)
+            with self.BACKFILL_LOCK:
+                n = self.memory.backfill_col(sym, self._retry(self.index_fn), "index", self.backfill_days, ref_ms)
             if n:
                 log.info("KI %s: %d Index-Kerzen nachgeladen (Basis)", sym, n)
                 self.fresh.pop(sym, None)
@@ -1083,11 +1124,31 @@ class Forecaster:
         except Exception as e:  # noqa: BLE001
             log.warning("KI %s: Index-Kerzen nicht ladbar (%s)", sym, e)
 
+    # Nachladen von Bitget laeuft fuer alle KIs und Maerkte NACHEINANDER (sonst 429 Too Many Requests)
+    BACKFILL_LOCK = threading.Lock()
+
+    @staticmethod
+    def _retry(fn):
+        """Bitget-Abfrage mit Wiederholung bei Ratenlimit (429) - bis zu 6 Versuche mit wachsender Pause."""
+        def wrapped(*a, **k):
+            for i in range(6):
+                try:
+                    return fn(*a, **k)
+                except Exception as e:  # noqa: BLE001
+                    if i == 5 or not ("429" in str(e) or "Too Many" in str(e) or type(e).__name__ in ("RateLimitExceeded", "DDoSProtection")):
+                        raise
+                    time.sleep(3.0 * (i + 1))
+        return wrapped
+
     def _backfill(self, sym: str, ref_ms: int | None = None) -> None:
         try:
-            n = self.memory.backfill(sym, self.ohlcv_fn, self.backfill_days, ref_ms=ref_ms)
-            if n:
-                log.info("KI %s %s: %d Kerzen Vergangenheit nachgeladen (%d Tage)", sym, self.tf, n, self.backfill_days)
+            with self.BACKFILL_LOCK:
+                fn = self._retry(self.ohlcv_fn)
+                n = self.memory.backfill(sym, fn, self.backfill_days, ref_ms=ref_ms)
+                g = self.memory.fill_gaps(sym, fn)
+            if n or g:
+                log.info("KI %s %s: %d Kerzen Vergangenheit nachgeladen (%d Tage), %d Luecken-Kerzen", sym, self.tf, n,
+                         self.backfill_days, g)
                 self.fresh.pop(sym, None)
                 self.models.pop(sym, None)                    # mit mehr Daten neu lernen
         except Exception as e:  # noqa: BLE001

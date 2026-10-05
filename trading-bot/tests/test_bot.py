@@ -3123,3 +3123,31 @@ def test_market_scanner_picks_liquid_markets_and_shows_new_listings(tmp_path, mo
     ap.session["scan_at"] = 0
     ap._rotate()
     assert set(ap.slots) == {"BTC/USDT:USDT", "X/USDT:USDT", "Z/USDT:USDT"}   # X bleibt (offen), Y raus, Z neu
+
+
+def test_memory_keeps_data_across_gaps_and_fills_them(tmp_path):
+    from bot.forecast import CandleMemory, build
+
+    df = _fc_frame(3000, 0.0, 7)
+    mem = CandleMemory(tmp_path)
+    mem.merge("BTC/USDT:USDT", df.iloc[:2000])
+    for i in range(1988, 1999):                                        # live gesammelte Werte (letzte Stunde)
+        mem.record("BTC/USDT:USDT", int(df["ts"].iloc[i]), {"oi": 5.0})
+    mem.merge("BTC/USDT:USDT", df.iloc[:2000])
+    later = df.iloc[2100:]                                             # Bot war 100 Kerzen (8 h) aus
+    out = mem.merge("BTC/USDT:USDT", later)
+    assert len(out) > 2000 and out["oi"].notna().sum() >= 10          # nichts weggeworfen
+    assert mem.gaps("BTC/USDT:USDT") == [(int(df["ts"].iloc[1998]), int(df["ts"].iloc[2100]))]   # offene Kerze nicht gespeichert
+    calls = []
+
+    def ohlcv(sym, tf, since, limit):
+        calls.append(since)
+        rows = df[(df["ts"] >= since)].head(limit)
+        return rows[["ts", "open", "high", "low", "close", "volume"]].to_numpy().tolist()
+    n = mem.fill_gaps("BTC/USDT:USDT", ohlcv)
+    assert n == 101 and mem.gaps("BTC/USDT:USDT") == [] and len(mem.mem["BTC/USDT:USDT"]) == 2999
+    assert CandleMemory(tmp_path).merge("BTC/USDT:USDT", df.iloc[-3:])["oi"].notna().sum() >= 10   # auf Platte
+    # Lernen ueber eine Luecke hinweg: Fenster, die die Luecke kreuzen, zaehlen nicht
+    gappy = pd.concat([df.iloc[:1500], df.iloc[1700:]]).reset_index(drop=True)
+    fc = build(gappy)
+    assert fc is not None and fc["labeled"] < len(gappy) - 1 - 6

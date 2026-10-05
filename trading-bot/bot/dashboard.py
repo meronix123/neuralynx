@@ -107,7 +107,9 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
     if scan_n and int(scan_n) > 0 and sp is getattr(bot, "autopilot", None):
         scan_fn = (lambda n=int(scan_n): bot.scan_markets(n)["symbols"])
         opts_scan = int(scan_n)
-        for s in scan_fn():                                          # Markt-Scanner: Top-Maerkte nach Umsatz dazu
+        found = scan_fn()
+        log.info("Markt-Scanner (Top %d): %s", int(scan_n), ", ".join(found) or "keine passenden Maerkte")
+        for s in found:                                              # Markt-Scanner: Top-Maerkte nach Umsatz dazu
             if s not in syms:
                 syms.append(s)
     else:
