@@ -33,7 +33,7 @@ DEFAULTS = {
 }
 # KI-Autopilot: handelt nach der KI-Prognose (30 min) und fuehrt die Position selbst
 AUTO_DEFAULTS = {
-    "minutes": 0, "loop_s": 5.0, "entry_timeout_s": 60, "max_hold_s": 0, "max_trades": 1000,
+    "minutes": 0, "loop_s": 3.0, "entry_timeout_s": 60, "max_hold_s": 0, "max_trades": 1000,
     "min_conf": 0.56,          # Mindest-Sicherheit der KI fuer einen Einstieg
     "use_raw": False,          # Rohsignal auch ohne nachgewiesene Treffsicherheit (nur Simulation)
     "sl_band": 1.0,            # Stop = 1 x die 80-%-Schwankung der naechsten 30 min
@@ -685,6 +685,7 @@ class SpeedTrader:
                 p_up, h_min = best["p_up"], best["min"]
         conf = max(p_up, 1 - p_up)
         votes = {"KI": "LONG" if p_up >= 0.5 else "SHORT", "Sicherheit": round(conf, 3)}
+        self._has_tb = bool((fc.get("tb") or {}).get("long"))
         need = self._need_conf(sym, h_min, live)
         if need is None:
             return 0, {**votes, "wartet": f"Kosten-Schutz: {h_min:g}-min-Prognose bringt nach Gebuehren nichts "
@@ -721,9 +722,11 @@ class SpeedTrader:
         if not (p.get("cost_guard", True) or self._real()) or p.get("use_raw"):
             return need
         floor = cost_need_conf(h_min)
-        if floor is None:                       # 1-5 min: nur mit Nachweis im Live-Test
+        if floor is None:                       # 1-5 min: nur mit Nachweis - live, oder das Ziel-vor-Stop-Modell
             if live.get("n", 0) >= 200 and (live.get("hit") or 0) >= 0.60:
                 floor = 0.60
+            elif self._has_tb:                  # schnelle Trades: der Erwartungswert nach Kosten entscheidet
+                floor = need
             else:
                 return None
         if live.get("n", 0) >= 100 and (live.get("hit") or 0) >= 0.56:
@@ -1223,6 +1226,7 @@ class SpeedTrader:
             "gross": round(sum(t["gross"] for t in tr), 4), "fees": round(sum(t["fees"] for t in tr), 4),
             "net": round(self._net(), 4), "last_trades": tr[-12:][::-1], "events": self.events[-15:][::-1],
             "slots": {s: {"state": v.get("state"), "side": v.get("side"), "entry": v.get("entry") or v.get("price"),
+                          "opened": int(v["opened"]) if v.get("opened") else None,
                           "sl": v.get("sl"), "tp": v.get("tp"), "qty": v.get("qty"), "partial": v.get("partial_done"),
                           "lev": v.get("lev"), "added": v.get("added"),
                           "signal": (v.get("signal") or {}).get("votes")}

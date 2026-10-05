@@ -186,6 +186,11 @@ Quellen, bevorzugt begutachtete Studien) wurden ausgewertet. Nur Belegtes ist ei
 - **Ehrlichkeit**: Vertrauen in die Richtung erst ab 2 Standardfehlern Vorsprung und nie hoeher als die
   Trefferquote in den 20 % staerksten Momenten; staerkere Regularisierung zur Auswahl (viele Merkmale,
   wenig Daten).
+- **Schnelle Trades** (Fast/Turbo): nicht mehr pauschal gesperrt - das Ziel-vor-Stop-Modell rechnet je Trade
+  den Erwartungswert nach Kosten; ist er positiv, darf auch eine 1-10-Minuten-Prognose gehandelt werden.
+  Pruefung alle 3 s (normal), 1,5 s (Fast), 1 s (Turbo). Oberflaeche: der KI-Autopilot steht rechts neben dem
+  Chart; Einstiege (Pfeil mit Preis und Hebel), Stop, Ziel und Ausstiege (Punkt mit Ergebnis) sind im Chart
+  violett markiert.
 - **Ausstiege** (Studienlage): Einstand erst ab +1,3 R; ATR-Nachzieh-Stop nur im Trend (ADX >= 20) oder bei
   Erschoepfung; Zeit-Ausstiege wie bisher.
 - **Not-Aus**: stimmt die versprochene Sicherheit ueber 20 Trades nicht mit den Ergebnissen ueberein

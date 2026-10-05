@@ -26,7 +26,7 @@
   .kpi b span { font-size:inherit; }
   .badge { padding:2px 8px; border-radius:99px; font-weight:600; font-size:12px; }
   .paper { background:#334155; } .demo { background:#1e3a8a; } .live { background:#7f1d1d; }
-  main { display:grid; grid-template-columns: 230px minmax(0, 1fr) 320px; gap:12px; padding:12px 16px; }
+  main { display:grid; grid-template-columns: 230px minmax(0, 1fr) 360px; gap:12px; padding:12px 16px; }
   main > section { min-width:0; }
   @media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
   @media (max-width: 600px) {
@@ -110,6 +110,13 @@
   [hidden] { display:none !important; }
   .fcinfo { font-size:12px; color:var(--dim); margin-top:4px; line-height:1.5; }
   .speed { margin-top:10px; border-top:1px solid var(--line); padding-top:8px; }
+  .kipanel { margin-top:0; border:1px solid rgba(167,139,250,.45); border-radius:10px; padding:10px; background:rgba(167,139,250,.06); margin-bottom:12px; }
+  .kipanel .speedform { flex-direction:column; align-items:stretch; gap:6px; }
+  .kipanel .speedform label { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:4px 6px; min-width:0; }
+  .kipanel .speedform label > select, .kipanel .speedform label > input[type=text], .kipanel .speedform label > input:not([type]) { max-width:60%; min-width:0; }
+  .kipanel .speedform label:has(input[type=checkbox]) { justify-content:flex-start; }
+  .kipanel .speedform select { text-overflow:ellipsis; }
+  .kipanel #ap-syms { display:flex; flex-wrap:wrap; gap:4px; }
   .speedhead { margin-bottom:6px; } .speedform { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:13px; }
   .speedform select, .speedform input { width:auto; padding:3px 6px; }
   .spsym { display:inline-flex; gap:3px; align-items:center; margin-right:4px; cursor:pointer; }
@@ -318,6 +325,7 @@
       <span><i style="background:#a855f7"></i>EMA 50</span>
       <span><i style="background:#64748b"></i>VWAP</span>
       <span><i style="background:#3b82f6"></i>Einstieg</span>
+      <span><i style="background:#a78bfa"></i>KI-Einstieg (Pfeil) / Ausstieg (Punkt)</span>
       <span><i style="background:#ef4444"></i>Stop-Loss</span>
       <span><i style="background:#22c55e"></i>Take-Profit</span>
       <span>gestrichelt = Plan, falls jetzt eingestiegen wuerde</span>
@@ -341,7 +349,9 @@
       </div>
       <div id="sp-status"></div>
     </div>
-    <div class="speed">
+  </section>
+  <section class="panel">
+    <div class="speed kipanel">
       <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, sichert Gewinne (nie mehr als die Haelfte zurueckgeben, ATR-Stop, RSI/Umkehrkerzen), verkauft einen Teil bei +1,5 R, steigt aus wenn die KI klar dreht oder die Prognosezeit vorbei ist</small></div>
       <div class="speedform">
         <span id="ap-syms"></span>
@@ -363,8 +373,6 @@
       </div>
       <div id="ap-status"></div>
     </div>
-  </section>
-  <section class="panel">
     <h3>Was der Bot denkt</h3>
     <div id="think" class="think"></div>
     <h3>Zeitebenen</h3>
@@ -615,6 +623,28 @@ function updateListPrices() {
 
 // Order Blocks als Kaesten: vom Ursprungs-Kerze bis jetzt, Ober- bis Unterkante
 const obCanvas = document.getElementById("obcanvas");
+let markerBars = [], markerTf = 60;
+function refreshMarkers() {
+  // Einstiege/Ausstiege im Chart: KI-Autopilot (violett, mit Preis) und Bot (blau)
+  if (!candles || !data || !selected) return;
+  const bars = markerBars, tfSec = markerTf;
+  const ap = (sessFresh.ap && Date.now() - sessFresh.ap.at < 4000 ? sessFresh.ap.v : data.autopilot) || {};
+  const kiMarkers = (ap.last_trades || []).filter(t => t.symbol === selected && t.time).flatMap(t => [
+    { time: Math.floor((t.time - (t.secs || 0) * 1000) / 1000 / tfSec) * tfSec + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
+      color: "#a78bfa", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: `KI ${t.side === "long" ? "LONG" : "SHORT"} @ ${px(t.entry)}` },
+    { time: Math.floor(t.time / 1000 / tfSec) * tfSec + TZ, position: "inBar", color: t.net >= 0 ? "#22c55e" : "#ef4444",
+      shape: "circle", text: `KI ${t.why === "Teilverkauf" ? "Teil " : ""}${t.net >= 0 ? "+" : ""}${fmt(t.net)}` },
+  ]).concat(Object.entries(ap.slots || {}).filter(([s, v]) => s === selected && v.state === "open" && v.opened).map(([s, v]) => (
+    { time: Math.floor(v.opened / tfSec) * tfSec + TZ, position: v.side === 1 ? "belowBar" : "aboveBar", color: "#a78bfa",
+      shape: v.side === 1 ? "arrowUp" : "arrowDown", text: `KI ${v.side === 1 ? "LONG" : "SHORT"} offen @ ${px(v.entry)}${v.lev ? " x" + v.lev : ""}` })));
+  const markers = kiMarkers.concat(data.history.filter(t => t.symbol === selected).flatMap(t => [
+    { time: Math.floor(t.opened_ms / 1000 / tfSec) * tfSec + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
+      color: "#3b82f6", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: t.side },
+    { time: Math.floor(t.closed_ms / 1000 / tfSec) * tfSec + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
+      shape: "circle", text: (t.pnl >= 0 ? "+" : "") + fmt(t.pnl) },
+  ])).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
+  candles.setMarkers(markers);
+}
 let obZones = [];
 function drawZones(canvas, el, ch, series, zones) {
   // Order Blocks: zarte, durchscheinende Flaeche mit gestricheltem Rand und Beschriftung.
@@ -940,13 +970,7 @@ function render() {
     for (const w of (walls.bids || []).slice(0, 2)) zline(w.price, "rgba(56,189,248,0.7)", "", 3, 2);   // Waende ohne Preisschild
     for (const w of (walls.asks || []).slice(0, 2)) zline(w.price, "rgba(251,146,60,0.7)", "", 3, 2);
   }
-  const markers = data.history.filter(t => t.symbol === selected).flatMap(t => [
-    { time: Math.floor(t.opened_ms / 1000 / tfSec) * tfSec + TZ, position: t.side === "long" ? "belowBar" : "aboveBar",
-      color: "#3b82f6", shape: t.side === "long" ? "arrowUp" : "arrowDown", text: t.side },
-    { time: Math.floor(t.closed_ms / 1000 / tfSec) * tfSec + TZ, position: "inBar", color: t.pnl >= 0 ? "#22c55e" : "#ef4444",
-      shape: "circle", text: (t.pnl >= 0 ? "+" : "") + fmt(t.pnl) },
-  ]).filter(m => bars.length && m.time >= bars[0].time).sort((a, b) => a.time - b.time);
-  candles.setMarkers(markers);
+  markerBars = bars; markerTf = tfSec; refreshMarkers();
 
   document.getElementById("think").innerHTML = thinking(s);
   const scan = s.snapshot.mtf || {};
@@ -1309,7 +1333,7 @@ function sessionLines(sym) {
     const v = (st.slots || {})[sym];
     if (!st.active || !v || v.state !== "open") continue;
     const tag = k === "sp" ? "Speed" : "KI";
-    out.push({ price: v.entry, color: "#3b82f6", title: `${tag} ${v.side === 1 ? "Long" : "Short"}`, style: 0, width: 1 });
+    out.push({ price: v.entry, color: k === "ap" ? "#a78bfa" : "#3b82f6", title: `${tag} ${v.side === 1 ? "Long" : "Short"}${v.lev ? " x" + v.lev : ""}`, style: 0, width: 2 });
     if (v.sl) out.push({ price: v.sl, color: "#ef4444", title: `${tag} SL`, style: 2, width: 1 });
     if (v.tp) out.push({ price: v.tp, color: "#22c55e", title: `${tag} TP`, style: 2, width: 1 });
   }
@@ -1416,7 +1440,7 @@ async function pollSession() {
   for (const k of Object.keys(SESS)) {
     const sp = (data[SESS[k].key] || {});
     if (!sp.active && Date.now() > (pollSession.until[k] || 0)) continue;   // nur waehrend/kurz nach einer Sitzung
-    try { const v = await (await fetch(SESS[k].api)).json(); sessFresh[k] = { at: Date.now(), v }; data[SESS[k].key] = v; renderSession(k); renderPositions(); }
+    try { const v = await (await fetch(SESS[k].api)).json(); sessFresh[k] = { at: Date.now(), v }; data[SESS[k].key] = v; renderSession(k); renderPositions(); if (k === "ap" && typeof refreshMarkers === "function") refreshMarkers(); }
     catch (e) { /* Bot kurz nicht erreichbar */ }
   }
 }
