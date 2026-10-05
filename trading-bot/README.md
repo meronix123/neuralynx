@@ -185,6 +185,19 @@ Gewinne sichern (laeuft nicht mehr endlos im Plus):
 Margin, Hebel und Liquidation werden aus den echten Bitget-Werten angezeigt; der Hebel wird nach dem
 Setzen bei Bitget nachgelesen und die Groesse damit gerechnet.
 
+Sicherheit und Dauerbetrieb:
+
+- Stop laesst sich nicht setzen: Position bleibt als "ungeschuetzt" markiert, wird jede Runde erneut
+  abgesichert und nach 60 s zur Sicherheit geschlossen; ein Markt-Einstieg wird nie doppelt gekauft
+- Neustart des Bots (Update, Absturz): Konto-Sitzungen werden von Platte fortgesetzt (`data/sitzung_*.json`),
+  offene Positionen auf Bitget geprueft und weiter gefuehrt; wartende Limit-Orders werden storniert
+- Tagesverlust-Limit (5 %): keine neuen Trades bis zum naechsten Tag (UTC), die Sitzung bleibt an
+- Gesamt-Risiko: alle offenen Positionen zusammen hoechstens 3 % des Kontos am Stop (Krypto laeuft
+  meist gemeinsam - sechs Longs sind EINE Wette)
+- Bitget-Ratenlimit oder Netzausfall: 20 s bzw. 5 s Pause statt Dauerfeuer (sonst IP-Sperre)
+- Hoechstens 2 KI-Trainings gleichzeitig; der Entscheidungs-Speicher haelt 20 000 geprueftе Prognosen
+  und wird nie halb geschrieben
+
 Auf dem Bitget-Konto ist der Kosten-Schutz immer an, in der Simulation abschaltbar (zum Vergleichen).
 
 ## Handelszeiten Gold/Silber

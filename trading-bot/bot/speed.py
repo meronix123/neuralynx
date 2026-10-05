@@ -63,6 +63,8 @@ AUTO_DEFAULTS = {
     "atr_k_tight": 1.2,        # ... bei Erschoepfung (RSI-Extrem, Umkehrkerze, EMA-Wende) nur 1,2 x ATR
     "time_take_x": 2.0,        # nach 2 x Vorhersagezeit: Gewinn mitnehmen, wenn die KI nicht mehr dafuer ist
     "time_stale_x": 4.0,       # nach 4 x Vorhersagezeit: Position ohne klaren Gewinn schliessen
+    "max_open_risk_pct": 3.0,  # alle offenen Positionen zusammen hoechstens 3 % des Kontos am Stop (gleiche Wette!)
+    "unprotected_s": 60,       # Stop laesst sich so lange nicht setzen -> Position zur Sicherheit schliessen
 }
 # Rechnung (Simulation mit Bitget-Gebuehren 0,02 % Maker / 0,06 % Taker + Schlupf): ins Plus kommt die KI nur,
 # wenn sie bei 20-30 min Vorhersage mind. ~57 % trifft, bei 10-15 min mind. ~60 %; bei 1-5 min frisst der
@@ -303,6 +305,7 @@ class BitgetBroker:
         self._cleanup(sym, prot)
         o = self.c.create_order(sym, "market", "sell" if side == 1 else "buy", qty, None,
                                 {"reduceOnly": True, "marginMode": self.mm})
+        self._bal = None
         return float(o.get("average") or self.c.fetch_ticker(sym)["last"])
 
     def move_stop(self, sym, side, qty, prot, sl):
@@ -340,6 +343,7 @@ class BitgetBroker:
         """Teilverkauf zum Marktpreis (nur reduzierend)."""
         o = self.c.create_order(sym, "market", "sell" if side == 1 else "buy", qty, None,
                                 {"reduceOnly": True, "marginMode": self.mm})
+        self._bal = None
         return float(o.get("average") or self.c.fetch_ticker(sym)["last"])
 
     def resize(self, sym, side, qty, prot):
@@ -398,11 +402,13 @@ class SpeedTrader:
             minutes = int(p.get("minutes") or 0)              # 0 = laeuft, bis "Aus" gedrueckt wird
             if self.kind == "ki" and p.get("use_raw") and label != "Simulation":
                 raise ValueError("Rohsignal (unbewaehrte KI) nur in der Simulation")
+            free = p.pop("free", None)
+            free = equity if free is None else float(free)
             if p.get("size_mode", "usdt") == "usdt":
                 if p["margin_usdt"] * p["leverage"] < p["min_notional"]:
                     raise ValueError(f"Einsatz x Hebel muss mind. {p['min_notional']:g} USDT sein (Bitget-Minimum)")
-                if p["margin_usdt"] > equity:
-                    raise ValueError(f"Einsatz {p['margin_usdt']:g} USDT ist mehr als verfuegbar ({equity:.2f})")
+                if p["margin_usdt"] > free:
+                    raise ValueError(f"Einsatz {p['margin_usdt']:g} USDT ist mehr als verfuegbar ({free:.2f})")
             self.cur, self.broker, self.free_fn = p, broker, free_fn
             now = time.time()
             self.session = {"symbols": list(symbols), "start": now, "label": label, "stopping": False,
@@ -416,9 +422,92 @@ class SpeedTrader:
             self.history = self._load_history(label)
             self.active = True
             self._event(f"Ein: {', '.join(x.split(':')[0] for x in symbols)} ({label})")
+            self._persist()
             self.thread = threading.Thread(target=self._run, daemon=True, name=self.kind)
             self.thread.start()
             return f"{self.name} ist an ({label}) - laeuft, bis du Aus drueckst"
+
+    # --- Sitzung ueber einen Neustart retten -----------------------------
+    def _state_path(self):
+        from pathlib import Path
+        lp = self.cur.get("log_path") if getattr(self, "cur", None) else None
+        return Path(lp).with_name(f"sitzung_{self.kind}_{Path(lp).stem.split('_')[-1]}.json") if lp else None
+
+    def _persist(self) -> None:
+        """Sitzung (Einstellungen, Positionen, Abschluesse) auf Platte - damit nach einem Neustart des Bots
+        offene Positionen weiter gefuehrt werden statt vergessen zu sein."""
+        path = self._state_path()
+        if not path:
+            return
+        try:
+            import json
+            if not self.active:
+                path.unlink(missing_ok=True)
+                return
+            snap = {"session": {k: v for k, v in self.session.items() if k != "end" or v != float("inf")},
+                    "cur": {k: v for k, v in self.cur.items() if not callable(v)},
+                    "slots": self.slots, "trades": self.trades[-200:], "events": self.events[-30:], "saved": time.time()}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(snap, default=str), encoding="utf-8")
+            tmp.replace(path)
+        except (OSError, TypeError, ValueError) as e:
+            log.debug("Sitzung speichern: %s", e)
+
+    def saved_session(self, log_path: str | None) -> dict | None:
+        """Gespeicherte Sitzung auf Platte (None = keine)."""
+        import json
+        from pathlib import Path
+        if not log_path:
+            return None
+        path = Path(log_path).with_name(f"sitzung_{self.kind}_{Path(log_path).stem.split('_')[-1]}.json")
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        except (OSError, ValueError):
+            return None
+
+    def resume(self, snap: dict, broker, free_fn=None) -> str:
+        """Nach einem Neustart weitermachen: offene Positionen auf Bitget pruefen und wieder fuehren."""
+        with self.lock:
+            if self.active:
+                raise RuntimeError(f"{self.name} laeuft bereits")
+            self.cur, self.broker, self.free_fn = dict(snap["cur"]), broker, free_fn
+            self.session = dict(snap["session"])
+            self.session.setdefault("end", float("inf"))
+            self.session["stopping"] = False
+            self.session.pop("close_now", None)
+            self.trades = list(snap.get("trades") or [])
+            self.events = list(snap.get("events") or [])
+            self.history = self._load_history(self.session.get("label", ""))
+            self.slots = {}
+            kept, gone = [], []
+            for sym, sl in (snap.get("slots") or {}).items():
+                sl = dict(sl)
+                if sl.get("state") == "open":
+                    try:
+                        still = self.broker._pos_size(sym, sl["side"]) >= sl["qty"] * 0.5 if hasattr(self.broker, "_pos_size") else True
+                    except Exception as e:  # noqa: BLE001 - lieber weiter fuehren als vergessen
+                        log.warning("Neustart %s: Position nicht pruefbar (%s)", sym, e)
+                        still = True
+                    if still:
+                        kept.append(sym.split(":")[0])
+                    else:
+                        gone.append(sym.split(":")[0])
+                        sl = {"state": "idle"}
+                elif sl.get("state") == "pending":
+                    try:
+                        self.broker.cancel(sym, sl["oid"])
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("Neustart Storno: %s", e)
+                    sl = {"state": "idle"}
+                self.slots[sym] = sl
+            self.active = True
+            self._event("Nach Neustart fortgesetzt" + (f" - offen: {', '.join(kept)}" if kept else "")
+                        + (f" - inzwischen zu (Stop/Ziel auf Bitget): {', '.join(gone)}" if gone else ""))
+            self._persist()
+            self.thread = threading.Thread(target=self._run, daemon=True, name=self.kind)
+            self.thread.start()
+            return f"{self.name} nach Neustart fortgesetzt ({self.session.get('label')})"
 
     def stop(self, why: str = "Aus gedrueckt", close: bool = False) -> str:
         """Aus: keine neuen Trades mehr, wartende Limit-Orders weg. Offene Positionen behalten Stop und Ziel
@@ -461,20 +550,62 @@ class SpeedTrader:
                 if not ses["stopping"]:
                     if time.time() >= ses["end"]:
                         ses.update(stopping=True, stop_reason="Zeit abgelaufen")
-                    elif self._net() <= -ses["equity0"] * self.cur["max_loss_pct"] / 100:
-                        ses.update(stopping=True, stop_reason=f"Verlust-Limit {self.cur['max_loss_pct']:g} % erreicht")
+                    elif self._day_net() <= -ses["equity0"] * self.cur["max_loss_pct"] / 100 \
+                            and time.time() >= ses.get("pause_until", 0):
+                        # Tagesverlust-Limit: heute keine neuen Trades mehr, offene Positionen laufen weiter,
+                        # morgen (UTC) geht es weiter - die Sitzung bleibt an
+                        ses["pause_until"] = (int(time.time()) // 86400 + 1) * 86400
+                        self._cancel_pending()
+                        self._event(f"Tagesverlust-Limit {self.cur['max_loss_pct']:g} % erreicht - Pause bis "
+                                    f"{time.strftime('%d.%m. %H:%M', time.gmtime(ses['pause_until']))} UTC")
                 if ses["stopping"]:
                     self._cancel_pending()
                     if not any(v.get("state") == "open" for v in self.slots.values()):
                         break                                   # nichts mehr offen -> Sitzung zu Ende
+                wait = self.cur["loop_s"]
                 for sym in ses["symbols"]:
                     try:
                         self.step(sym)
                     except Exception as e:  # noqa: BLE001 - ein Fehler darf die Sitzung nicht beenden
                         self._event(f"{sym.split(':')[0]} Fehler: {e}")
-                time.sleep(self.cur["loop_s"])
+                        wait = max(wait, self._backoff(e))
+                self._persist_maybe()
+                time.sleep(wait)
         finally:
             self._wind_down(close=bool(self.session.get("close_now")))
+
+    def _backoff(self, e: Exception) -> float:
+        """Bitget bremst (Ratenlimit) oder Netz weg -> kurz Pause statt weiter hammern (sonst IP-Sperre)."""
+        name = type(e).__name__
+        text = str(e)
+        if name in ("RateLimitExceeded", "DDoSProtection") or "429" in text or "too many" in text.lower():
+            self._event("Bitget-Ratenlimit - 20 s Pause")
+            return 20.0
+        if name in ("NetworkError", "RequestTimeout", "ExchangeNotAvailable", "OnMaintenance") \
+                or "timed out" in text.lower() or "connection" in text.lower():
+            return 5.0
+        return 0.0
+
+    def _day_net(self) -> float:
+        day0 = (int(time.time()) // 86400) * 86400 * 1000
+        return sum(t["net"] for t in self.trades if (t.get("time") or 0) >= day0)
+
+    def _persist_maybe(self) -> None:
+        """Sitzung regelmaessig (alle 20 s) und bei jeder Aenderung einer Position speichern."""
+        key = tuple((s, v.get("state"), v.get("sl"), v.get("qty")) for s, v in self.slots.items())
+        last = getattr(self, "_persisted", (None, 0.0))
+        if key != last[0] or time.time() - last[1] > 20:
+            self._persist()
+            self._persisted = (key, time.time())
+
+    def _open_risk(self) -> float:
+        """Summe des Verlusts am Stop aller offenen/wartenden Positionen (USDT)."""
+        out = 0.0
+        for v in self.slots.values():
+            if v.get("state") in ("open", "pending") and v.get("sl") is not None:
+                px = v.get("entry") or v.get("price") or 0
+                out += (v.get("qty") or 0) * abs(px - v["sl"])
+        return out
 
     def _cancel_pending(self) -> None:
         for sym, sl in self.slots.items():
@@ -484,8 +615,8 @@ class SpeedTrader:
                 self.broker.cancel(sym, sl["oid"])
                 st, avg, filled = self.broker.entry_status(sym, sl["oid"])
                 if filled > 0:                            # kurz vor dem Storno ausgefuehrt -> absichern
-                    sl.update(state="open", entry=avg, qty=filled, opened=time.time(), r0=abs(avg - sl["sl"]),
-                              best=avg, prot=self.broker.protect(sym, sl["side"], filled, sl["sl"], sl["tp"]))
+                    sl.update(state="open", entry=avg, qty=filled, opened=time.time(), r0=abs(avg - sl["sl"]), best=avg)
+                    self._protect(sym, sl)
                 else:
                     sl.clear()
                     sl["state"] = "idle"
@@ -508,6 +639,7 @@ class SpeedTrader:
         self.active = False
         self._event(f"Aus ({self.session.get('stop_reason', '-')}): {len(self.trades)} Abschluesse, "
                     f"netto {self._net():+.4f} USDT")
+        self._persist()
 
     def _market(self, sym):
         df, book, tick = self.data_fn(sym)
@@ -624,6 +756,9 @@ class SpeedTrader:
         if sl["state"] == "idle":
             if side == 0 or self.session.get("stopping") or len(self.trades) >= p["max_trades"]:
                 return
+            if time.time() < self.session.get("pause_until", 0):
+                sl["signal"]["votes"] = {**votes, "wartet": "Tagesverlust-Limit erreicht - Pause bis morgen (UTC)"}
+                return
             free_fn = getattr(self, "free_fn", None)
             if free_fn is not None and not free_fn(sym):
                 sl["signal"]["votes"] = {**votes, "wartet": "andere Position in diesem Markt offen"}
@@ -665,6 +800,12 @@ class SpeedTrader:
             if qty <= 0:
                 sl["signal"]["votes"] = {**votes, "wartet": "zu wenig freies Guthaben fuer die Mindestgroesse"}
                 return
+            total = self._balance()[0]
+            cap = p.get("max_open_risk_pct") or 0
+            if self.kind == "ki" and cap and total > 0 \
+                    and self._open_risk() + qty * abs(price - stop) > total * cap / 100:
+                sl["signal"]["votes"] = {**votes, "wartet": f"Gesamt-Risiko offener Positionen waere ueber {cap:g} % des Kontos"}
+                return
             full = qty
             if self.kind == "ki" and p.get("scale_in"):
                 part = self._round(sym, qty * p["first_frac"])
@@ -680,15 +821,15 @@ class SpeedTrader:
             st, avg, filled = self.broker.entry_status(sym, sl["oid"])
             if st == "filled":
                 stop, target = sl["sl"] + (avg - sl["price"]), sl["tp"] + (avg - sl["price"])
-                sl.update(state="open", entry=avg, qty=filled, opened=now, sl=stop, tp=target, r0=abs(avg - stop),
-                          best=avg, prot=self.broker.protect(sym, sl["side"], filled, stop, target))
+                sl.update(state="open", entry=avg, qty=filled, opened=now, sl=stop, tp=target, r0=abs(avg - stop), best=avg)
+                self._protect(sym, sl)
                 self._event(f"{sym.split(':')[0]} ausgefuehrt @ {avg:.6g}")
             elif st == "canceled" or now - sl["placed"] > p["entry_timeout_s"] or side == -sl["side"]:
                 self.broker.cancel(sym, sl["oid"])
                 st, avg, filled = self.broker.entry_status(sym, sl["oid"])
                 if filled > 0:
-                    sl.update(state="open", entry=avg, qty=filled, opened=now, r0=abs(avg - sl["sl"]), best=avg,
-                              prot=self.broker.protect(sym, sl["side"], filled, sl["sl"], sl["tp"]))
+                    sl.update(state="open", entry=avg, qty=filled, opened=now, r0=abs(avg - sl["sl"]), best=avg)
+                    self._protect(sym, sl)
                     self._event(f"{sym.split(':')[0]} teilweise ausgefuehrt ({filled:g}) - abgesichert")
                 elif self._chase(sym, sl, side, tick, now):
                     pass
@@ -697,6 +838,11 @@ class SpeedTrader:
                     sl["state"] = "idle"
         elif sl["state"] == "open":
             from .hours import close_before_weekend
+            if sl.get("unprotected"):
+                if not self._protect(sym, sl) and now - sl["unprotected"] > p.get("unprotected_s", 60):
+                    px = self.broker.close(sym, sl["side"], sl["qty"], sl["prot"])
+                    self._book(sym, sl, px, "ohne Stop nicht haltbar - geschlossen", maker=False)
+                    return
             done = self.broker.exit_status(sym, sl["side"], sl["qty"], sl["prot"])
             if not done and close_before_weekend(sym, None, {"hours": p.get("hours")}):
                 px = self.broker.close(sym, sl["side"], sl["qty"], sl["prot"])
@@ -725,10 +871,24 @@ class SpeedTrader:
         avg = self.broker.add(sym, side, sl["qty"])
         shift = avg - sl["price"]
         stop, target = sl["sl"] + shift, sl["tp"] + shift
-        sl.update(state="open", entry=avg, opened=now, sl=stop, tp=target, r0=abs(avg - stop), best=avg, taker_in=True,
-                  prot=self.broker.protect(sym, side, sl["qty"], stop, target))
+        # erst den Zustand merken, dann absichern: schlaegt der Stop fehl, wird NIE ein zweites Mal gekauft
+        sl.update(state="open", entry=avg, opened=now, sl=stop, tp=target, r0=abs(avg - stop), best=avg, taker_in=True)
+        self._protect(sym, sl)
         self._event(f"{sym.split(':')[0]} Limit nicht gefuellt - zum Marktpreis eingestiegen @ {avg:.6g}")
         return True
+
+    def _protect(self, sym, sl) -> bool:
+        """Stop (und Ziel) auf Bitget setzen. Klappt es nicht, bleibt die Position als 'ungeschuetzt' markiert
+        und wird in jeder Runde erneut abgesichert - und nach unprotected_s zur Sicherheit geschlossen."""
+        try:
+            sl["prot"] = self.broker.protect(sym, sl["side"], sl["qty"], sl["sl"], sl["tp"])
+            sl.pop("unprotected", None)
+            return True
+        except Exception as e:  # noqa: BLE001
+            sl["prot"] = {"sl": sl["sl"], "tp": sl["tp"], "sl_id": "", "tp_id": "", "t": time.time(), "miss": 0}
+            sl.setdefault("unprotected", time.time())
+            self._event(f"{sym.split(':')[0]} ACHTUNG: Stop nicht gesetzt ({e}) - neuer Versuch")
+            return False
 
     def _manage(self, sym, sl, tick, side, votes, df=None) -> None:
         """KI-Autopilot fuehrt die Position: Einstand, Teilverkauf, Nachziehen, Ausstieg bei KI-Wende."""
@@ -800,10 +960,10 @@ class SpeedTrader:
         cands = []
         if peak >= p["be_r"]:
             cands.append(be)
+        keep = p.get("keep_2r", 0.7) if peak >= 2.0 else p.get("keep", 0.5)
+        if tired:
+            keep = max(keep, 0.7)
         if peak >= 1.0:
-            keep = p.get("keep_2r", 0.7) if peak >= 2.0 else p.get("keep", 0.5)
-            if tired:
-                keep = max(keep, 0.7)
             cands.append(sl["entry"] + d * keep * peak * r0)
             if ev.get("atr"):
                 tight = tired or sl.get("partial_done")
@@ -813,6 +973,13 @@ class SpeedTrader:
         if sl.get("partial_done"):
             cands.append(sl["best"] - d * p["trail_r"] * r0)
         ok = [c for c in cands if d * (last - c) > 0]                 # nur Stops, die unter (Long) dem Kurs liegen
+        # Kurs ist zwischen zwei Pruefungen schon unter die Halte-Linie gerutscht (Stop stand noch tiefer):
+        # jetzt zum Marktpreis sichern, statt den Gewinn ganz herzugeben
+        if peak >= 1.0 and gain > 0.15 and d * (last - (sl["entry"] + d * keep * peak * r0)) <= 0 \
+                and d * (sl["sl"] - sl["entry"]) < keep * peak * r0 * 0.9:
+            px = self.broker.close(sym, d, sl["qty"], sl["prot"])
+            self._book(sym, sl, px, f"Gewinn gesichert (Rueckfall von +{peak:.1f} R)", False)
+            return
         want = (max(ok) if d == 1 else min(ok)) if ok else None
         if want is not None and d * (want - sl["sl"]) >= 0.1 * r0:
             self.broker.move_stop(sym, d, sl["qty"], sl["prot"], want)
@@ -956,6 +1123,9 @@ class SpeedTrader:
             "stopping": bool(self.session.get("stopping")),
             "running_s": int(time.time() - self.session.get("start", time.time())) if self.active else 0,
             "params": self.session.get("params", {}), "stop_reason": self.session.get("stop_reason"),
+            "pause_until": self.session.get("pause_until") if self.session.get("pause_until", 0) > time.time() else None,
+            "open_risk": round(self._open_risk(), 4), "day_net": round(self._day_net(), 4),
+            "resumed": bool(self.session.get("resumed")),
             "trades": len(tr), "wins": len(wins), "hit": round(len(wins) / len(tr), 3) if tr else None,
             "gross": round(sum(t["gross"] for t in tr), 4), "fees": round(sum(t["fees"] for t in tr), 4),
             "net": round(self._net(), 4), "last_trades": tr[-12:][::-1], "events": self.events[-15:][::-1],

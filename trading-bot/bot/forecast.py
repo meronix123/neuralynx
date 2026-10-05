@@ -503,8 +503,9 @@ def path(fc: dict, price: float, now_s: int, seed: int) -> list[dict]:
 class ForecastLog:
     """Live-Entscheidungen merken und nach 30 Minuten mit dem echten Kurs vergleichen."""
 
-    def __init__(self, path: Path | None = None, keep: int = 3000):
+    def __init__(self, path: Path | None = None, keep: int = 20000):
         self.path, self.keep = path, keep
+        self._saved = 0.0
         self.items: list[dict] = []
         if path and path.exists():
             try:
@@ -520,7 +521,7 @@ class ForecastLog:
                            "p_raw": fc.get("p_up_raw"), "h_min": fc.get("decision_min", 30),
                            "step": fc.get("step_min", STEP_MIN)})
         self.items = self.items[-self.keep:]
-        self._save()
+        self._save()                             # neue Entscheidung sofort sichern
 
     def resolve(self, sym: str, candles: pd.DataFrame) -> None:
         closes = dict(zip((candles["ts"] // 1000).astype(int), candles["close"].astype(float)))
@@ -552,7 +553,10 @@ class ForecastLog:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self.items), encoding="utf-8")
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.items), encoding="utf-8")
+            tmp.replace(self.path)               # nie eine halb geschriebene Datei zuruecklassen
+            self._saved = time.time()
         except OSError as e:
             log.debug("Prognose-Log: %s", e)
 
@@ -696,6 +700,9 @@ class Forecaster:
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[float, object]] = {}
 
+    # hoechstens 2 Trainings gleichzeitig (alle KIs zusammen) - sonst wuergt der Rechner beim Handeln
+    TRAIN_SLOTS = threading.BoundedSemaphore(2)
+
     def _cached(self, key: str, ttl: float, fn):
         hit = self.cache.get(key)
         if hit and time.time() - hit[0] < ttl:
@@ -751,6 +758,10 @@ class Forecaster:
             log.warning("KI %s: Vergangenheit nicht ladbar (%s)", sym, e)
 
     def _train(self, sym: str, df: pd.DataFrame, bar: int) -> None:
+        with self.TRAIN_SLOTS:
+            self._train_now(sym, df, bar)
+
+    def _train_now(self, sym: str, df: pd.DataFrame, bar: int) -> None:
         try:
             lead = {}
             if "XAU" not in sym and "XAG" not in sym:

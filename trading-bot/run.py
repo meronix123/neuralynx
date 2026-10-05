@@ -254,6 +254,9 @@ def main() -> None:
         from bot.dashboard import start_dashboard
         account = Account(cfg, ex.symbols, async_refresh=True)   # echtes Bitget-Konto (Schluessel in der Oberflaeche)
         refresher(account)
+        from bot.dashboard import resume_sessions
+        for msg in resume_sessions(bot, account):
+            print(msg)
         pw_hash = os.getenv("DASHBOARD_PASSWORD_HASH") if os.getenv("DASHBOARD_REMOTE") == "1" else None
         try:
             start_dashboard(bot, cfg["dashboard"]["port"], account, remote_pw_hash=pw_hash or None)

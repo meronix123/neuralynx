@@ -1402,11 +1402,11 @@ function renderSession(k) {
     ? `<b class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"}</b>${v.lev ? " x" + v.lev : ""} @ ${px(v.entry)} &middot; Stop ${px(v.sl)}${v.added ? " &middot; nachgekauft" : ""}${v.partial ? " &middot; Teil verkauft" : ""}`
     : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : v.signal && v.signal.wartet ? `wartet (${v.signal.wartet})` : "sucht"}${sig(v)}`).join(" &middot; ");
   out(`<div class="sprun">
-    ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}${(sp.params || {}).turbo ? " &middot; TURBO" : (sp.params || {}).fast ? " &middot; FAST" : ""}) seit ${hm(sp.running_s || 0)} &middot; ${slots}<br>` :
+    ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}${(sp.params || {}).turbo ? " &middot; TURBO" : (sp.params || {}).fast ? " &middot; FAST" : ""}) seit ${hm(sp.running_s || 0)}${sp.resumed ? " &middot; nach Neustart fortgesetzt" : ""}${sp.pause_until ? ` &middot; <span class="warn">Tagesverlust-Limit: Pause bis ${time(sp.pause_until * 1000)}</span>` : ""} &middot; ${slots}<br>` :
       sp.active ? `<b style="color:#f59e0b">AUS</b> - keine neuen Trades, offene Positionen laufen mit Stop und Ziel weiter &middot; ${slots}<br>` :
       `<b>AUS</b>${sp.stop_reason ? " (" + sp.stop_reason + ")" : ""} &middot; `}
     ${sp.trades || 0} Abschluesse &middot; ${sp.wins || 0} im Plus (${q(sp.hit)}) &middot; brutto ${n4(sp.gross)} &middot; Gebuehren ${n4(-(sp.fees || 0))} &middot;
-    <b class="${(sp.net || 0) >= 0 ? "up" : "down"}">netto ${n4(sp.net)} USDT</b>
+    <b class="${(sp.net || 0) >= 0 ? "up" : "down"}">netto ${n4(sp.net)} USDT</b>${sp.open_risk ? ` &middot; Risiko offen ${n4(-sp.open_risk)}` : ""}
     ${(sp.last_trades || []).length ? `<div class="wrap"><table><tr><th>Markt</th><th>Richtung</th><th>Einstieg</th><th>Ausstieg</th><th>Grund</th><th>Dauer</th><th>netto</th></tr>
       ${sp.last_trades.map(t => `<tr><td>${t.symbol.split("/")[0]}</td><td class="${t.side === "long" ? "up" : "down"}">${t.side.toUpperCase()}</td><td>${px(t.entry)}</td><td>${px(t.exit)}</td><td>${t.why}</td><td>${t.secs >= 120 ? Math.round(t.secs / 60) + " min" : t.secs + " s"}</td><td class="${t.net >= 0 ? "up" : "down"}">${n4(t.net)}</td></tr>`).join("")}</table></div>` : ""}
     <details><summary class="sub">Ablauf</summary><div class="sub">${(sp.events || []).join("<br>")}</div></details></div>`);

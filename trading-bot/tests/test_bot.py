@@ -2709,3 +2709,167 @@ def test_leverage_is_verified_and_real_margin_shown():
          "info": {"marginSize": "30", "leverage": "20"}}]})()
     pos = ex.positions()["BTC/USDT:USDT"]
     assert pos["margin"] == 30 and pos["lev"] == 20 and pos["liq"] == 52000
+
+
+def test_autopilot_never_leaves_position_unprotected_and_never_buys_twice():
+    from bot.speed import PaperBroker
+
+    fc = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc)
+    calls = {"add": 0, "protect": 0}
+
+    class Flaky(PaperBroker):
+        fail = 1
+
+        def add(self, sym, side, qty):
+            calls["add"] += 1
+            return super().add(sym, side, qty)
+
+        def protect(self, sym, side, qty, sl, tp):
+            calls["protect"] += 1
+            if calls["protect"] <= self.fail:
+                raise RuntimeError("bitget 40xxx")
+            return super().protect(sym, side, qty, sl, tp)
+
+    ap.broker = Flaky(lambda s: ap.market[s], ap.p)
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    s["placed"] -= 3600                                   # Limit nicht gefuellt -> Markt-Einstieg
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "open" and s.get("unprotected") and calls["add"] == 1
+    assert "Stop nicht gesetzt" in ap.events[-1] or "Stop nicht gesetzt" in ap.events[-2]
+    ap.step("BTC/USDT:USDT")                              # neuer Versuch klappt
+    assert s["state"] == "open" and not s.get("unprotected") and calls["add"] == 1 and calls["protect"] == 2
+    # Stop laesst sich dauerhaft nicht setzen -> nach 60 s zur Sicherheit schliessen
+    ap2 = _ap(fc)
+    ap2.broker = Flaky(lambda s: ap2.market[s], ap2.p)
+    ap2.broker.fail = 99
+    ap2.step("BTC/USDT:USDT")
+    s2 = ap2.slots["BTC/USDT:USDT"]
+    s2["placed"] -= 3600
+    ap2.step("BTC/USDT:USDT")
+    s2["unprotected"] -= 61
+    ap2.step("BTC/USDT:USDT")
+    assert s2["state"] == "idle" and ap2.trades[-1]["why"].startswith("ohne Stop")
+
+
+def test_autopilot_session_survives_restart(tmp_path):
+    from bot.speed import SpeedTrader
+
+    lp = str(tmp_path / "sitzungen_live.jsonl")
+    fc = {"ok": True, "p_up": 0.5, "p_up_raw": 0.5, "band_pct": 0.5, "decision": "LONG"}
+    ap = _ap(fc, cfg={"log_path": lp})
+    ap.session.update(label="ECHTES KONTO")
+    ap.slots["BTC/USDT:USDT"].update(state="open", side=1, entry=100.0, qty=0.5, sl=99.5, tp=101.0, r0=0.5, best=100.2,
+                                     opened=time.time(), prot={"sl": 99.5, "tp": 101.0, "sl_id": "p1", "tp_id": "o2"})
+    ap.slots["ETH/USDT:USDT"] = {"state": "pending", "oid": "o9", "side": 1, "qty": 1, "price": 10, "sl": 9.9, "tp": 10.2}
+    ap._persist()
+    assert (tmp_path / "sitzung_ki_live.json").exists()
+
+    class B:
+        def __init__(self, size):
+            self.size, self.canceled = size, []
+
+        def _pos_size(self, sym, side):
+            return self.size
+
+        def cancel(self, sym, oid):
+            self.canceled.append(oid)
+
+    for size, state in ((0.5, "open"), (0.0, "idle")):
+        ap2 = SpeedTrader(lambda s: (_speed_df(120, 0.0), {}, {"last": 100.0, "bid": 99.99, "ask": 100.01}),
+                          {"loop_s": 0.05, "log_path": lp}, forecast_fn=lambda s: fc, kind="ki")
+        snap = ap2.saved_session(lp)
+        assert snap and snap["session"]["label"] == "ECHTES KONTO"
+        b = B(size)
+        msg = ap2.resume(snap, b)
+        assert "Neustart" in msg and ap2.active
+        assert ap2.slots["BTC/USDT:USDT"]["state"] == state and ap2.slots["ETH/USDT:USDT"]["state"] == "idle"
+        assert b.canceled == ["o9"]                       # wartende Limit-Order weg
+        assert ("inzwischen zu" in ap2.events[-1]) == (state == "idle")
+        ap2.stop(close=True)
+        ap2.thread.join(5)
+        assert not ap2.active
+        ap._persist()                                     # fuer den zweiten Durchlauf wieder hinlegen
+    ap.active = False
+    ap._persist()
+    assert not (tmp_path / "sitzung_ki_live.json").exists()   # beendete Sitzung wird nicht wiederbelebt
+
+
+def test_resume_sessions_only_with_matching_account(tmp_path):
+    from bot.dashboard import resume_sessions
+    from bot.speed import SpeedTrader
+
+    lp = str(tmp_path / "sitzungen_demo.jsonl")
+    fc = {"ok": True, "p_up": 0.5, "p_up_raw": 0.5, "band_pct": 0.5}
+    ap = _ap(fc, cfg={"log_path": lp})
+    ap.session.update(label="Testkonto")
+    ap.slots["BTC/USDT:USDT"].update(state="open", side=1, entry=100.0, qty=0.5, sl=99.5, tp=101.0, r0=0.5, best=100.0,
+                                     opened=time.time(), prot={"sl": 99.5, "tp": 101.0, "sl_id": "", "tp_id": ""})
+    ap._persist()
+
+    class Acc:
+        connected, demo = True, False                      # Echtkonto verbunden, Sitzung war Testkonto -> nicht
+
+        class client:
+            @staticmethod
+            def fetch_positions(syms):
+                return [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.5}]
+
+        def view(self):
+            return {}
+
+        def tickets(self):
+            return type("T", (), {"active": lambda self: []})()
+
+    data_fn = lambda s: (_speed_df(120, 0.0), {}, {"last": 100.0, "bid": 99.99, "ask": 100.01})  # noqa: E731
+    fresh = SpeedTrader(data_fn, {"loop_s": 0.05, "log_path": lp}, forecast_fn=lambda s: fc, kind="ki")
+    sp = SpeedTrader(data_fn, {"loop_s": 0.05, "log_path": lp})
+    bot = type("Bot", (), {"autopilot": fresh, "speed": sp, "cfg": {}, "state": {"meta": {}}})()
+    assert resume_sessions(bot, Acc()) == [] and not fresh.active
+    acc = Acc()
+    acc.demo = True
+    out = resume_sessions(bot, acc)
+    assert len(out) == 1 and fresh.active and fresh.slots["BTC/USDT:USDT"]["state"] == "open"
+    assert fresh.status()["resumed"]
+    fresh.stop(close=True)
+    fresh.thread.join(5)
+
+
+def test_autopilot_daily_loss_pauses_until_tomorrow_and_caps_total_risk():
+    import threading
+
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc, cfg={"max_loss_pct": 5.0, "loop_s": 0.01})
+    ap.trades = [{"net": -6.0, "gross": -5.9, "fees": 0.1, "time": int(time.time() * 1000), "symbol": "BTC/USDT:USDT",
+                  "why": "stop"}]
+    th = threading.Thread(target=ap._run, daemon=True)
+    th.start()
+    time.sleep(0.3)
+    assert ap.session.get("pause_until", 0) > time.time() and ap.active
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "idle" and "Tagesverlust" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    assert any("Tagesverlust-Limit" in e for e in ap.events) and ap.status()["pause_until"]
+    ap.session["close_now"] = True
+    th.join(5)
+    # Gesamt-Risiko: andere offene Position bindet schon 2,5 % -> neuer Trade mit 1 % ueberschreitet 3 %
+    ap = _ap(fc, cfg={"size_mode": "risk", "risk_pct": 1.0})
+    ap.slots["ETH/USDT:USDT"] = {"state": "open", "side": 1, "entry": 10.0, "qty": 25.0, "sl": 9.9, "tp": 10.3}
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "idle"
+    assert "Gesamt-Risiko" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    assert ap.status()["open_risk"] == pytest.approx(2.5)
+    # Ratenlimit / Netz -> Pause statt weiter hammern
+    assert ap._backoff(type("RateLimitExceeded", (Exception,), {})("x")) == 20.0
+    assert ap._backoff(Exception("HTTP 429 Too Many Requests")) == 20.0
+    assert ap._backoff(type("NetworkError", (Exception,), {})("x")) == 5.0
+    assert ap._backoff(ValueError("egal")) == 0.0
+
+
+def test_autopilot_locks_in_profit_after_fallback():
+    fc = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc, sd=_speed_df(120, 0.0), last=100.15)        # war bei +2 R, jetzt nur noch +0,3 R
+    s = ap.slots["BTC/USDT:USDT"]
+    s.update(state="open", side=1, entry=100.0, qty=0.5, sl=99.75, tp=101.5, r0=0.5, best=101.0,
+             opened=time.time(), h_min=30, prot={"sl": 99.75, "tp": 101.5})
+    ap.step("BTC/USDT:USDT")
+    assert s["state"] == "idle" and "Rueckfall" in ap.trades[-1]["why"] and ap.trades[-1]["net"] > 0

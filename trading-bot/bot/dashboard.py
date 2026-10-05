@@ -146,13 +146,49 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
                 pass
             if opts.get("size_mode") != "auto":        # bei "auto" setzt die KI den Hebel je Trade
                 apply_leverage(account.client, s, int(opts.get("leverage", sp.p["leverage"])), broker.mm)
-        equity = float((v.get("balance") or {}).get("free") or 0)
+        bal = v.get("balance") or {}
+        equity = float(bal.get("total") or bal.get("free") or 0)     # Limits auf das ganze Konto beziehen
+        opts["free"] = float(bal.get("free") or 0)
         label = "Testkonto" if account.demo else "ECHTES KONTO"
     else:
         broker = PaperBroker(lambda s: sp.market.get(s) or bot.speed_data(s)[2], sp.p)
         equity = float(bot.cfg.get("paper", {}).get("start_equity", 35))
         label = "Simulation"
     return sp.start(syms, broker, equity, label, free_fn=free if body.get("target") == "account" else None, **opts)
+
+
+def resume_sessions(bot, account) -> list[str]:
+    """Beim Start des Bots: auf Platte gespeicherte Konto-Sitzungen (KI-Autopilot, Speed) fortsetzen,
+    damit offene Positionen nach einem Neustart weiter gefuehrt werden."""
+    from .speed import BitgetBroker
+    out = []
+    for sp in (getattr(bot, "autopilot", None), getattr(bot, "speed", None)):
+        if sp is None:
+            continue
+        snap = sp.saved_session(sp.p.get("log_path"))
+        if not snap:
+            continue
+        label = (snap.get("session") or {}).get("label")
+        if label == "Simulation":
+            continue                      # Spielgeld-Stand ist nach dem Neustart weg
+        if not account or not account.connected or (label == "Testkonto") != account.demo:
+            log.warning("%s: gespeicherte Sitzung (%s) kann ohne passendes Konto nicht fortgesetzt werden", sp.name, label)
+            continue
+        other = bot.autopilot if sp is bot.speed else bot.speed
+
+        def free(sym, other=other):
+            if any(t["symbol"] == sym for t in account.tickets().active()):
+                return False
+            if sym in (getattr(bot, "state", None) or {}).get("meta", {}) or other.busy(sym):
+                return False
+            return True
+        try:
+            broker = BitgetBroker(account.client, sp.p, bot.cfg.get("margin_mode", "isolated"))
+            snap["session"]["resumed"] = True
+            out.append(sp.resume(snap, broker, free_fn=free))
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s: Sitzung nicht fortgesetzt: %s", sp.name, e)
+    return out
 
 
 def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
