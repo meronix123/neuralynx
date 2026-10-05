@@ -189,9 +189,18 @@ class Bot:
         prev_day_start = self.guard.s["day_start_equity"]
         if self.guard.update_day(equity, now) and prev_day_start:
             self._daily_report(prev_day_start, equity)
-        self.state["peak_equity"] = max(self.state["peak_equity"], equity)
-
         positions = self.ex.positions()
+        # Ein-/Auszahlung erkennen: Kontostand springt ohne offene Position und ohne geschlossenen Trade
+        # -> Hoechststand und Tagesstart mitverschieben, sonst gilt eine Auszahlung als "Verlust"
+        last = float(self.state.get("last_equity") or 0.0)
+        closing = any(sym not in positions for sym in self.state["meta"])
+        if last > 0 and not positions and not closing and abs(equity - last) > max(0.10 * last, 2.0):
+            delta = equity - last
+            self.state["peak_equity"] = max(0.0, self.state["peak_equity"] + delta)
+            self.guard.s["day_start_equity"] = max(0.0, self.guard.s["day_start_equity"] + delta)
+            log.info("Ein-/Auszahlung erkannt (%+.2f USDT) - Hoechststand und Tagesstart angepasst", delta)
+        self.state["last_equity"] = equity
+        self.state["peak_equity"] = max(self.state["peak_equity"], equity)
         if self.manual_close:
             self._do_manual_close(positions)
             positions = self.ex.positions()
@@ -283,6 +292,14 @@ class Bot:
             except Exception as e:  # noqa: BLE001
                 log.warning("%s manuell schliessen: %s", sym, e)
                 self.status["error"] = f"{sym} schliessen fehlgeschlagen: {e}"
+
+    def reset_peak(self) -> str:
+        """Hoechststand auf den aktuellen Kontostand setzen (nach Auszahlung / bewusstem Neustart)."""
+        eq = self.ex.equity()
+        self.state["peak_equity"] = eq
+        self.state["last_equity"] = eq
+        self.state.pop("dd_alarm", None)
+        return f"Hoechststand auf {eq:.2f} USDT gesetzt - Gesamtverlust-Sperre aufgehoben"
 
     def _global_block(self, equity: float, now: datetime) -> tuple[str, float]:
         """Gruende, warum gerade GAR KEIN neuer Trade eroeffnet wird ('' = alles frei)."""

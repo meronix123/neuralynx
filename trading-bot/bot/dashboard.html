@@ -345,6 +345,7 @@
         <label>mit <select id="sp-target"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
         <button class="btn" id="sp-start" onclick="sessionStart('sp')">Ein</button>
         <button class="btn" id="sp-stop" hidden onclick="sessionStop('sp', false)">Aus</button>
+        <button class="btn" id="sp-restart" hidden onclick="sessionRestart('sp')" title="Aus und sofort wieder Ein mit den Einstellungen oben">Neu starten</button>
         <button class="btn red" id="sp-close" hidden onclick="sessionStop('sp', true)">Aus + Positionen jetzt schliessen</button>
       </div>
       <div id="sp-status"></div>
@@ -370,6 +371,7 @@
         <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
         <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
         <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)">Aus</button>
+        <button class="btn" id="ap-restart" hidden onclick="sessionRestart('ap')" title="Aus und sofort wieder Ein mit den Einstellungen oben (Tempo, Groesse, Maerkte ...)">Neu starten mit diesen Einstellungen</button>
         <button class="btn red" id="ap-close" hidden onclick="sessionStop('ap', true)">Aus + Positionen jetzt schliessen</button>
       </div>
       <div id="ap-status"></div>
@@ -903,7 +905,7 @@ function render() {
     <div class="kpi"><span>Trades heute</span><b>${data.trades_today} / ${data.max_trades_per_day}</b></div>
     <div class="kpi"><span>Hebel</span><b>${data.leverage}x</b></div>
     <div class="kpi"><span>Fear &amp; Greed</span><b>${fg ? fg.value + " " + fg.label : "-"}</b></div>
-    <div class="kpi"><span>Neue Trades</span><b class="${data.block ? "warn" : "up"}">${data.block || "erlaubt"}</b></div>
+    <div class="kpi"><span>Neue Trades</span><b class="${data.block ? "warn" : "up"}">${data.block || "erlaubt"}</b>${(data.block || "").startsWith("Max. Gesamtverlust") ? ` <button class="btn sm" onclick="act('/api/bot/reset_peak', {}, 'Hoechststand auf den aktuellen Kontostand setzen? (nur nach Auszahlung oder bewusstem Neustart)')">Sperre aufheben</button>` : ""}</div>
     <div class="kpi"><span>Aktualisiert</span><b>${time(data.updated)}</b></div>
     <button class="btn onoff ${data.paused ? "off" : "on"}" onclick="act('/api/bot/pause', {on: ${!data.paused}}, ${data.paused ? "null" : "'Bot AUS? Er eroeffnet dann keine neuen Trades (offene Positionen behalten Stop/Ziel).'"})"><span></span>Bot ${data.paused ? "AUS" : "AN"}</button>
     <button class="btn red" onclick="act('/api/bot/close_all', {}, 'ALLE Positionen und Limit-Orders des Bots jetzt zum Marktpreis schliessen?')">Alle Bot-Positionen schliessen</button>`;
@@ -1404,6 +1406,7 @@ function renderSession(k) {
   const sp = sessFresh[k] && Date.now() - sessFresh[k].at < 4000 ? sessFresh[k].v : ((data || {})[SESS[k].key] || {});
   document.getElementById(k + "-start").hidden = !!sp.active;
   document.getElementById(k + "-stop").hidden = !sp.active || !!sp.stopping;
+  document.getElementById(k + "-restart").hidden = !sp.active || !!sp.stopping;
   document.getElementById(k + "-close").hidden = !sp.active;
   const syms = Object.keys((data || {}).symbols || {});
   if (syms.join() !== sessSymsKey[k]) {                  // Markt-Auswahl nur bei Aenderung neu bauen
@@ -1457,6 +1460,17 @@ async function sessionStop(k, close) {
   const ok = await act(SESS[k].api + "/stop", { close },
     close ? `${name} ausschalten und ALLE offenen Positionen dieser Sitzung JETZT zum Marktpreis schliessen?` : null);
   if (ok) { pollSession.until[k] = Date.now() + 10 * 60_000; pollSession(); }
+}
+async function sessionRestart(k) {
+  // Einstellungen (Tempo, Groesse ...) gelten erst fuer eine neue Sitzung: Aus, warten bis zu, dann Ein
+  const ok = await act(SESS[k].api + "/stop", { close: false });
+  if (!ok) return;
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try { const v = await (await fetch(SESS[k].api)).json(); data[SESS[k].key] = v; if (!v.active) break; } catch (e) { /* kurz nicht erreichbar */ }
+  }
+  if ((data[SESS[k].key] || {}).active) return toast("Noch Positionen offen - die Sitzung laeuft weiter, bis sie zu sind. Danach Ein druecken.", false);
+  await sessionStart(k);
 }
 async function sessionStart(k) {
   const syms = [...document.querySelectorAll(`.${k}-sym:checked`)].map(x => x.value);

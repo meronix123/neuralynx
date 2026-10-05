@@ -3006,3 +3006,38 @@ def test_ki_evaluates_running_candle_and_autopilot_enters_on_pullback_with_flow_
     ap = _ap({**fc2, "flow_now": {"taker": 0.3}})
     ap.step("BTC/USDT:USDT")
     assert ap.slots["BTC/USDT:USDT"]["state"] == "pending"
+
+
+def test_deposit_or_withdrawal_does_not_count_as_profit_or_loss(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = ["AAA/USDT:USDT"]
+    client = FakeClient(synthetic(600, 3))
+    ex = PaperExchange(cfg, client)
+    bot = engine.Bot(cfg, ex, FakeContext())
+    client.i = 400
+    bot.step()
+    eq0 = ex.equity()
+    assert bot.state["last_equity"] == eq0 and bot.state["peak_equity"] == eq0
+    ex.cash += 50.0                                                    # Einzahlung
+    client.i = 401
+    bot.step()
+    assert bot.state["peak_equity"] == pytest.approx(eq0 + 50.0)      # Hoechststand mitverschoben, kein "Gewinn"
+    assert bot.guard.s["day_start_equity"] == pytest.approx(bot.guard.s["day_start_equity"])  # bleibt konsistent
+    ex.cash -= 40.0                                                    # Auszahlung -> kein "Gesamtverlust"
+    client.i = 402
+    bot.step()
+    assert bot.state["peak_equity"] == pytest.approx(eq0 + 10.0)
+    assert bot.status["block"] != "Max. Gesamtverlust erreicht"
+    bot.state["peak_equity"] = 1000.0                                  # alter, falscher Hoechststand
+    client.i = 403
+    bot.step()
+    assert bot.status["block"] == "Max. Gesamtverlust erreicht"
+    msg = bot.reset_peak()
+    assert "aufgehoben" in msg and bot.state["peak_equity"] == pytest.approx(ex.equity())
+    client.i = 404
+    bot.step()
+    assert bot.status["block"] != "Max. Gesamtverlust erreicht"

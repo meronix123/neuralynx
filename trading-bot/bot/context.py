@@ -51,11 +51,14 @@ class MarketContext:
                 rows = self.http.get(CALENDAR_URL, timeout=15).json()
                 self.events = parse_calendar(rows, self.cfg["currencies"], self.cfg["impacts"])
                 self.cal_ok = True
+                self._cal_good = now
                 log.info("Wirtschaftskalender: %d wichtige Termine diese Woche", len(self.events))
             except Exception as e:  # noqa: BLE001
-                self.cal_ok = False
+                # Der Dienst erlaubt nur 2 Abrufe je 5 min: die letzte Kopie bleibt bis zu 24 h gueltig
+                fresh = self.events and now - getattr(self, "_cal_good", 0.0) < 86400
+                self.cal_ok = bool(fresh)
                 self._cal_at = now - 3300  # in 5 Minuten erneut versuchen
-                log.warning("Wirtschaftskalender nicht abrufbar: %s", e)
+                log.warning("Wirtschaftskalender nicht abrufbar: %s%s", e, " - alte Kopie bleibt" if fresh else "")
         if now - self._fng_at > 3600:
             self._fng_at = now
             try:

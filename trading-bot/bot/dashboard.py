@@ -193,6 +193,8 @@ def resume_sessions(bot, account) -> list[str]:
 
 def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     """Alle Knoepfe der Oberflaeche. Rueckgabe: Meldung fuer den Nutzer (Fehler -> Exception)."""
+    if path == "/api/bot/reset_peak":
+        return bot.reset_peak()
     if path == "/api/bot/pause":
         if body.get("on"):
             stop_file.write_text("Pause ueber die Oberflaeche\n", encoding="utf-8")
