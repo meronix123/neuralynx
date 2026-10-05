@@ -627,6 +627,19 @@ function updateListPrices() {
 
 // Order Blocks als Kaesten: vom Ursprungs-Kerze bis jetzt, Ober- bis Unterkante
 const obCanvas = document.getElementById("obcanvas");
+function scannerBlock() {
+  // Scanner-Maerkte des KI-Autopiloten (nicht im Bot-Kreis, nur Anzeige mit Stand)
+  const ap = (sessFresh.ap && Date.now() - sessFresh.ap.at < 4000 ? sessFresh.ap.v : (data || {}).autopilot) || {};
+  const extra = Object.entries(ap.slots || {}).filter(([s]) => !(data.symbols || {})[s]);
+  if (!ap.active || !extra.length) return "";
+  const q = v => v == null ? "" : Math.round(v * 100) + " %";
+  return `<div class="sub" style="margin-top:10px;font-weight:600">Scanner (KI-Autopilot)</div>` + extra.map(([s, v]) => {
+    const sig = v.signal && v.signal.votes ? v.signal.votes : {};
+    const st = v.state === "open" ? `<span class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"} @ ${px(v.entry)}</span>`
+      : v.state === "pending" ? "Limit wartet" : sig.wartet ? `wartet: ${sig.wartet}` : "sucht";
+    return `<div class="sym"><div class="top"><span>${s.split(":")[0]}</span><span class="sub">${sig.KI ? sig.KI + " " + q(sig.Sicherheit) : ""}</span></div><div class="sub">${st}</div></div>`;
+  }).join("");
+}
 let markerBars = [], markerTf = 60;
 function refreshMarkers() {
   // Einstiege/Ausstiege im Chart: KI-Autopilot (violett, mit Preis) und Bot (blau)
@@ -926,7 +939,7 @@ function render() {
     return `<div class="sym ${sym === selected ? "active" : ""}" onclick="selectSym('${sym}')">
       <div class="top"><span>${sym.split(":")[0]}</span>${tag}</div>
       <div class="sub"><span data-live="${sym}">${px(live[sym] ?? (s.market||{}).last ?? v.close)}</span> ${chg((s.market||{}).change_pct)} &middot; RSI ${v.rsi} &middot; ${s.reason}</div></div>`;
-  }).join(""));
+  }).join("") + scannerBlock());
 
   const s = data.symbols[selected];
   const tf = chartTf || data.timeframe;
