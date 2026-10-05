@@ -2873,3 +2873,24 @@ def test_autopilot_locks_in_profit_after_fallback():
              opened=time.time(), h_min=30, prot={"sl": 99.75, "tp": 101.5})
     ap.step("BTC/USDT:USDT")
     assert s["state"] == "idle" and "Rueckfall" in ap.trades[-1]["why"] and ap.trades[-1]["net"] > 0
+
+
+def test_ki_records_and_learns_live_values(tmp_path):
+    from bot.forecast import MIN_BOOK_BARS, CandleMemory, make_features
+
+    df = _fc_frame(1300, 0.0, 4)
+    mem = CandleMemory(tmp_path)
+    ts = df["ts"].astype("int64").to_numpy()
+    for i in range(1, len(df)):                       # wie im Betrieb: aufzeichnen, regelmaessig abspeichern
+        mem.record("BTC/USDT:USDT", int(ts[i - 1]), {"book_imb": 0.2, "oi": 1000.0 + (i % 7), "taker": 0.1, "basis": 2.5})
+        if i % 10 == 0:
+            mem.merge("BTC/USDT:USDT", df.iloc[:i + 1])
+    out = mem.merge("BTC/USDT:USDT", df)
+    assert out["oi"].notna().sum() >= MIN_BOOK_BARS and out["taker"].iloc[0] == 0.1 and out["basis"].iloc[0] == 2.5
+    again = CandleMemory(tmp_path).merge("BTC/USDT:USDT", df.iloc[-5:])   # bleibt auf Platte erhalten
+    assert again["oi"].notna().sum() >= MIN_BOOK_BARS
+    f = make_features(out)
+    for col in ("oi_chg", "oi_chg_d", "oi_x_r", "taker", "taker_6", "basis", "basis_chg", "book_imb"):
+        assert col in f.columns, col
+    assert f["basis"].iloc[-1] == pytest.approx(0.5) and abs(f["oi_chg"].dropna()).max() < 1
+    assert "oi_chg" not in make_features(df).columns                     # ohne Aufzeichnung keine Spalten

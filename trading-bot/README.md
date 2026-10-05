@@ -156,6 +156,12 @@ Groesse im Autopilot: `auto` (KI waehlt), `risk` (x % des Kontos Verlust bis Sto
 Kontos als Einsatz), `usdt` (fester Einsatz). Teilkauf = erst ein Teil, Rest nur nachkaufen, wenn die
 Position im Gewinn ist (nie im Verlust). Teilverkauf % = wie viel beim ersten Ziel verkauft wird.
 
+Live aufgezeichnet und gelernt (Bitget liefert das nicht rueckwirkend, die KI sammelt es selbst je Kerze):
+Orderbuch-Druck und -Waende, **Open Interest** (Positionsaufbau/-abbau, auch mit der Kursrichtung
+kombiniert: OI rauf + Kurs rauf = neue Longs, OI runter + Kurs rauf = Eindeckung), **Taker-Fluss**
+(aggressive Kaeufe minus Verkaeufe) und **Basis** (Mark- minus Indexpreis). Diese Merkmale greifen,
+sobald etwa 800 Kerzen (knapp 3 Tage) aufgezeichnet sind - der Ordner `data` muss dafuer erhalten bleiben.
+
 ## Kosten-Schutz (warum die KI nicht staendig handelt)
 
 Rechnung mit Bitget-Gebuehren (0,02 % Maker, 0,06 % Taker, dazu Schlupf beim Stop): Bei 1-5 min

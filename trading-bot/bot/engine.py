@@ -954,6 +954,7 @@ class Bot:
                 ohlcv_fn=base.ohlcv_fn, book_fn=base.book_fn, funding_fn=base.funding_fn, macro_fn=base.macro_fn,
                 leaders=base.leaders, tf="1m", step_min=1, horizons=[1, 2, 3, 5],
                 build_opts={"boost": False, "move_min": 0.05}, backfill_days=10, max_rows=12_000, name="ki1m")
+            self._turbo.live_fn = getattr(self, "_live_fn", None)
         with self.__dict__.setdefault("_turbo_lock", __import__("threading").Lock()):
             fc = self._turbo.get(sym)
         active, why = ki_active(fc, self.s)
@@ -976,12 +977,36 @@ class Bot:
                 self._macro_score(self.ex.symbols[0])        # laedt/teilt den Makro-Speicher des Bots
                 return self.__dict__.get("_macro_cache", (0, None))[1]
             eth = next((k for k in self.ex.symbols if k.startswith("ETH/")), None)
+
+            def live(s):
+                """Was Bitget nicht rueckwirkend liefert, zeichnet die KI selbst je Kerze auf:
+                Open Interest, Taker-Fluss (aggressive Kaeufe - Verkaeufe), Basis (Mark - Index in Bp)."""
+                from .flow import taker_flow
+                out = {}
+                try:
+                    oi = self.ex.c.fetch_open_interest(s)
+                    out["oi"] = float(oi.get("openInterestAmount") or oi.get("openInterestValue") or 0) or None
+                except Exception as e:  # noqa: BLE001 - optional
+                    log.debug("KI OI %s: %s", s, e)
+                try:
+                    out["taker"] = taker_flow(self.ex.c.fetch_trades(s, limit=100))
+                except Exception as e:  # noqa: BLE001
+                    log.debug("KI Taker %s: %s", s, e)
+                try:
+                    info = self.ex.c.fetch_ticker(s).get("info") or {}
+                    mark, index = float(info.get("markPrice") or 0), float(info.get("indexPrice") or 0)
+                    out["basis"] = (mark - index) / index * 1e4 if mark and index else None
+                except Exception as e:  # noqa: BLE001
+                    log.debug("KI Basis %s: %s", s, e)
+                return out
+            self._live_fn = live
             self._forecaster = Forecaster(
                 self._candles, ROOT / "data", self.cfg["mode"], leader, price,
                 ohlcv_fn=lambda s, tf, since, limit: self.ex.c.fetch_ohlcv(s, tf, since=since, limit=limit),
                 book_fn=lambda s: self.ex.c.fetch_order_book(s, 100),
                 funding_fn=lambda s: fetch_funding_history(self.ex.c, s, 75),
                 macro_fn=macro, leaders=[x for x in (leader, eth) if x])
+            self._forecaster.live_fn = live
         from .forecast import ki_active
         with self.__dict__.setdefault("_fc_lock", __import__("threading").Lock()):
             fc = self._forecaster.get(sym)

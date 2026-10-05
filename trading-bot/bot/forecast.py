@@ -144,6 +144,21 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
         if has.sum() >= MIN_BOOK_BARS:
             f["book_imb"] = df["book_imb"].astype(float).fillna(0.0) * 3
             f["book_has"] = has.astype(float)
+    # live aufgezeichnet: Open Interest (Positionsaufbau/-abbau), Taker-Fluss, Basis Mark-Index
+    if "oi" in df and df["oi"].notna().sum() >= MIN_BOOK_BARS:
+        oi = df["oi"].astype(float).ffill()
+        loi = np.log(oi.replace(0, np.nan))
+        f["oi_chg"] = ((loi - loi.shift(12)) * 100).where(df["oi"].notna())           # 1 h
+        f["oi_chg_d"] = ((loi - loi.shift(288)) * 100).where(df["oi"].notna())        # 1 Tag
+        f["oi_x_r"] = f["oi_chg"] * np.sign(f["r12"])          # OI rauf + Kurs rauf = neue Longs (Trend), sonst Eindeckung
+    if "taker" in df and df["taker"].notna().sum() >= MIN_BOOK_BARS:
+        tk = df["taker"].astype(float)
+        f["taker"] = tk.fillna(0.0) * 3
+        f["taker_6"] = tk.rolling(6, min_periods=2).mean().fillna(0.0) * 3
+    if "basis" in df and df["basis"].notna().sum() >= MIN_BOOK_BARS:
+        bs = df["basis"].astype(float)
+        f["basis"] = bs.ffill().fillna(0.0) / 5                                             # in 5-Bp-Schritten
+        f["basis_chg"] = (bs.ffill() - bs.ffill().shift(12)).fillna(0.0) / 5
     return f.replace([np.inf, -np.inf], np.nan).clip(-10, 10)
 
 
@@ -588,16 +603,22 @@ class CandleMemory:
         except OSError as e:
             log.debug("KI-Meta: %s", e)
 
-    def record_book(self, sym: str, bar_ts: int, imb: float | None, wall_bid: float | None, wall_ask: float | None):
-        """Orderbuch-Werte waehrend einer Kerze sammeln (Mittelwert wird beim Kerzenschluss gespeichert)."""
+    LIVE_COLS = ("book_imb", "wall_bid", "wall_ask", "oi", "taker", "basis")   # live je Kerze aufgezeichnet
+
+    def record(self, sym: str, bar_ts: int, values: dict) -> None:
+        """Live-Werte waehrend einer Kerze sammeln (Mittelwert wird beim Kerzenschluss gespeichert):
+        Orderbuch-Druck und -Waende, Open Interest, Taker-Fluss, Basis (Mark - Index)."""
         acc = self.book_acc.setdefault(sym, {})
-        x = acc.setdefault(int(bar_ts), [0.0, 0, 0.0, 0, 0.0, 0])
-        for i, v in ((0, imb), (2, wall_bid), (4, wall_ask)):
+        x = acc.setdefault(int(bar_ts), {})
+        for col, v in values.items():
             if v is not None and v == v:
-                x[i] += float(v)
-                x[i + 1] += 1
+                sm, n = x.get(col, (0.0, 0))
+                x[col] = (sm + float(v), n + 1)
         for t in [t for t in acc if t < bar_ts - 3_600_000]:
             del acc[t]
+
+    def record_book(self, sym: str, bar_ts: int, imb: float | None, wall_bid: float | None, wall_ask: float | None):
+        self.record(sym, bar_ts, {"book_imb": imb, "wall_bid": wall_bid, "wall_ask": wall_ask})
 
     def merge(self, sym: str, fresh: pd.DataFrame) -> pd.DataFrame:
         """Gespeicherte + frische Kerzen; die letzte (offene) Kerze bleibt am Ende, wird aber nicht gespeichert."""
@@ -610,8 +631,8 @@ class CandleMemory:
                 old = None
         closed = fresh.iloc[:-1].copy()
         acc = self.book_acc.get(sym, {})
-        for col, i in (("book_imb", 0), ("wall_bid", 2), ("wall_ask", 4)):
-            closed[col] = [acc[t][i] / acc[t][i + 1] if t in acc and acc[t][i + 1] else np.nan
+        for col in self.LIVE_COLS:
+            closed[col] = [acc[t][col][0] / acc[t][col][1] if t in acc and acc[t].get(col, (0, 0))[1] else np.nan
                            for t in closed["ts"].astype("int64")]
         if old is not None and len(old):
             # neue Kurse gewinnen, aufgezeichnete Orderbuch-Werte der alten Zeilen bleiben erhalten
@@ -716,17 +737,24 @@ class Forecaster:
         return val
 
     def _record_book(self, sym: str, bar_ts: int) -> None:
-        if not self.book_fn:
-            return
-        book = self._cached(f"book|{sym}", 10, lambda: self.book_fn(sym))
-        if not book or not book.get("bids") or not book.get("asks"):
-            return
-        from .flow import book_imbalance, book_walls
-        mid = (float(book["bids"][0][0]) + float(book["asks"][0][0])) / 2
-        w = book_walls(book)
-        wb = min((abs(mid - x["price"]) / mid * 100 for x in w.get("bids") or []), default=None)
-        wa = min((abs(x["price"] - mid) / mid * 100 for x in w.get("asks") or []), default=None)
-        self.memory.record_book(sym, bar_ts, book_imbalance(book), wb, wa)
+        """Live-Werte je Kerze aufzeichnen (alles, was Bitget nicht rueckwirkend liefert)."""
+        vals = {}
+        if self.book_fn:
+            book = self._cached(f"book|{sym}", 10, lambda: self.book_fn(sym))
+            if book and book.get("bids") and book.get("asks"):
+                from .flow import book_imbalance, book_walls
+                mid = (float(book["bids"][0][0]) + float(book["asks"][0][0])) / 2
+                w = book_walls(book)
+                vals["book_imb"] = book_imbalance(book)
+                vals["wall_bid"] = min((abs(mid - x["price"]) / mid * 100 for x in w.get("bids") or []), default=None)
+                vals["wall_ask"] = min((abs(x["price"] - mid) / mid * 100 for x in w.get("asks") or []), default=None)
+        live_fn = getattr(self, "live_fn", None)            # -> {"oi": ..., "taker": ..., "basis": ...}
+        if live_fn:
+            extra = self._cached(f"live|{sym}", 30, lambda: live_fn(sym))
+            if extra:
+                vals.update(extra)
+        if vals:
+            self.memory.record(sym, bar_ts, vals)
 
     def _candles(self, sym: str) -> pd.DataFrame:
         hit = self.fresh.get(sym)
