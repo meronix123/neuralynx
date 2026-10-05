@@ -195,7 +195,7 @@ Sicherheit und Dauerbetrieb:
 - Gesamt-Risiko: alle offenen Positionen zusammen hoechstens 3 % des Kontos am Stop (Krypto laeuft
   meist gemeinsam - sechs Longs sind EINE Wette)
 - Bitget-Ratenlimit oder Netzausfall: 20 s bzw. 5 s Pause statt Dauerfeuer (sonst IP-Sperre)
-- Hoechstens 2 KI-Trainings gleichzeitig; der Entscheidungs-Speicher haelt 20 000 geprueftе Prognosen
+- Hoechstens 2 KI-Trainings gleichzeitig; der Entscheidungs-Speicher haelt 20 000 gepruefte Prognosen
   und wird nie halb geschrieben
 
 Auf dem Bitget-Konto ist der Kosten-Schutz immer an, in der Simulation abschaltbar (zum Vergleichen).
