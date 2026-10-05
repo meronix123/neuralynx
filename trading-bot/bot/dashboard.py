@@ -396,6 +396,13 @@ def start_dashboard(bot, port: int, account=None, stop_file: Path | None = None,
                     self._json(200, bot.forecast(q.get("symbol", [""])[0]))
                 except Exception as e:  # noqa: BLE001
                     self._json(400, {"ok": False, "msg": str(e)})
+            elif self.path.startswith("/api/brain"):
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(self.path).query)
+                try:
+                    self._json(200, bot.brain(q.get("symbol", [""])[0]))
+                except Exception as e:  # noqa: BLE001
+                    self._json(400, {"ok": False, "msg": str(e)})
             elif self.path.startswith("/api/account"):
                 self._json(200, account.view() if account else {"connected": False, "error": "nicht verfuegbar"})
             elif self.path == "/favicon.ico":

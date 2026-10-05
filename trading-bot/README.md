@@ -268,6 +268,24 @@ ohne offene Position fallen raus, die fest eingestellten bleiben immer. Die Live
 Vorteil aus. Nicht alle ~500 Maerkte: Bitget erlaubt 20 Anfragen/s, und das Lernen muss hinterherkommen -
 10-20 zusaetzliche sind realistisch (bei mehr wird die Pruefrunde langsamer).
 
+## Supergehirn (alle Blickwinkel je Markt)
+
+Im KI-Autopilot-Feld unter dem Status: fuer den gewaehlten Markt werden alle Sichtweisen an einer Stelle
+zusammengefasst - KI 5 min (Richtung, Sicherheit, Live-Nachweis), Hebel-Speed-KI (wenn an), Ziel-vor-Stop
+(Long/Short erreichen 2 R vor dem Stop), Bot-Strategie auf 5 min (Marktlage, Signal, Punkte), Trend 1 h,
+Kerzenmuster, Bot auf der eingestellten Zeiteinheit, Zeitebenen, Makro - plus das, was der Autopilot daraus
+gerade macht (offen / wartet warum).
+
+**Wie die Zusammenfassung in die Trades kommt:** nicht per Hand-Abstimmung (so etwas sieht nach Weisheit aus,
+ist aber im Test nicht besser als die KI allein). Stattdessen bekommt die KI die Bot-Sicht als **Merkmale**:
+Marktlage (Trend auf/ab, Seitwaerts, Ruhephase, Chaos), Strategie-Signal mit Punktzahl (Ausbruch,
+Trend-Ruecksetzer, Rueckkehr zur Mitte), Trendfilter der hoeheren Zeiteinheit und Abstand zu den
+Ausbruchsmarken - fuer die 5-Minuten-KI mit 1-h-Trend, fuer die 1-Minuten-KI mit 15-min-Trend. So lernt die
+KI aus den Daten, WANN der Bot recht hat, und gewichtet das selbst (Merkmale `strat_*`, `reg_*`, `don_*`; alles
+kausal, Trendkerzen erst nach Schluss). Gehandelt wird weiter nur ueber den geprueften Pfad: Sicherheit,
+Live-Sperre, Orderfluss, Erwartungswert nach Kosten. Die Zahl "gelernte Bot-Merkmale" zeigt, ob die KI die
+neuen Merkmale schon im Modell hat (nach dem naechsten Training, spaetestens nach 5 min).
+
 ## Handelszeiten Gold/Silber
 
 Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in

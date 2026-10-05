@@ -1031,8 +1031,8 @@ class Bot:
                 self._candles, ROOT / "data", self.cfg["mode"], base.leader, base.price_fn,
                 ohlcv_fn=base.ohlcv_fn, book_fn=base.book_fn, funding_fn=base.funding_fn, macro_fn=base.macro_fn,
                 leaders=base.leaders, tf="1m", step_min=1, horizons=[1, 2, 3, 5],
-                build_opts={"boost": False, "move_min": 0.05}, backfill_days=10, max_rows=12_000, name="ki1m",
-                index_fn=base.index_fn, trades_fn=base.trades_fn)
+                build_opts={"boost": False, "move_min": 0.05, "strat": {"s": self.s, "tf": "1m", "trend_tf": "15m"}},
+                backfill_days=10, max_rows=12_000, name="ki1m", index_fn=base.index_fn, trades_fn=base.trades_fn)
             self._turbo.live_fn = getattr(self, "_live_fn", None)
         with self.__dict__.setdefault("_turbo_lock", __import__("threading").Lock()):
             fc = self._turbo.get(sym)
@@ -1086,13 +1086,120 @@ class Bot:
                 funding_fn=lambda s: fetch_funding_history(self.ex.c, s, 75),
                 macro_fn=macro, leaders=[x for x in (leader, eth) if x],
                 index_fn=lambda s, tf, since, limit: self.ex.c.fetch_index_ohlcv(s, tf, since=since, limit=limit),
-                trades_fn=lambda s: self.ex.c.fetch_trades(s, limit=200))
+                trades_fn=lambda s: self.ex.c.fetch_trades(s, limit=200),
+                # Supergehirn: die Bot-Strategie (Marktlage, Signale, Trendfilter) lernt die KI als Merkmale mit
+                build_opts={"strat": {"s": self.s, "tf": "5m", "trend_tf": "1h"}})
             self._forecaster.live_fn = live
         from .forecast import ki_active
         with self.__dict__.setdefault("_fc_lock", __import__("threading").Lock()):
             fc = self._forecaster.get(sym)
         active, why = ki_active(fc, self.s)
         return {**fc, "bot_uses": active, "bot_note": why}
+
+    def brain(self, sym: str) -> dict:
+        """Supergehirn: alle Sichtweisen auf einen Markt an einer Stelle - KI 5 min, Hebel-Speed-KI (falls an),
+        Ziel-vor-Stop-Modell, Bot-Strategie, Orderfluss, Kerzenmuster, Makro, Zeitebenen - plus das, was der
+        Autopilot daraus gerade macht. Die Entscheidung bleibt beim geprueften KI/EV-Pfad: die KI hat die
+        Bot-Sicht als Merkmale GELERNT (statt Meinungen per Hand zu verrechnen), der Autopilot handelt nur bei
+        positivem Erwartungswert nach Kosten."""
+        from .strategy import REGIMES, STRATEGY_NAMES, compute_signals, resample
+        pct = lambda p: f"{round(float(p) * 100)} %"  # noqa: E731
+        views, ki = [], self.forecast(sym)
+
+        def add(name, d, text, weight=1.0):
+            views.append({"name": name, "dir": int(d), "text": text, "weight": weight})
+        if ki.get("ok"):
+            live = ki.get("live") or {}
+            d = 1 if ki["decision"] == "LONG" else -1
+            if ki["confidence"] < 0.505:
+                d = 0
+            ltxt = f", live {pct(live['hit'])} von {live['n']}" if live.get("n") else ", live noch ohne Nachweis"
+            add("KI 5 min", d, f"{ki['decision']} {pct(ki['confidence'])} auf {ki['decision_min']} min"
+                + ("" if ki.get("useful") else " (noch keine klare Vorhersagekraft)") + ltxt)
+            tb = ki.get("tb") or {}
+            if tb.get("long") and tb.get("short"):
+                pl, ps, tp_r = float(tb["long"]["p"]), float(tb["short"]["p"]), float(tb.get("tp_r") or 2)
+                evl, evs = pl * tp_r - (1 - pl), ps * tp_r - (1 - ps)
+                best = 1 if evl >= evs else -1
+                add("Ziel vor Stop", best if max(evl, evs) > 0 else 0,
+                    f"Long {pct(pl)} / Short {pct(ps)} erreichen {tp_r:g} R vor dem Stop "
+                    f"(EV vor Kosten {max(evl, evs):+.2f} R)")
+            flow = (ki.get("flow_now") or {}).get("taker")
+            if flow is not None:
+                add("Orderfluss", 1 if flow > 0.3 else -1 if flow < -0.3 else 0,
+                    f"Taker {float(flow):+.2f} ({'Kaeufer' if flow > 0 else 'Verkaeufer'} aggressiver)", 0.5)
+        else:
+            add("KI 5 min", 0, ki.get("msg") or "noch keine Prognose")
+        turbo = None
+        if getattr(self, "_turbo", None) is not None and sym in self._turbo.fresh:
+            try:
+                turbo = self.forecast_turbo(sym)
+            except Exception as e:  # noqa: BLE001 - optional
+                log.debug("Supergehirn Turbo %s: %s", sym, e)
+            if turbo and turbo.get("ok"):
+                d = (1 if turbo["decision"] == "LONG" else -1) if turbo["confidence"] >= 0.505 else 0
+                add("Hebel-Speed-KI 1 min", d, f"{turbo['decision']} {pct(turbo['confidence'])} auf {turbo['decision_min']} min")
+        # Bot-Strategie auf den KI-Kerzen (5 min, Trend 1 h) - genau das, was die KI als Merkmale sieht
+        fc = getattr(self, "_forecaster", None)
+        fresh = fc.fresh.get(sym) if fc else None
+        strat = None
+        if fresh is not None and len(fresh[1]) > 300:
+            try:
+                df = fresh[1].tail(1500).reset_index(drop=True)
+                row = compute_signals(df, resample(df, "1h"), self.s, "5m", "1h").iloc[-2]
+                sig, reg = int(row["signal"]), str(row["regime"])
+                strat = {"regime": reg, "regime_text": REGIMES.get(reg, reg), "signal": sig,
+                         "strategy": STRATEGY_NAMES.get(str(row["strategy"]), ""), "score": int(row["score"]),
+                         "trend_1h": int(row["trend"])}
+                txt = REGIMES.get(reg, reg) + (f" - Signal {STRATEGY_NAMES.get(str(row['strategy']), '')} "
+                                               f"{'LONG' if sig > 0 else 'SHORT'} ({int(row['score'])}/6)" if sig else " - kein Signal")
+                add("Bot-Strategie 5 min", sig, txt)
+                add("Trend 1 h", int(row["trend"]), {1: "aufwaerts", -1: "abwaerts", 0: "seitwaerts"}[int(row["trend"])], 0.5)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Supergehirn Strategie %s: %s", sym, e)
+            try:
+                pat = pattern_explain(fresh[1].tail(400).reset_index(drop=True), 10, 300)
+                sc = float(pat.get("score") or 0)
+                add("Kerzenmuster", 1 if sc > 0.15 else -1 if sc < -0.15 else 0, f"{pat.get('verdict')} ({sc:+.2f})", 0.5)
+            except Exception as e:  # noqa: BLE001
+                log.debug("Supergehirn Muster %s: %s", sym, e)
+        st = ((self.status or {}).get("symbols") or {}).get(sym) or {}
+        snap = st.get("snapshot") or {}
+        if snap.get("regime"):
+            add(f"Bot {self.cfg['timeframe']}", 1 if snap.get("bias") == "long" else -1 if snap.get("bias") == "short" else 0,
+                f"{snap.get('regime_text')} - {snap.get('watching')}", 0.5)
+        if snap.get("mtf_score") is not None:
+            ms = float(snap["mtf_score"])
+            add("Zeitebenen", 1 if ms > 0.2 else -1 if ms < -0.2 else 0, f"Gesamtrichtung {ms:+.2f}", 0.5)
+        macro = snap.get("macro", None) if snap else None
+        if macro is None:
+            try:
+                macro = self._macro_score(sym)
+            except Exception:  # noqa: BLE001
+                macro = None
+        if macro is not None:
+            add("Makro", 1 if macro > 0.2 else -1 if macro < -0.2 else 0, f"Risiko-Ampel {float(macro):+.2f}", 0.5)
+        up = sum(v["weight"] for v in views if v["dir"] > 0)
+        dn = sum(v["weight"] for v in views if v["dir"] < 0)
+        ap = self.autopilot
+        slot = ap.slots.get(sym) or {}
+        votes = (slot.get("signal") or {}).get("votes") or {}
+        on = bool(ap.active and sym in (ap.session.get("symbols") or []))
+        if on and slot.get("side"):
+            act = f"Autopilot: {str(slot.get('side', '')).upper()} offen ({slot.get('state')})"
+        elif on:
+            act = "Autopilot: " + (votes.get("wartet") or f"KI {votes.get('KI', '?')} mit {pct(votes.get('Sicherheit') or 0.5)} Sicherheit - Einstieg wird vorbereitet")
+        else:
+            act = "Autopilot fuer diesen Markt nicht aktiv"
+        lean = "LONG" if up > dn else "SHORT" if dn > up else "unentschieden"
+        fazit = (f"{len(views)} Blickwinkel: {up:g} fuer Long, {dn:g} fuer Short -> Gesamtbild {lean}. "
+                 f"Entscheidung trifft die KI (sie hat alle Blickwinkel als Merkmale gelernt), "
+                 f"gehandelt wird nur bei positivem Erwartungswert nach Kosten.")
+        return {"symbol": sym, "views": views, "up": round(up, 1), "down": round(dn, 1), "lean": lean, "fazit": fazit,
+                "action": act, "autopilot_on": on, "strategy": strat,
+                "learned_views": sorted(x for x in ((fc.models.get(sym) or (0, {}))[1].get("feature_names") or [])
+                                        if x.startswith(("strat_", "reg_", "don_"))) if fc else [],
+                "ki_features": ki.get("features") if ki.get("ok") else None}
 
     def chart_data(self, sym: str, tf: str, bars: int = 300) -> dict:
         """Chart fuer die Oberflaeche in beliebiger Zeiteinheit: Kerzen, EMAs, VWAP, Order Blocks."""

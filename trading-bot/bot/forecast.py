@@ -43,8 +43,11 @@ GRID = [(0.5, 1500), (2.0, 1500), (2.0, 6000), (8.0, 6000), (8.0, 20000), (32.0,
 
 
 def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = None,
-                  macro: pd.DataFrame | None = None, gold: bool = False, step_min: int = None) -> pd.DataFrame:
-    """leader: DataFrame (BTC) oder {Name: DataFrame} (z. B. BTC und ETH); funding: Spalten ts, rate."""
+                  macro: pd.DataFrame | None = None, gold: bool = False, step_min: int = None,
+                  strat: dict | None = None) -> pd.DataFrame:
+    """leader: DataFrame (BTC) oder {Name: DataFrame} (z. B. BTC und ETH); funding: Spalten ts, rate;
+    strat: {"s": Strategie-Einstellungen, "tf": Zeiteinheit, "trend_tf": Trend-Zeiteinheit} - dann fliesst
+    die Sichtweise des Bots (Marktlage, Strategie-Signal, Trendfilter) als Merkmale mit ein (Supergehirn)."""
     """Merkmale je Kerze (nur Vergangenheit bis einschliesslich dieser Kerze)."""
     c, h, lo, o = (df[k].astype(float) for k in ("close", "high", "low", "open"))
     a = atr(df, 14).replace(0, np.nan)
@@ -177,7 +180,40 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
         q = df["q_taker"].astype(float)
         f["q_taker"] = q.fillna(0.0) * 3
         f["q_taker_h"] = q.ffill(limit=11).fillna(0.0) * 3                                  # letzte Marke, bis 1 h
+    if strat:                                                          # Supergehirn: Bot-Sicht als Merkmale
+        for name, val in _strategy_features(df, strat).items():
+            f[name] = val
     return f.replace([np.inf, -np.inf], np.nan).clip(-10, 10)
+
+
+STRAT_REGIMES = ("trend_up", "trend_down", "range", "squeeze", "chaos")
+
+
+def _strategy_features(df: pd.DataFrame, strat: dict) -> dict:
+    """Die Sichtweise des Bots je Kerze als KI-Merkmale: Marktlage (Trend/Seitwaerts/Ruhephase/Chaos),
+    Strategie-Signal (Ausbruch, Trend-Ruecksetzer, Rueckkehr zur Mitte) mit Punktzahl, Trendfilter der
+    hoeheren Zeiteinheit und Abstand zu den Ausbruchsmarken. Alles kausal (nur abgeschlossene Trendkerzen),
+    damit die KI lernt, WANN der Bot recht hat - statt die Meinungen per Hand zu verrechnen."""
+    from .strategy import compute_signals, resample
+    s, tf, ttf = strat.get("s") or {}, strat.get("tf", "5m"), strat.get("trend_tf", "1h")
+    if not s or len(df) < 200:
+        return {}
+    try:
+        base = df.reset_index(drop=True)
+        d = compute_signals(base, resample(base, ttf), s, tf, ttf)
+    except Exception as e:  # noqa: BLE001 - Zusatzmerkmale duerfen die KI nie verhindern
+        log.debug("Strategie-Merkmale: %s", e)
+        return {}
+    a = d["atr"].replace(0, np.nan)
+    out = {"strat_sig": d["signal"].astype(float).to_numpy(),
+           "strat_score": (d["score"].astype(float) / 6.0).to_numpy(),
+           "strat_trend": d["trend"].astype(float).to_numpy()}
+    for r in STRAT_REGIMES:
+        out[f"reg_{r}"] = (d["regime"] == r).astype(float).to_numpy()
+    if "don_hi" in d and "don_lo" in d:
+        out["don_up"] = ((d["don_hi"] - d["close"]) / a).clip(-10, 10).to_numpy()
+        out["don_dn"] = ((d["close"] - d["don_lo"]) / a).clip(-10, 10).to_numpy()
+    return out
 
 
 def _session_features(df: pd.DataFrame, t: pd.Series, gold: bool, step: int) -> dict:
@@ -496,7 +532,7 @@ def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 
 def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | None = None,
           funding: pd.DataFrame | None = None, macro: pd.DataFrame | None = None, gold: bool = False,
           boost: bool = True, keep_test: bool = False, move_min: float = 0.1, step_min: int = None,
-          horizons: list[int] | None = None) -> dict | None:
+          horizons: list[int] | None = None, strat: dict | None = None) -> dict | None:
     """Modell aus 5-Minuten-Kerzen (ts, open, high, low, close, volume; die letzte darf offen sein).
 
     Drei Abschnitte: Lernen (erste 70 %), Auswahl (naechste 10 %: Einstellungen + Mischung linear/Baeume),
@@ -508,7 +544,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         return None
     STEP = step_min or STEP_MIN
     HZ = list(horizons or HORIZONS)
-    feats = make_features(df, leader, funding, macro, gold, STEP)
+    feats = make_features(df, leader, funding, macro, gold, STEP, strat)
     X_all = feats.to_numpy(float)
     keep = ~np.isnan(X_all[:-1]).all(0)           # Merkmale ohne Daten weglassen
     names = [n for n, k in zip(feats.columns, keep) if k]
@@ -1233,7 +1269,8 @@ class Forecaster:
                         lead[ls.split("/")[0].lower()] = self.fresh[ls][1]
             funding = (self.cache.get(f"funding|{sym}") or (0, None))[1]
             macro = (self.cache.get("macro") or (0, None))[1]
-            feats = make_features(tail, lead, funding, macro, "XAU" in sym or "XAG" in sym, self.step)
+            feats = make_features(tail, lead, funding, macro, "XAU" in sym or "XAG" in sym, self.step,
+                                  self.build_opts.get("strat"))
             X = np.nan_to_num(feats.reindex(columns=m["names"]).to_numpy(float)[-1:], nan=0.0)
             by_h, probs, raws = [], [], []
             for h, (model, cap, cal_h) in m["dir"].items():

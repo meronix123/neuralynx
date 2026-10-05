@@ -3151,3 +3151,54 @@ def test_memory_keeps_data_across_gaps_and_fills_them(tmp_path):
     gappy = pd.concat([df.iloc[:1500], df.iloc[1700:]]).reset_index(drop=True)
     fc = build(gappy)
     assert fc is not None and fc["labeled"] < len(gappy) - 1 - 6
+
+
+def test_supergehirn_summarizes_all_views_and_ki_learns_bot_view(tmp_path, monkeypatch):
+    """Supergehirn: die Bot-Sicht (Marktlage, Signal, Trend, Ausbruchsmarken) ist KI-Merkmal (kausal),
+    und /api/brain fasst alle Blickwinkel je Markt zusammen - die Entscheidung bleibt beim KI/EV-Pfad."""
+    from bot.forecast import make_features
+
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    df = _fc_frame(1500, 0.3, 4)
+    st = {"s": {**CFG["strategy"], "trend_ema_fast": 20, "trend_ema_slow": 50}, "tf": "5m", "trend_tf": "1h"}
+    f = make_features(df, strat=st)
+    cols = ["strat_sig", "strat_score", "strat_trend", "reg_trend_up", "reg_trend_down", "reg_range", "reg_squeeze",
+            "reg_chaos", "don_up", "don_dn"]
+    assert all(c in f.columns for c in cols) and not any(c in make_features(df).columns for c in cols)
+    assert set(f["strat_sig"].dropna().unique()) <= {-1.0, 0.0, 1.0} and 0 <= f["strat_score"].max() <= 1
+    assert f[[c for c in cols if c.startswith("reg_")]].sum(axis=1).max() == 1 and f["reg_range"].sum() > 50
+    assert set(f["strat_trend"].dropna().unique()) == {-1.0, 0.0, 1.0}
+    f2 = make_features(df.iloc[:1200], strat=st)                       # kausal: spaetere Kerzen aendern nichts
+    assert (f.iloc[:1100][cols].fillna(-9).to_numpy() == f2.iloc[:1100][cols].fillna(-9).to_numpy()).all()
+
+    sym = "AAA/USDT:USDT"
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"] = [sym]
+    bot = engine.Bot(cfg, PaperExchange(cfg, FakeClient(synthetic(400, 3))), FakeContext())
+
+    class FakeForecaster:
+        fresh = {sym: (0.0, df)}
+        models = {sym: (0, {"feature_names": ["r1", "strat_sig", "reg_range"]})}
+    bot._forecaster = FakeForecaster()
+    bot.forecast = lambda s: {"ok": True, "decision": "LONG", "confidence": 0.58, "decision_min": 30, "useful": True,
+                              "live": {"n": 120, "hit": 0.55}, "flow_now": {"taker": 0.5},
+                              "tb": {"tp_r": 2.0, "long": {"p": 0.45}, "short": {"p": 0.25}}}
+    b = bot.brain(sym)
+    names = {v["name"] for v in b["views"]}
+    assert {"KI 5 min", "Ziel vor Stop", "Orderfluss", "Bot-Strategie 5 min", "Trend 1 h", "Kerzenmuster"} <= names
+    ki = next(v for v in b["views"] if v["name"] == "KI 5 min")
+    assert ki["dir"] == 1 and "58 %" in ki["text"] and "live 55 % von 120" in ki["text"]
+    assert next(v for v in b["views"] if v["name"] == "Ziel vor Stop")["dir"] == 1      # Long-EV 0,35 > Short-EV
+    assert b["lean"] == "LONG" and b["up"] > b["down"] and "nicht aktiv" in b["action"]
+    assert b["learned_views"] == ["reg_range", "strat_sig"] and "Erwartungswert" in b["fazit"]
+    bot.autopilot.active, bot.autopilot.session = True, {"symbols": [sym]}
+    bot.autopilot.slots[sym] = {"state": "idle", "signal": {"votes": {"KI": "LONG", "Sicherheit": 0.51, "wartet": "KI nur 51,0 % sicher - braucht 56 %"}}}
+    assert "KI nur 51,0 % sicher" in bot.brain(sym)["action"]
+    bot.autopilot.slots[sym] = {"state": "open", "side": "long"}
+    assert bot.brain(sym)["action"].startswith("Autopilot: LONG offen")
+    bot.forecast = lambda s: {"ok": False, "msg": "KI sammelt noch"}                 # ohne Prognose: ehrlich sagen
+    b = bot.brain(sym)
+    assert b["views"][0] == {"name": "KI 5 min", "dir": 0, "text": "KI sammelt noch", "weight": 1.0}

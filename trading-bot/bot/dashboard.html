@@ -376,6 +376,8 @@
         <button class="btn red" id="ap-close" hidden onclick="sessionStop('ap', true)">Aus + Positionen jetzt schliessen</button>
       </div>
       <div id="ap-status"></div>
+      <div class="speedhead" style="margin-top:10px"><b>&#129504; Supergehirn</b> <small class="sub">fasst fuer den gewaehlten Markt alle Blickwinkel zusammen: KI 5 min, Hebel-Speed-KI, Ziel-vor-Stop, Bot-Strategie, Orderfluss, Muster, Makro, Zeitebenen. Die KI hat die Bot-Sicht als Merkmale gelernt und entscheidet; gehandelt wird nur mit positivem Erwartungswert nach Kosten.</small></div>
+      <div id="brain"></div>
     </div>
     <h3>Was der Bot denkt</h3>
     <div id="think" class="think"></div>
@@ -1535,6 +1537,24 @@ async function pollForecast() {
 }
 setInterval(pollForecast, 10000);
 setTimeout(pollForecast, 1500);
+async function pollBrain() {
+  const sym = view === "acc" ? accSym : selected;
+  const el = document.getElementById("brain");
+  if (!el || !sym) return;
+  let b = null;
+  try { b = await (await fetch(`/api/brain?symbol=${encodeURIComponent(sym)}`)).json(); } catch (e) { return; }
+  if (!b || !b.views) { paint("brain", `<div class="sub">${b && b.msg ? b.msg : "Supergehirn rechnet ..."}</div>`); return; }
+  const arrow = d => d > 0 ? '<b class="up">&#9650; LONG</b>' : d < 0 ? '<b class="down">&#9660; SHORT</b>' : '<span class="sub">&#8212; neutral</span>';
+  const rows = b.views.map(v => `<tr><td>${v.name}</td><td>${arrow(v.dir)}</td><td class="sub">${v.text}</td></tr>`).join("");
+  const lean = b.lean === "LONG" ? "up" : b.lean === "SHORT" ? "down" : "";
+  const html = `<div class="sub" style="margin-bottom:4px">${sym}: <b class="${lean}">${b.lean}</b> (${String(b.up).replace(".", ",")} Long / ${String(b.down).replace(".", ",")} Short)</div>
+    <div class="wrap"><table><tr><th>Blickwinkel</th><th>Richtung</th><th>Details</th></tr>${rows}</table></div>
+    <div style="margin-top:4px"><b>${b.action}</b></div>
+    <div class="sub">${b.fazit}${b.learned_views && b.learned_views.length ? ` &middot; gelernte Bot-Merkmale: ${b.learned_views.length}${b.ki_features ? " von " + b.ki_features : ""}` : " &middot; Bot-Merkmale lernt die KI beim naechsten Training mit"}</div>`;
+  paint("brain", html);
+}
+setInterval(pollBrain, 10000);
+setTimeout(pollBrain, 2500);
 function ghostCandles(d, last, step) {
   // 1-Minuten-Pfad der KI -> Kerzen im Raster dieses Charts (ab der Kerze nach der aktuellen)
   const out = [], band = [];
