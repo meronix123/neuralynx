@@ -145,6 +145,32 @@ KI-Autopilot "Fast": Vorhersage 5-10 min, enge Stops/Ziele aus der 5-Minuten-Sch
 1,5 s - viele Trades, aber auch viele Gebuehren. Nur sinnvoll, wenn der KI-Bericht auf 5-10 min eine
 Trefferquote klar ueber 55 % zeigt.
 
+KI-Autopilot "Turbo" (Hebel-Speed-KI): eigenes 1-Minuten-Modell (lernt nur fuer 1-5 min voraus,
+eigener Speicher `data/ki1m`), Pruefung jede Sekunde, Stop aus der 1-Minuten-Schwankung. Mit
+Groesse "auto" bestimmt die KI Einsatz und Hebel selbst: Risiko je Trade waechst mit der Sicherheit,
+der Hebel wird so gewaehlt, dass der Liquidationspreis mindestens doppelt so weit weg ist wie der
+Stop, und nie ueber "max. Hebel". Hebel macht Trades nicht besser - er vergroessert nur Gewinn UND
+Verlust. Der KI-Bericht zeigt am Ende einen eigenen Abschnitt "TURBO-KI".
+
+Groesse im Autopilot: `auto` (KI waehlt), `risk` (x % des Kontos Verlust bis Stop), `pct` (x % des
+Kontos als Einsatz), `usdt` (fester Einsatz). Teilkauf = erst ein Teil, Rest nur nachkaufen, wenn die
+Position im Gewinn ist (nie im Verlust). Teilverkauf % = wie viel beim ersten Ziel verkauft wird.
+
+## Handelszeiten Gold/Silber
+
+Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in
+`config.yaml` unter `hours`). 30 min vor Schluss keine neuen Positionen, Speed/Autopilot schliessen
+Metall-Positionen kurz vor dem Wochenende. Die KI lernt nicht aus Kerzen, in denen der Markt still stand.
+
+## Handelsbericht
+
+```
+python run.py handelsbericht
+```
+Wertet alle Trades aus (Bitget-Verlauf und die Protokolle `data/sitzungen_*.jsonl`): Ergebnis je Markt,
+Richtung, Tageszeit, Haltedauer, Ausstiegsgrund und KI-Sicherheit, inkl. Gebuehren-Anteil. Markiert,
+wo dauerhaft Geld verloren geht.
+
 ## Vom Handy aus ansehen (Fernzugriff)
 
 1. Auf dem PC: `python run.py fernzugriff` - Passwort festlegen (mind. 10 Zeichen, wird nur als Hash gespeichert).

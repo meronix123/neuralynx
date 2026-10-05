@@ -42,7 +42,7 @@ GRID = [(0.5, 1500), (2.0, 1500), (2.0, 6000), (8.0, 6000), (8.0, 20000)]   # (L
 
 
 def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = None,
-                  macro: pd.DataFrame | None = None, gold: bool = False) -> pd.DataFrame:
+                  macro: pd.DataFrame | None = None, gold: bool = False, step_min: int = None) -> pd.DataFrame:
     """leader: DataFrame (BTC) oder {Name: DataFrame} (z. B. BTC und ETH); funding: Spalten ts, rate."""
     """Merkmale je Kerze (nur Vergangenheit bis einschliesslich dieser Kerze)."""
     c, h, lo, o = (df[k].astype(float) for k in ("close", "high", "low", "open"))
@@ -133,7 +133,8 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
                 f[f"{name}_{col}"] = np.where(okp, pg[col].to_numpy()[pc], 0.0)
     if macro is not None and len(macro):
         from .macro import merge_macro
-        bars = pd.DataFrame({"avail": df["ts"].astype("int64").to_numpy() + STEP_MIN * 60_000}, index=df.index)
+        bars = pd.DataFrame({"avail": df["ts"].astype("int64").to_numpy() + (step_min or STEP_MIN) * 60_000},
+                            index=df.index)
         f["macro"] = np.asarray(merge_macro(bars, macro, gold=gold), dtype=float)   # bekannt ab Kerzenschluss
     for col, name in (("wall_bid", "wall_bid"), ("wall_ask", "wall_ask")):          # Orderbuch-Waende (live)
         if col in df and df[col].notna().sum() >= MIN_BOOK_BARS:
@@ -288,7 +289,8 @@ def _local_cal(p_te: np.ndarray, yt: np.ndarray, p_now: float, h: int) -> tuple[
     return 0.5 + (shrunk - 0.5) * trust, z, k
 
 
-def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 0.56, 0.58, 0.60)) -> list[dict]:
+def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 0.56, 0.58, 0.60),
+              step_min: int = None) -> list[dict]:
     """Wie oft haette die KI an ungesehenen Daten mindestens X % Sicherheit gezeigt - und wie oft lag sie
     dann richtig? (Sicherheit je Meinungsstaerke wie live, aus den jeweils aehnlichsten Vorhersagen.)"""
     n = len(p_te)
@@ -308,7 +310,7 @@ def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 
     p_cal = 0.5 + (shrunk - 0.5) * trust
     conf = np.maximum(p_cal, 1 - p_cal)
     right = (p_cal >= 0.5) == (ys == 1)
-    days = n * STEP_MIN / 1440
+    days = n * (step_min or STEP_MIN) / 1440
     out = []
     for t in thresholds:
         sel = conf >= t
@@ -319,7 +321,8 @@ def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 
 
 def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | None = None,
           funding: pd.DataFrame | None = None, macro: pd.DataFrame | None = None, gold: bool = False,
-          boost: bool = True, keep_test: bool = False, move_min: float = 0.1) -> dict | None:
+          boost: bool = True, keep_test: bool = False, move_min: float = 0.1, step_min: int = None,
+          horizons: list[int] | None = None) -> dict | None:
     """Modell aus 5-Minuten-Kerzen (ts, open, high, low, close, volume; die letzte darf offen sein).
 
     Drei Abschnitte: Lernen (erste 70 %), Auswahl (naechste 10 %: Einstellungen + Mischung linear/Baeume),
@@ -329,7 +332,9 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     n_closed = len(df) - 1                        # offene Kerze nicht zum Lernen
     if n_closed < 300:
         return None
-    feats = make_features(df, leader, funding, macro, gold)
+    STEP = step_min or STEP_MIN
+    HZ = list(horizons or HORIZONS)
+    feats = make_features(df, leader, funding, macro, gold, STEP)
     X_all = feats.to_numpy(float)
     keep = ~np.isnan(X_all[:-1]).all(0)           # Merkmale ohne Daten weglassen
     names = [n for n, k in zip(feats.columns, keep) if k]
@@ -337,7 +342,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     lr = np.log(df["close"].astype(float).to_numpy())
     age = np.arange(len(df))[::-1].astype(float)
     warm = min(300, n_closed // 5)                 # die ersten Kerzen haben unvollstaendige Indikatoren
-    H = HORIZONS[-1]
+    H = HZ[-1]
     # Nur aus Bewegungen lernen, die nach Gebuehren zaehlen (|Bewegung| >= move_min %), und nie aus
     # Zeitraeumen, in denen der Markt still stand / geschlossen war (Gold/Silber nachts, Wochenende)
     from .hours import flat_mask
@@ -381,7 +386,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
 
     probs, raw, moves, quality = [], [], [], []
     test_keep: dict = {}
-    for h in HORIZONS:
+    for h in HZ:
         idx, ret, ret_alive = labeled(np.arange(warm, n_closed - h), h)
         if len(idx) < 200:
             return None
@@ -416,7 +421,7 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         p_loc, z_loc, _ = _local_cal(p_te, yt, p_now, h)
         if keep_test:
             test_keep[h] = (p_te.copy(), yt.copy())
-        quality.append({"min": h * STEP_MIN, "hit": round(hit, 3), "base": round(float(base), 3),
+        quality.append({"min": h * STEP, "hit": round(hit, 3), "base": round(float(base), 3),
                         "skill": round(1 - brier / brier0, 4) if brier0 > 0 else 0.0, "n_test": int(len(te_i)),
                         "trust": round(trust, 2), "z": round(z, 2),
                         "hit_top20": None if hit_top is None else round(hit_top, 3), "z_now": round(z_loc, 2)})
@@ -427,9 +432,9 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         moves.append((float(np.mean(np.abs(ret_alive[-2000:]))), float(np.std(ret_alive[-2000:]))))
     live = live or {}
     # Entscheidung auf der Vorhersagezeit, auf der die KI gerade nachweislich am staerksten ist
-    best = max(range(len(HORIZONS)), key=lambda i: abs(probs[i] - 0.5))
+    best = max(range(len(HZ)), key=lambda i: abs(probs[i] - 0.5))
     if abs(probs[best] - 0.5) < 1e-9:
-        best = len(HORIZONS) - 1
+        best = len(HZ) - 1
     p30, note = _calibrate(probs[best], live)
     lean = p30 if abs(p30 - 0.5) > 1e-9 else raw[best]     # ohne Vorsprung: Richtung des Rohmodells
     decision = "LONG" if lean >= 0.5 else "SHORT"
@@ -438,16 +443,16 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     # sagt die (kalibrierte) Sicherheit
     nodes = [(0, 0.0, 0.0)]
     sign = 1 if decision == "LONG" else -1
-    for h, p, (mabs, sd) in zip(HORIZONS, raw, moves):
-        nodes.append((h * STEP_MIN * 60, sign * abs(2 * p - 1) * mabs, sd * BAND_Z))
-    q30 = quality[-1]
+    for h, p, (mabs, sd) in zip(HZ, raw, moves):
+        nodes.append((h * STEP * 60, sign * abs(2 * p - 1) * mabs, sd * BAND_Z))
+    q30 = quality[best]                                     # Guete auf der Vorhersagezeit der Entscheidung
     useful = q30["z"] >= 2.0 and q30["skill"] > 0          # deutlich (2 Standardfehler) besser als Zufall
     rng = (df["high"] - df["low"]).astype(float).to_numpy()[-300:-1] / df["close"].astype(float).to_numpy()[-300:-1]
     return {
         "time": anchor_ts, "decision": decision,
         "confidence": round(max(p30, 1 - p30), 3), "p_up": round(p30, 3), "p_up_raw": round(raw[best], 3),
-        "decision_min": HORIZONS[best] * STEP_MIN,
-        "by_horizon": [{"min": h * STEP_MIN, "p_up": round(pp, 3)} for h, pp in zip(HORIZONS, probs)],
+        "decision_min": HZ[best] * STEP,
+        "by_horizon": [{"min": h * STEP, "p_up": round(pp, 3)} for h, pp in zip(HZ, probs)],
         "nodes": [{"sec": s_, "ret": round(r, 4), "band": round(b_, 4)} for s_, r, b_ in nodes],
         "change_pct": round(nodes[-1][1], 3), "band_pct": round(nodes[-1][2], 3),
         "candle_range_pct": round(float(np.median(rng)) * 100, 4),
@@ -455,9 +460,9 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         "quality": quality, "hit_30m": q30["hit"], "base_30m": q30["base"], "useful": bool(useful),
         "note": note, "trained_on": int(n_closed), "features": int(X_all.shape[1]), "feature_names": names,
         **({"test": test_keep} if keep_test else {}),
-        "move_min": move_min, "labeled": int(len(idx30)),
+        "move_min": move_min, "labeled": int(len(idx30)), "step_min": STEP, "horizons": HZ,
         "sr_up_pct": _sr_pct(feats, "m5_sr_up"), "sr_dn_pct": _sr_pct(feats, "m5_sr_dn"),
-        "model": {"l2": L2_, "half_life_days": round(HL_ * STEP_MIN / 1440, 1), "trees": mix,
+        "model": {"l2": L2_, "half_life_days": round(HL_ * STEP / 1440, 1), "trees": mix,
                   "kind": "linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume"},
     }
 
@@ -467,13 +472,15 @@ def path(fc: dict, price: float, now_s: int, seed: int) -> list[dict]:
     die KI recht hat - Richtung der Entscheidung, Groesse der typischen 30-Minuten-Bewegung dieses Markts,
     unterwegs Auf und Ab mit der echten Schwankung (Brownsche Bruecke, je 5-Minuten-Kerze gleich)."""
     start = fc["time"]
-    end = start + HORIZONS[-1] * STEP_MIN * 60
+    step = fc.get("step_min") or STEP_MIN
+    hz = fc.get("horizons") or HORIZONS
+    end = start + hz[-1] * step * 60
     sign = 1 if fc.get("decision") == "LONG" else -1
     target = sign * float(fc.get("typical_30_pct") or abs(fc["nodes"][-1]["ret"]))      # in %
-    sd_min = float(fc.get("sd_5m_pct") or 0.1) / math.sqrt(STEP_MIN)                      # Schwankung je Minute in %
+    sd_min = float(fc.get("sd_5m_pct") or 0.1) / math.sqrt(step)                           # Schwankung je Minute in %
     band_end = fc["nodes"][-1]["band"]
     rs = np.random.default_rng(seed)
-    n = HORIZONS[-1] * STEP_MIN                                                            # 30 Minuten-Schritte
+    n = hz[-1] * step                                                                      # Minuten-Schritte
     steps = rs.normal(0, sd_min, n)
     walk = np.r_[0.0, np.cumsum(steps)]
     tt = np.arange(n + 1) / n
@@ -510,7 +517,8 @@ class ForecastLog:
             return                                   # eine Entscheidung je Markt und 5-Minuten-Kerze
         self.items.append({"sym": sym, "time": fc["time"], "price": price, "decision": fc["decision"],
                            "conf": fc["confidence"], "band": fc["band_pct"], "actual": None,
-                           "p_raw": fc.get("p_up_raw"), "h_min": fc.get("decision_min", 30)})
+                           "p_raw": fc.get("p_up_raw"), "h_min": fc.get("decision_min", 30),
+                           "step": fc.get("step_min", STEP_MIN)})
         self.items = self.items[-self.keep:]
         self._save()
 
@@ -519,7 +527,8 @@ class ForecastLog:
         changed = False
         for x in self.items:
             if x["sym"] == sym and x["actual"] is None:
-                t = x["time"] + (HORIZONS[-1] - 1) * STEP_MIN * 60     # Kerze, die 30 min spaeter schliesst
+                step = x.get("step", STEP_MIN)
+                t = x["time"] + int(x.get("h_min") or HORIZONS[-1] * STEP_MIN) * 60 - step * 60   # schliesst nach h_min
                 if t in closes:
                     x["actual"] = closes[t]
                     changed = True
@@ -552,8 +561,8 @@ class CandleMemory:
     """Gedaechtnis: abgeschlossene 5-Minuten-Kerzen je Markt (waechst mit jeder Kerze) plus live
     aufgezeichnete Orderbuch-Werte je Kerze (Druck, Abstand zur naechsten Kauf-/Verkaufs-Wand)."""
 
-    def __init__(self, folder: Path | None):
-        self.folder = folder
+    def __init__(self, folder: Path | None, tf: str = "5m", step_min: int = STEP_MIN, max_rows: int = None):
+        self.folder, self.tf, self.step, self.max_rows = folder, tf, step_min, max_rows or MAX_HISTORY
         self.mem: dict[str, pd.DataFrame] = {}
         self.book_acc: dict[str, dict[int, list[float]]] = {}
         self.meta = {}
@@ -564,7 +573,7 @@ class CandleMemory:
                 self.meta = {}
 
     def _file(self, sym: str) -> Path | None:
-        return self.folder / f"kerzen_{sym.split(':')[0].replace('/', '')}_5m.csv" if self.folder else None
+        return self.folder / f"kerzen_{sym.split(':')[0].replace('/', '')}_{self.tf}.csv" if self.folder else None
 
     def save_meta(self) -> None:
         if self.folder is None:
@@ -605,7 +614,7 @@ class CandleMemory:
             allc = closed.set_index("ts").combine_first(old.set_index("ts")).reset_index()
         else:
             allc = closed
-        allc = allc.sort_values("ts").tail(MAX_HISTORY).reset_index(drop=True)
+        allc = allc.sort_values("ts").tail(self.max_rows).reset_index(drop=True)
         # nur lueckenlose Daten verwenden (nach laengerer Pause, > 2 h, beginnt das Gedaechtnis dort neu)
         gaps = np.where(np.diff(allc["ts"].to_numpy()) > 2 * 3_600_000)[0]
         if len(gaps):
@@ -636,12 +645,12 @@ class CandleMemory:
         rows, since = [], start
         end = int(have["ts"].iloc[0]) if have is not None and len(have) else ref
         while since < end:
-            batch = ohlcv_fn(sym, "5m", since, 200)
+            batch = ohlcv_fn(sym, self.tf, since, 200)
             if not batch:
-                since += 200 * STEP_MIN * 60_000
+                since += 200 * self.step * 60_000
                 continue
             rows += batch
-            nxt = batch[-1][0] + STEP_MIN * 60_000
+            nxt = batch[-1][0] + self.step * 60_000
             if nxt <= since:
                 break
             since = nxt
@@ -651,7 +660,7 @@ class CandleMemory:
         hist = hist.drop_duplicates("ts").sort_values("ts")
         base = self.mem.get(sym)
         allc = hist.set_index("ts").combine_first(base.set_index("ts")).reset_index() if base is not None else hist
-        allc = allc.sort_values("ts").tail(MAX_HISTORY).reset_index(drop=True)
+        allc = allc.sort_values("ts").tail(self.max_rows).reset_index(drop=True)
         self.mem[sym] = allc
         f = self._file(sym)
         if f is not None:
@@ -668,13 +677,17 @@ class Forecaster:
 
     def __init__(self, candles_fn, folder: Path | None = None, mode: str = "paper", leader: str | None = None,
                  price_fn=None, ohlcv_fn=None, book_fn=None, funding_fn=None, macro_fn=None,
-                 leaders: list[str] | None = None, background: bool = True):
+                 leaders: list[str] | None = None, background: bool = True, tf: str = "5m",
+                 step_min: int = STEP_MIN, horizons: list[int] | None = None, build_opts: dict | None = None,
+                 backfill_days: int = BACKFILL_DAYS, max_rows: int | None = None, name: str = "ki"):
         self.candles_fn, self.price_fn, self.leader = candles_fn, price_fn, leader
+        self.tf, self.step, self.horizons = tf, step_min, horizons or HORIZONS
+        self.build_opts, self.backfill_days, self.max_rows = build_opts or {}, backfill_days, max_rows
         self.ohlcv_fn, self.book_fn, self.funding_fn, self.macro_fn = ohlcv_fn, book_fn, funding_fn, macro_fn
         self.leaders = [x for x in (leaders or ([leader] if leader else [])) if x]
         self.background = background
-        self.memory = CandleMemory(folder / "ki" if folder else None)
-        self.log = ForecastLog(folder / f"ki_entscheidungen_{mode}.json" if folder else None)
+        self.memory = CandleMemory(folder / name if folder else None, tf, step_min, max_rows)
+        self.log = ForecastLog(folder / f"{name}_entscheidungen_{mode}.json" if folder else None)
         self.models: dict[str, tuple[int, dict]] = {}
         self.fresh: dict[str, tuple[float, pd.DataFrame]] = {}
         self.busy: set[str] = set()
@@ -712,7 +725,7 @@ class Forecaster:
         hit = self.fresh.get(sym)
         if hit and time.time() - hit[0] < 10:
             return hit[1]
-        raw = self.candles_fn(sym, "5m", 1000).reset_index(drop=True)
+        raw = self.candles_fn(sym, self.tf, 1000).reset_index(drop=True)
         self._record_book(sym, int(raw["ts"].iloc[-1]))
         if self.ohlcv_fn and sym not in self.filled:          # einmalig Vergangenheit nachladen
             self.filled.add(sym)
@@ -729,9 +742,9 @@ class Forecaster:
 
     def _backfill(self, sym: str, ref_ms: int | None = None) -> None:
         try:
-            n = self.memory.backfill(sym, self.ohlcv_fn, ref_ms=ref_ms)
+            n = self.memory.backfill(sym, self.ohlcv_fn, self.backfill_days, ref_ms=ref_ms)
             if n:
-                log.info("KI %s: %d Kerzen Vergangenheit nachgeladen (%d Tage)", sym, n, BACKFILL_DAYS)
+                log.info("KI %s %s: %d Kerzen Vergangenheit nachgeladen (%d Tage)", sym, self.tf, n, self.backfill_days)
                 self.fresh.pop(sym, None)
                 self.models.pop(sym, None)                    # mit mehr Daten neu lernen
         except Exception as e:  # noqa: BLE001
@@ -751,7 +764,8 @@ class Forecaster:
             macro = self._cached("macro", 6 * 3600, self.macro_fn) if self.macro_fn else None
             t0 = time.time()
             fc = build(df, lead, live=self.log.stats(sym), funding=funding, macro=macro,
-                       gold="XAU" in sym or "XAG" in sym)
+                       gold="XAU" in sym or "XAG" in sym, step_min=self.step, horizons=self.horizons,
+                       **self.build_opts)
             if fc:
                 fc["learn_s"] = round(time.time() - t0, 1)
                 self.log.add(sym, fc, float(df["close"].iloc[-1]))
@@ -816,12 +830,12 @@ class Forecaster:
                 pass
         now = int(time.time())
         seed = zlib.crc32(f"{sym}|{fc['time']}".encode())
-        start = min(max(now, fc["time"]), fc["time"] + STEP_MIN * 60 - 1)
+        start = min(max(now, fc["time"]), fc["time"] + self.step * 60 - 1)
         out = {k: v for k, v in fc.items() if k != "feature_names"}
         return {"symbol": sym, "ok": True, **out, "price": price, "now": now,
                 # Start innerhalb der aktuellen 5-Minuten-Kerze (robust gegen Uhr-Abweichungen)
                 "path": path(fc, price, start, seed), "live": self.log.stats(sym), "learning": info,
-                "relearning": sym in self.busy, "valid_until": fc["time"] + STEP_MIN * 60}
+                "relearning": sym in self.busy, "valid_until": fc["time"] + self.step * 60}
 
 
 def ki_active(fc: dict | None, s: dict) -> tuple[bool, str]:
@@ -851,19 +865,20 @@ def ki_blocks(side: str, fc: dict | None, s: dict) -> str:
     return ""
 
 
-def report(folder: Path, mode: str, symbols: list[str] | None = None) -> str:
+def report(folder: Path, mode: str, symbols: list[str] | None = None, name: str = "ki", step_min: int = STEP_MIN,
+           horizons: list[int] | None = None, build_opts: dict | None = None, title: str = "KI-BERICHT") -> str:
     """KI-Bericht aus den Daten auf diesem PC (python run.py ki-bericht)."""
     lines = []
     w = lines.append
-    lg = ForecastLog(folder / f"ki_entscheidungen_{mode}.json")
+    lg = ForecastLog(folder / f"{name}_entscheidungen_{mode}.json")
     meta = {}
     try:
-        meta = json.loads((folder / "ki" / "lernen.json").read_text(encoding="utf-8"))
+        meta = json.loads((folder / name / "lernen.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
     syms = symbols or sorted({x["sym"] for x in lg.items} | set(meta))
     pct = lambda v: "-" if v is None else f"{v * 100:.1f} %"
-    w(f"===== KI-BERICHT ({mode}) =====")
+    w(f"===== {title} ({mode}) =====")
     done_all = [x for x in lg.items if x["actual"] is not None and x["actual"] != x["price"]]
     w(f"Gepruefte Live-Entscheidungen insgesamt: {len(done_all)}")
     for sym in syms:
@@ -889,25 +904,26 @@ def report(folder: Path, mode: str, symbols: list[str] | None = None) -> str:
                 strong = sorted(raw, key=lambda t: -abs(t[1]["p_raw"] - 0.5))[:max(10, len(raw) // 5)]
                 okr = [(t[1]["actual"] > t[1]["price"]) == (t[1]["p_raw"] >= 0.5) for t in strong]
                 w(f"   Rohmeinung, staerkste 20 %: {len(strong)}x, Richtung richtig {pct(sum(okr) / len(okr))}")
-        f = folder / "ki" / f"kerzen_{sym.split(':')[0].replace('/', '')}_5m.csv"
+        tfn = "1m" if step_min == 1 else f"{step_min}m"
+        f = folder / name / f"kerzen_{sym.split(':')[0].replace('/', '')}_{tfn}.csv"
         if not f.exists():
             continue
         try:
             df = pd.read_csv(f)
             lead = {}
             for ls in ("BTC/USDT:USDT", "ETH/USDT:USDT"):
-                lf = folder / "ki" / f"kerzen_{ls.split(':')[0].replace('/', '')}_5m.csv"
+                lf = folder / name / f"kerzen_{ls.split(':')[0].replace('/', '')}_{tfn}.csv"
                 if ls != sym and lf.exists() and "XAU" not in sym and "XAG" not in sym:
                     lead[ls.split("/")[0].lower()] = pd.read_csv(lf)
             df = pd.concat([df, df.iloc[-1:]]).reset_index(drop=True)      # letzte Zeile als "offene" Kerze
-            fc = build(df, lead, keep_test=True)
+            fc = build(df, lead, keep_test=True, step_min=step_min, horizons=horizons, **(build_opts or {}))
         except Exception as e:  # noqa: BLE001
             w(f"Frischer Test nicht moeglich: {e}")
             continue
         if not fc:
             w("Zu wenig gespeicherte Kerzen fuer einen Test")
             continue
-        w(f"Frischer Test mit {fc['trained_on']} Kerzen ({fc['trained_on'] * STEP_MIN / 1440:.0f} Tage), "
+        w(f"Frischer Test mit {fc['trained_on']} Kerzen ({fc['trained_on'] * step_min / 1440:.0f} Tage), "
           f"{fc['features']} Merkmale, Modell {fc['model']['kind']}:")
         for q in fc["quality"]:
             w(f"   {q['min']:>2} min: Treffer {pct(q['hit'])} (Zufall {pct(q['base'])}), "
@@ -915,10 +931,10 @@ def report(folder: Path, mode: str, symbols: list[str] | None = None) -> str:
         best = max(fc["test"].items(), key=lambda kv: (kv[1][0] - 0.5).std())
         w("Autopilot haette (ungesehene Daten, beste Vorhersagezeit) eingestiegen:")
         for h, (p_te, yt) in sorted(fc["test"].items()):
-            sel = selective(p_te, yt, h)
+            sel = selective(p_te, yt, h, step_min=step_min)
             if not sel:
                 continue
-            w(f"   {h * STEP_MIN:>2} min: " + " | ".join(
+            w(f"   {h * step_min:>2} min: " + " | ".join(
                 f"ab {round(r['min_conf'] * 100)} %: {r['per_day']:.1f}/Tag, richtig {pct(r['hit'])}" for r in sel[1:]))
         _ = best
         w(f"Jetzt: {fc['decision']} mit {pct(fc['confidence'])} (auf {fc['decision_min']} min)")

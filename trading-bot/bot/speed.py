@@ -49,6 +49,9 @@ AUTO_DEFAULTS = {
     "gate_min_hit": 0.5,       # ... und Trefferquote darunter handelt der Autopilot dort nicht
 }
 FAST_AUTO = {"loop_s": 1.5, "entry_timeout_s": 20, "be_r": 0.5, "partial_r": 0.8, "trail_r": 0.7, "tp_r": 1.5}
+# Hebel-Speed-KI (Turbo): eigenes 1-Minuten-Modell, noch engere Stops, Pruefung jede Sekunde
+TURBO_AUTO = {"loop_s": 1.0, "entry_timeout_s": 15, "be_r": 0.5, "partial_r": 0.8, "trail_r": 0.6, "tp_r": 1.5,
+              "fast": True}
 TFS = {"1m": 1, "2m": 2, "3m": 3, "5m": 5}
 
 
@@ -317,7 +320,11 @@ class SpeedTrader:
             if not symbols:
                 raise ValueError("Mindestens einen Markt waehlen")
             p = {**self.p, **{k: v for k, v in opts.items() if v is not None}}
-            if self.kind == "ki" and p.get("fast"):
+            if self.kind == "ki" and p.get("turbo"):
+                p.update(TURBO_AUTO)
+                if getattr(self, "turbo_fn", None) is None:
+                    raise ValueError("Turbo-KI ist hier nicht verfuegbar")
+            elif self.kind == "ki" and p.get("fast"):
                 p.update(FAST_AUTO)
             minutes = int(p.get("minutes") or 0)              # 0 = laeuft, bis "Aus" gedrueckt wird
             if self.kind == "ki" and p.get("use_raw") and label != "Simulation":
@@ -332,7 +339,7 @@ class SpeedTrader:
             self.session = {"symbols": list(symbols), "start": now, "label": label, "stopping": False,
                             "end": now + minutes * 60 if minutes > 0 else float("inf"),
                             "equity0": equity, "params": {k: p.get(k) for k in ("minutes", "margin_usdt", "leverage",
-                                                                                 "aggressiveness", "min_conf", "use_raw", "fast",
+                                                                                 "aggressiveness", "min_conf", "use_raw", "fast", "turbo",
                                                                                  "size_mode", "size_pct", "risk_pct",
                                                                                  "scale_in", "partial_frac")}}
             self.slots = {s: {"state": "idle"} for s in symbols}
@@ -442,7 +449,8 @@ class SpeedTrader:
         if self.kind != "ki":
             side, _, votes = micro_signal(df, book, self.cur["aggressiveness"])
             return side, votes, None
-        fc = self.forecast_fn(sym) if self.forecast_fn else None
+        fn = getattr(self, "turbo_fn", None) if self.cur.get("turbo") else self.forecast_fn
+        fc = fn(sym) if fn else None
         if not fc or not fc.get("ok"):
             return 0, {"KI": (fc or {}).get("msg", "keine Prognose")}, None
         live = fc.get("live") or {}
@@ -451,7 +459,7 @@ class SpeedTrader:
             return 0, {"KI": f"Markt gesperrt: trifft live nur {round((live.get('hit') or 0) * 100)} % "
                              f"von {live['n']}"}, fc
         p_up = fc["p_up_raw"] if self.cur.get("use_raw") else fc["p_up"]
-        if self.cur.get("fast") and not self.cur.get("use_raw"):
+        if self.cur.get("fast") and not self.cur.get("turbo") and not self.cur.get("use_raw"):
             # Fast-Modus: die staerkste Prognose auf 5-10 Minuten
             short = [x for x in fc.get("by_horizon") or [] if x["min"] <= 10]
             if short:
@@ -465,7 +473,9 @@ class SpeedTrader:
         if self.kind != "ki" or not fc:
             return levels(df, price, side, p)
         fees = price * (p["maker"] + p["taker"])
-        if p.get("fast"):          # enge Stops aus der 5-Minuten-Schwankung
+        if p.get("turbo"):         # Turbo: Stop aus der 1-Minuten-Schwankung (x1,5), mind. 2x Gebuehren
+            r = max(price * float(fc.get("sd_5m_pct") or 0.05) / 100 * 1.5, price * 0.0005, 2 * fees)
+        elif p.get("fast"):        # enge Stops aus der 5-Minuten-Schwankung
             r = max(price * float(fc.get("sd_5m_pct") or 0.1) / 100, price * 0.0008, 2 * fees)
         else:
             r = max(price * fc["band_pct"] / 100 * p["sl_band"], price * 0.0015, 2 * fees)

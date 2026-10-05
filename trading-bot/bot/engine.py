@@ -79,6 +79,7 @@ class Bot:
         self.autopilot = SpeedTrader(self.speed_data, {**cfg.get("autopilot", {}), **fee_cfg,
                                                        "log_path": str(ROOT / "data" / f"sitzungen_{cfg['mode']}.jsonl")},
                                      forecast_fn=self.forecast, kind="ki")
+        self.autopilot.turbo_fn = self.forecast_turbo
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
         self.views: dict = {}
@@ -938,6 +939,24 @@ class Bot:
         df.loc[df.index[-1], "high"] = max(float(df["high"].iloc[-1]), last)
         df.loc[df.index[-1], "low"] = min(float(df["low"].iloc[-1]), last)
         return df, book, {"last": last, "bid": bid, "ask": ask}
+
+    def forecast_turbo(self, sym: str) -> dict:
+        """Hebel-Speed-KI: eigenes 1-Minuten-Modell (1, 2, 3, 5 min voraus), nur fuer sehr schnelles Handeln."""
+        from .forecast import Forecaster, ki_active
+        if getattr(self, "_turbo", None) is None:
+            base = self.__dict__.get("_forecaster")
+            if base is None:
+                self.forecast(sym)                      # gleiche Datenquellen wie die normale KI anlegen
+                base = self._forecaster
+            self._turbo = Forecaster(
+                self._candles, ROOT / "data", self.cfg["mode"], base.leader, base.price_fn,
+                ohlcv_fn=base.ohlcv_fn, book_fn=base.book_fn, funding_fn=base.funding_fn, macro_fn=base.macro_fn,
+                leaders=base.leaders, tf="1m", step_min=1, horizons=[1, 2, 3, 5],
+                build_opts={"boost": False, "move_min": 0.05}, backfill_days=10, max_rows=12_000, name="ki1m")
+        with self.__dict__.setdefault("_turbo_lock", __import__("threading").Lock()):
+            fc = self._turbo.get(sym)
+        active, why = ki_active(fc, self.s)
+        return {**fc, "bot_uses": active, "bot_note": why, "turbo": True}
 
     def forecast(self, sym: str) -> dict:
         """KI-Prognose der naechsten 30 Minuten fuer einen Markt (siehe forecast.py)."""

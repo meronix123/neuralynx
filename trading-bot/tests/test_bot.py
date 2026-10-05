@@ -2473,3 +2473,71 @@ def test_autopilot_scale_in_only_in_profit_gate_and_trade_log(tmp_path):
     bad = _ap({**fc, "live": {"n": 200, "hit": 0.44}})
     bad.step(sym)
     assert bad.slots[sym]["state"] == "idle" and "gesperrt" in bad.slots[sym]["signal"]["votes"]["KI"]
+
+
+def test_trade_report_finds_where_money_was_lost(tmp_path):
+    import json
+
+    from bot.tradereport import analyze, from_bitget, from_sessions
+
+    hist = [{"symbol": "BTC/USDT:USDT", "side": "long", "pnl": -0.05, "fees": -0.04, "funding": 0,
+             "opened_ms": 1_790_000_000_000 + i * 600_000, "closed_ms": 1_790_000_000_000 + i * 600_000 + 120_000}
+            for i in range(12)]
+    hist += [{"symbol": "ETH/USDT:USDT", "side": "short", "pnl": 0.08, "fees": -0.02, "funding": 0,
+              "opened_ms": 1_790_000_000_000, "closed_ms": 1_790_000_000_000 + 3_600_000} for _ in range(5)]
+    out = "\n".join(analyze(from_bitget(hist), "T"))
+    assert "17 Abschluesse" in out and "BTC/USDT" in out and "hier besser nicht handeln" in out
+    assert "Je Uhrzeit" in out and "-04 Uhr" in out or "Uhr" in out
+    (tmp_path / "s.jsonl").write_text(json.dumps({"symbol": "XAG/USDT:USDT", "side": "long", "net": 0.1, "fees": 0.01,
+                                                  "gross": 0.11, "time": 1_790_000_000_000, "secs": 30, "kind": "ki",
+                                                  "why": "ziel", "why_in": {"Sicherheit": 0.58}}) + "\n")
+    rows = from_sessions(tmp_path / "s.jsonl")
+    out2 = "\n".join(analyze(rows, "S"))
+    assert "Ausstiegsgrund" in out2 and "56-60 %" in out2
+
+
+def test_turbo_one_minute_model_and_autopilot(tmp_path):
+    from bot.forecast import Forecaster, ForecastLog
+    from bot.speed import PaperBroker, SpeedTrader
+
+    rng = np.random.default_rng(8)
+    n = 6000
+    r = np.zeros(n)
+    for i in range(1, n):
+        r[i] = 0.5 * r[i - 1] + rng.normal(0, 0.0008)
+    c = 100 * np.exp(np.cumsum(r))
+    full = pd.DataFrame({"ts": 1_700_000_000_000 + np.arange(n) * 60_000, "open": np.r_[c[0], c[:-1]],
+                         "high": c * 1.0003, "low": c * 0.9997, "close": c, "volume": 1000.0})
+    fx = Forecaster(lambda s, tf, lim: full.iloc[-lim:].reset_index(drop=True) if tf == "1m" else None,
+                    tmp_path, "paper", tf="1m", step_min=1, horizons=[1, 2, 3, 5],
+                    build_opts={"boost": False, "move_min": 0.05}, name="ki1m", background=False)
+    out = fx.get("BTC/USDT:USDT")
+    assert out["ok"] and out["step_min"] == 1 and [q["min"] for q in out["quality"]] == [1, 2, 3, 5]
+    assert out["useful"] and out["decision_min"] <= 5                       # Schwung auf 1 min wird erkannt
+    assert (tmp_path / "ki1m" / "kerzen_BTCUSDT_1m.csv").exists()
+    lg = ForecastLog(tmp_path / "l.json")
+    lg.add("X", {"time": 1_000_000, "decision": "LONG", "confidence": 0.6, "band_pct": 0.1, "decision_min": 3,
+                 "step_min": 1}, 100.0)
+    lg.resolve("X", pd.DataFrame({"ts": [(1_000_000 + 120) * 1000], "close": [100.2]}))   # nach 3 min geprueft
+    assert lg.stats("X")["n"] == 1
+    # Autopilot im Turbo-Modus nimmt das 1-Minuten-Modell und den engen Stop
+    fc = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.3, "sd_5m_pct": 0.2, "decision": "LONG"}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.0},
+                     forecast_fn=lambda s: {**fc, "p_up": 0.5}, kind="ki")
+    ap.turbo_fn = lambda s: fc
+    ap.start(["BTC/USDT:USDT"], PaperBroker(lambda s: ap.market[s], ap.p), 35.0, "Simulation",
+             turbo=True, size_mode="auto", risk_pct=1.0, leverage=25)
+    ap.stop(close=True)
+    ap.thread.join(5)
+    assert ap.cur["turbo"] and ap.cur["loop_s"] == 1.0
+    ap.cur["loop_s"] = 0.0
+    ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 35.0,
+                                   "label": "Simulation", "stopping": False}
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "pending" and s["side"] == 1                       # normale KI 50 % - Turbo 60 % zaehlt
+    assert 99.99 - s["sl"] == pytest.approx(0.3, rel=0.05)                  # 1,5 x 1-Minuten-Schwankung
+    assert 1 / s["lev"] >= 2 * (99.99 - s["sl"]) / 99.99                    # Liquidation weit hinter dem Stop

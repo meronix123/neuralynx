@@ -168,7 +168,7 @@ def signals(mode: str = "paper") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["backtest", "optimize", "diagnose", "ki-bericht", "report", "signale", "fernzugriff", "modus", "check", "bot"])
+    ap.add_argument("command", choices=["backtest", "optimize", "diagnose", "ki-bericht", "handelsbericht", "report", "signale", "fernzugriff", "modus", "check", "bot"])
     ap.add_argument("option", nargs="?", default="")
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--fast", action="store_true", help="Schnell-Modus (5m/15m/30m)")
@@ -198,11 +198,22 @@ def main() -> None:
         optimize_cli(cfg, args.days or (120 if args.fast else 365), fast=args.fast)
         return
 
+    if args.command == "handelsbericht":
+        from bot.account import Account
+        from bot.config import ROOT
+        from bot.tradereport import report as trade_report
+        acc = Account(cfg, cfg["symbols"])
+        print(trade_report(cfg, ROOT / "data", acc if acc.connected else None))
+        return
     if args.command == "ki-bericht":
         from bot.config import ROOT
         from bot.forecast import report as ki_report
         print("Werte die KI aus (frischer Test je Markt dauert etwas) ...")
         print(ki_report(ROOT / "data", cfg["mode"], None))
+        if (ROOT / "data" / "ki1m").exists():
+            print()
+            print(ki_report(ROOT / "data", cfg["mode"], None, name="ki1m", step_min=1, horizons=[1, 2, 3, 5],
+                            build_opts={"boost": False, "move_min": 0.05}, title="TURBO-KI (1-Minuten-Modell)"))
         return
     if args.command == "diagnose":
         from bot.optimize import diagnose_cli
