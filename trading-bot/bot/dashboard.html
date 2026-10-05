@@ -356,18 +356,18 @@
       <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, sichert Gewinne (nie mehr als die Haelfte zurueckgeben, ATR-Stop, RSI/Umkehrkerzen), verkauft einen Teil bei +1,5 R, steigt aus wenn die KI klar dreht oder die Prognosezeit vorbei ist</small></div>
       <div class="speedform">
         <span id="ap-syms"></span>
-        <label>Groesse <select id="ap-size" onchange="apSizeUnit()">
+        <label>Groesse <select id="ap-size" autocomplete="off" onchange="apSizeUnit()">
           <option value="auto" selected>KI entscheidet (Risiko/Hebel)</option><option value="risk">Risiko % je Trade</option>
           <option value="pct">% vom Konto</option><option value="usdt">fester Einsatz</option></select>
           <input id="ap-sizeval" value="1" style="width:52px"> <span id="ap-unit">% Risiko</span></label>
         <label>max. Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
         <label title="Erst einen Teil kaufen, den Rest nur im Gewinn nachkaufen - nie im Verlust"><input type="checkbox" id="ap-scale"> Teilkauf</label>
         <label>Teilverkauf bei +1,5 R <select id="ap-part"><option value="0">aus</option><option value="25">25 %</option><option value="50" selected>50 %</option><option value="75">75 %</option></select></label>
-        <label>Tempo <select id="ap-fast"><option value="0">normal (bis 30 min)</option><option value="1">Fast (5-10 min)</option><option value="2">Turbo: Hebel-Speed-KI (1-Minuten-Modell)</option></select></label>
+        <label>Tempo <select id="ap-fast" autocomplete="off"><option value="0">normal (bis 30 min)</option><option value="1">Fast (5-10 min)</option><option value="2">Turbo: Hebel-Speed-KI (1-Minuten-Modell)</option></select></label>
         <small class="sub" id="ap-tempo-note">Fast/Turbo: Stops so eng, dass die Gebuehren meist ueber 1 R kosten - handelt nur bei positivem Erwartungswert, auf dem Konto also selten. In der Simulation mit Kosten-Schutz aus siehst du alle Trades.</small>
-        <label>KI-Sicherheit ab <select id="ap-conf"><option value="53">53 %</option><option value="54">54 %</option><option value="55">55 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
-        <label>mit <select id="ap-target" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
-        <label id="ap-cost-l" title="Nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleiben kann (Erwartungswert nach Kosten, Stop mind. 4x die Kosten). Auf dem Konto abschaltbar - nur mit Bestaetigung OHNE SCHUTZ; Tagesverlust-Limit und Gesamt-Risiko bleiben."><input type="checkbox" id="ap-cost" checked> Kosten-Schutz</label>
+        <label>KI-Sicherheit ab <select id="ap-conf" autocomplete="off"><option value="53">53 %</option><option value="54">54 %</option><option value="55">55 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
+        <label>mit <select id="ap-target" autocomplete="off" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
+        <label id="ap-cost-l" title="Nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleiben kann (Erwartungswert nach Kosten, Stop mind. 4x die Kosten). Auf dem Konto abschaltbar - nur mit Bestaetigung OHNE SCHUTZ; Tagesverlust-Limit und Gesamt-Risiko bleiben."><input type="checkbox" id="ap-cost" checked autocomplete="off"> Kosten-Schutz</label>
         <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
         <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
         <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)">Aus</button>
@@ -1430,7 +1430,7 @@ function renderSession(k) {
     ? `<b class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"}</b>${v.lev ? " x" + v.lev : ""} @ ${px(v.entry)} &middot; Stop ${px(v.sl)}${v.added ? " &middot; nachgekauft" : ""}${v.partial ? " &middot; Teil verkauft" : ""}`
     : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : v.signal && v.signal.wartet ? `wartet (${v.signal.wartet})` : "sucht"}${sig(v)}`).join(" &middot; ");
   out(`<div class="sprun">
-    ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}${(sp.params || {}).turbo ? " &middot; TURBO" : (sp.params || {}).fast ? " &middot; FAST" : ""}) seit ${hm(sp.running_s || 0)}${sp.resumed ? " &middot; nach Neustart fortgesetzt" : ""}${sp.pause_until ? ` &middot; <span class="warn">Tagesverlust-Limit: Pause bis ${time(sp.pause_until * 1000)}</span>` : ""} &middot; ${slots}<br>` :
+    ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}${(sp.params || {}).turbo ? " &middot; <b class=\"warn\">TURBO (1-Minuten-Modell)</b>" : (sp.params || {}).fast ? " &middot; <b class=\"warn\">FAST</b>" : " &middot; Tempo normal"}) seit ${hm(sp.running_s || 0)}${sp.resumed ? " &middot; nach Neustart fortgesetzt" : ""}${sp.pause_until ? ` &middot; <span class="warn">Tagesverlust-Limit: Pause bis ${time(sp.pause_until * 1000)}</span>` : ""} &middot; ${slots}<br>` :
       sp.active ? `<b style="color:#f59e0b">AUS</b> - keine neuen Trades, offene Positionen laufen mit Stop und Ziel weiter &middot; ${slots}<br>` :
       `<b>AUS</b>${sp.stop_reason ? " (" + sp.stop_reason + ")" : ""} &middot; `}
     ${sp.trades || 0} Abschluesse &middot; ${sp.wins || 0} im Plus (${q(sp.hit)}) &middot; brutto ${n4(sp.gross)} &middot; Gebuehren ${n4(-(sp.fees || 0))} &middot;
