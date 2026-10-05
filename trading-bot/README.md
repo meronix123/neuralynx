@@ -286,6 +286,13 @@ kausal, Trendkerzen erst nach Schluss). Gehandelt wird weiter nur ueber den gepr
 Live-Sperre, Orderfluss, Erwartungswert nach Kosten. Die Zahl "gelernte Bot-Merkmale" zeigt, ob die KI die
 neuen Merkmale schon im Modell hat (nach dem naechsten Training, spaetestens nach 5 min).
 
+**Turbo mit Supergehirn:** im Turbo schauen beide KIs auf jeden Markt - das 1-Minuten-Modell und die
+5-Minuten-KI (viel mehr Geschichte, laufend innerhalb der Kerze bewertet) mit ihren kurzen Vorhersagezeiten
+bis 15 min. Es zaehlt die staerkere ehrliche (kalibrierte, gedeckelte) Sicherheit; sind beide klar uneins
+(mind. 53 % gegeneinander), wartet der Autopilot ("KI 1 min und KI 5 min uneins"). Jede Quelle bringt ihre
+eigene Live-Bilanz mit - ist das 1-Minuten-Modell auf einem Markt gesperrt, kann die 5-Minuten-KI dort
+trotzdem handeln, wenn sie sich live bewaehrt. Im Status steht, welche KI entschieden hat ("KI 5 min").
+
 ## Handelszeiten Gold/Silber
 
 Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in

@@ -3202,3 +3202,36 @@ def test_supergehirn_summarizes_all_views_and_ki_learns_bot_view(tmp_path, monke
     bot.forecast = lambda s: {"ok": False, "msg": "KI sammelt noch"}                 # ohne Prognose: ehrlich sagen
     b = bot.brain(sym)
     assert b["views"][0] == {"name": "KI 5 min", "dir": 0, "text": "KI sammelt noch", "weight": 1.0}
+
+
+def test_turbo_blends_one_minute_model_with_five_minute_ki():
+    """Turbo = Supergehirn: die staerkere ehrliche Sicherheit von 1-min-Modell und 5-min-KI (bis 15 min) zaehlt,
+    klare Uneinigkeit heisst warten; die 5-min-Quelle bringt ihre eigene Live-Bilanz mit."""
+    fc1 = {"ok": True, "p_up": 0.5, "p_up_raw": 0.5, "band_pct": 0.3, "sd_5m_pct": 0.2, "decision": "LONG", "decision_min": 3}
+    fc5 = {"ok": True, "p_up": 0.6, "p_up_raw": 0.6, "band_pct": 0.5, "sd_5m_pct": 0.3, "decision": "LONG", "decision_min": 30,
+           "by_horizon": [{"min": 5, "p_up": 0.52}, {"min": 10, "p_up": 0.58}, {"min": 15, "p_up": 0.55}, {"min": 30, "p_up": 0.6}],
+           "live": {"n": 300, "hit": 0.56}}
+    ap = _ap(fc5, cfg={"turbo": True, "fast": True, "cost_guard": False, "min_conf": 0.51})
+    ap.turbo_fn = lambda s: fc1
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "pending" and s["side"] == 1                                   # 1 min ohne Vorteil -> 5 min (10-min-Prognose 58 %)
+    assert s["signal"]["votes"]["KI"] == "LONG (KI 5 min)" and s["signal"]["votes"]["Sicherheit"] == 0.58
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    fc1.update(p_up=0.4, p_up_raw=0.4, decision="SHORT")                               # 1 min SHORT 60 % gegen 5 min LONG 58 %
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "idle" and s["signal"]["votes"]["wartet"].startswith("KI 1 min und KI 5 min uneins")
+    fc5["by_horizon"] = [{"min": 5, "p_up": 0.5}, {"min": 10, "p_up": 0.51}]            # 5 min fast neutral -> 1 min entscheidet
+    ap.step("BTC/USDT:USDT")
+    s = ap.slots["BTC/USDT:USDT"]
+    assert s["state"] == "pending" and s["side"] == -1 and s["signal"]["votes"]["KI"] == "SHORT (KI 1 min)"
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    fc1.update(ok=False, msg="KI rechnet")                                             # 1 min fehlt: 5 min allein
+    fc5["by_horizon"] = [{"min": 10, "p_up": 0.57}]
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "pending" and ap.slots["BTC/USDT:USDT"]["side"] == 1
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    fc5["live"] = {"n": 200, "hit": 0.45}                                               # 5-min-Quelle live gesperrt
+    ap.step("BTC/USDT:USDT")
+    assert "Markt gesperrt" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["KI"]

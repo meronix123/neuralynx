@@ -700,10 +700,14 @@ class SpeedTrader:
         if self.kind != "ki":
             side, _, votes = micro_signal(df, book, self.cur["aggressiveness"])
             return side, votes, None
-        fn = getattr(self, "turbo_fn", None) if self.cur.get("turbo") else self.forecast_fn
-        fc = fn(sym) if fn else None
+        if self.cur.get("turbo"):
+            fc = self._blend(sym)                   # Supergehirn: 1-Minuten-Modell + 5-Minuten-KI
+        else:
+            fc = self.forecast_fn(sym) if self.forecast_fn else None
         if not fc or not fc.get("ok"):
             return 0, {"KI": (fc or {}).get("msg", "keine Prognose")}, None
+        if fc.get("veto"):
+            return 0, {"KI": fc["decision"], "Sicherheit": fc["confidence"], "wartet": fc["veto"]}, fc
         live = fc.get("live") or {}
         if not self.cur.get("use_raw") and live.get("n", 0) >= self.cur.get("gate_min_n", 150) \
                 and (live.get("hit") or 0) < self.cur.get("gate_min_hit", 0.5):
@@ -718,7 +722,8 @@ class SpeedTrader:
                 best = max(short, key=lambda x: abs(x["p_up"] - 0.5))
                 p_up, h_min = best["p_up"], best["min"]
         conf = max(p_up, 1 - p_up)
-        votes = {"KI": "LONG" if p_up >= 0.5 else "SHORT", "Sicherheit": round(conf, 3)}
+        votes = {"KI": ("LONG" if p_up >= 0.5 else "SHORT") + (f" (KI {fc['source']})" if fc.get("source") else ""),
+                 "Sicherheit": round(conf, 3)}
         self._has_tb = bool((fc.get("tb") or {}).get("long"))
         need = self._need_conf(sym, h_min, live)
         if need is None:
@@ -762,6 +767,55 @@ class SpeedTrader:
                 side = 0
                 votes["wartet"] = f"Erwartungswert nach Kosten {ev:+.2f} R (Ziel vor Stop {round(p * 100)} %)"
         return side, votes, fc
+
+    BLEND_MAX_MIN = 15          # 5-Minuten-KI im Turbo: nur ihre kurzen Vorhersagezeiten (bis 15 min)
+    BLEND_VETO = 0.03           # beide KIs klar uneins (>= 53 % gegeneinander) -> warten
+
+    def _blend(self, sym) -> dict | None:
+        """Turbo = Supergehirn: das 1-Minuten-Modell UND die 5-Minuten-KI (mit viel mehr Geschichte, laufend
+        innerhalb der Kerze bewertet) schauen auf den Markt. Es zaehlt die staerkere ehrliche (kalibrierte,
+        gedeckelte) Sicherheit; sind beide klar uneins, wird gewartet. Jede Quelle bringt ihre eigene Live-
+        Bilanz und Kostenpruefung mit, so bleibt die Sperre je Quelle ehrlich."""
+        fn1, fn5 = getattr(self, "turbo_fn", None), self.forecast_fn
+        fc1 = fn1(sym) if fn1 else None
+        try:
+            fc5 = fn5(sym) if fn5 else None
+        except Exception as e:  # noqa: BLE001 - 5-Minuten-KI ist Zusatz
+            log.debug("Turbo-Blend %s: %s", sym, e)
+            fc5 = None
+        raw = self.cur.get("use_raw")
+
+        def pick(fc, max_min):
+            if not fc or not fc.get("ok"):
+                return None
+            p, h = float(fc["p_up_raw"] if raw else fc["p_up"]), fc.get("decision_min")
+            if max_min and not raw:
+                short = [x for x in fc.get("by_horizon") or [] if x["min"] <= max_min]
+                if short:
+                    best = max(short, key=lambda x: abs(x["p_up"] - 0.5))
+                    p, h = float(best["p_up"]), best["min"]
+                elif (h or 99) > max_min:
+                    return None
+            return abs(p - 0.5), p, h, fc
+        c1, c5 = pick(fc1, None), pick(fc5, self.BLEND_MAX_MIN)
+        cands = [c for c in (c1, c5) if c]
+        if not cands:
+            return fc1 or fc5
+        best = max(cands, key=lambda c: c[0])
+        src = "1 min" if best is c1 else "5 min"
+        out = dict(best[3])
+        out.update({"p_up": round(best[1], 3), "decision_min": best[2], "source": src,
+                    "decision": "LONG" if best[1] >= 0.5 else "SHORT", "confidence": round(max(best[1], 1 - best[1]), 3)})
+        if best[2] != best[3].get("decision_min"):
+            out["p_up_raw"] = out["p_up"]
+        if src == "5 min":
+            out["tb"] = {}                          # Ziel-vor-Stop der 5-min-KI passt nicht zum engen Turbo-Stop
+        other = next((c for c in cands if c is not best), None)
+        if other and other[0] >= self.BLEND_VETO and (other[1] - 0.5) * (best[1] - 0.5) < 0:
+            o_src = "5 min" if src == "1 min" else "1 min"
+            out["veto"] = (f"KI 1 min und KI 5 min uneins ({src}: {out['decision']} {round(out['confidence'] * 100)} %, "
+                           f"{o_src}: {'LONG' if other[1] >= 0.5 else 'SHORT'} {round(max(other[1], 1 - other[1]) * 100)} %)")
+        return out
 
     def _real(self) -> bool:
         return isinstance(self.broker, BitgetBroker)
