@@ -3398,6 +3398,7 @@ def test_grid_mode_units_take_profit_add_on_dips_and_net_stop():
     s = ap.slots[sym]
     assert s["state"] == "grid" and len(s["units"]) == 1 and s["qty"] * s["entry"] >= ap.cur["min_notional"]
     assert s["lev"] == 50 and s["sl"] < s["entry"] and "NETZ LONG" in ap.events[-1]
+    assert s["entry"] - s["sl"] == pytest.approx(s["entry"] * 0.7 / 50, rel=1e-6)     # vor der Liquidation (1 Einheit)
     feed["last"] = 99.75                                                    # 0,25 % gegen das Netz -> Einheit 2
     ap.step(sym)
     assert len(s["units"]) == 2 and s["entry"] < 100.0

@@ -1179,9 +1179,13 @@ class SpeedTrader:
         return qty
 
     def _grid_stop_price(self, sl) -> float:
+        """Netz-Stop: Verlust am Stop = Budget x Netz-Stop-%, aber nie weiter als 70 % des Wegs zur Liquidation
+        (bei 50x liegt die etwa 2 % entfernt) - sonst wuerde Bitget die Position vor dem Stop liquidieren."""
         p = self.cur
         budget_loss = float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100
-        return sl["entry"] - sl["side"] * budget_loss / max(sl["qty"], 1e-12)
+        dist = budget_loss / max(sl["qty"], 1e-12)
+        dist = min(dist, sl["entry"] * 0.7 / max(float(sl.get("lev") or p["leverage"]), 1))
+        return sl["entry"] - sl["side"] * dist
 
     def _grid_open(self, sym, sl, side, votes, fc, tick, now) -> None:
         """Erste Einheit (Hauptposition) zum Marktpreis; Netz-Stop auf Bitget fuer die ganze Menge."""
