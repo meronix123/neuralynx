@@ -3092,15 +3092,24 @@ def test_market_scanner_picks_liquid_markets_and_shows_new_listings(tmp_path, mo
         return {"swap": True, "quote": "USDT", "settle": "USDT", "info": {"launchTime": str(int(now_ms - age_days * 86_400_000))}}
     client.markets = {"AAA/USDT:USDT": mk("AAA", 400), "BIG/USDT:USDT": mk("BIG", 300), "MID/USDT:USDT": mk("MID", 200),
                       "WIDE/USDT:USDT": mk("WIDE", 100), "TINY/USDT:USDT": mk("TINY", 100), "NEW/USDT:USDT": mk("NEW", 1.2),
-                      "BABY/USDT:USDT": mk("BABY", 0.4), "SPOT/USDT": {"swap": False, "quote": "USDT"}}
+                      "BABY/USDT:USDT": mk("BABY", 0.4), "SPOT/USDT": {"swap": False, "quote": "USDT"},
+                      "MSTR/USDT:USDT": mk("MSTR", 100), "CL/USDT:USDT": {**mk("CL", 100), "info": {"symbolType": "stock"}}}
     client.load_markets = lambda *a, **k: client.markets
+    base_ohlcv = client.fetch_ohlcv
+
+    def ohlcv(sym, tf, limit=300, since=None):
+        if sym == "MSTR/USDT:USDT":                                # Aktien-Kontrakt: nachts/am Wochenende kein Umsatz
+            return [[i * 3_600_000, 1, 1, 1, 1, 5.0 if i % 24 < 7 else 0.0] for i in range(168)]
+        return base_ohlcv(sym, tf, limit=limit, since=since)
+    client.fetch_ohlcv = ohlcv
 
     def tickers(symbols=None, params=None):
         def t(bid, ask, vol):
             return {"bid": bid, "ask": ask, "last": (bid + ask) / 2, "quoteVolume": vol}
         return {"AAA/USDT:USDT": t(99.99, 100.01, 9e9), "BIG/USDT:USDT": t(99.99, 100.01, 5e9), "MID/USDT:USDT": t(99.99, 100.01, 1e9),
                 "WIDE/USDT:USDT": t(99.5, 100.5, 3e9), "TINY/USDT:USDT": t(99.99, 100.01, 1e6), "NEW/USDT:USDT": t(99.99, 100.01, 8e9),
-                "BABY/USDT:USDT": t(99.9, 100.1, 7e9), "SPOT/USDT": t(99.99, 100.01, 9e9)}
+                "BABY/USDT:USDT": t(99.9, 100.1, 7e9), "SPOT/USDT": t(99.99, 100.01, 9e9),
+                "MSTR/USDT:USDT": t(99.99, 100.01, 9e9), "CL/USDT:USDT": t(99.99, 100.01, 9e9)}
     client.fetch_tickers = tickers
     bot = engine.Bot(cfg, PaperExchange(cfg, client), FakeContext())
     r = bot.scan_markets(3)
@@ -3108,6 +3117,8 @@ def test_market_scanner_picks_liquid_markets_and_shows_new_listings(tmp_path, mo
     assert r["fresh_slots"] == ["NEW/USDT:USDT"]
     assert [x["symbol"] for x in r["new"]] == ["NEW/USDT:USDT", "BABY/USDT:USDT"]   # BABY (0,4 Tage): nur Anzeige
     assert r["top"][0]["volume"] == 5e9                                   # eigener Markt, Spot, zu weit, zu klein raus
+    assert not {"MSTR/USDT:USDT", "CL/USDT:USDT"} & {x["symbol"] for x in r["top"]}   # Aktie (Stillstand), Kennzeichnung
+    assert bot._rtc["MSTR/USDT:USDT"][1] is False and bot._rtc["BIG/USDT:USDT"][1] is True
     client.fetch_tickers = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
     assert bot.scan_markets(1)["symbols"] == ["NEW/USDT:USDT"]           # Zwischenspeicher, kein Absturz
     # Rotation in der Sitzung: neue Maerkte dazu, nicht mehr gelistete ohne Position raus, feste bleiben

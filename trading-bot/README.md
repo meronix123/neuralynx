@@ -268,6 +268,11 @@ ohne offene Position fallen raus, die fest eingestellten bleiben immer. Die Live
 Vorteil aus. Nicht alle ~500 Maerkte: Bitget erlaubt 20 Anfragen/s, und das Lernen muss hinterherkommen -
 10-20 zusaetzliche sind realistisch (bei mehr wird die Pruefrunde langsamer).
 
+**Nur echte Krypto-Maerkte (24/7):** Bitget listet auch Kontrakte auf Aktien, Rohstoffe und Indizes (MSTR, MU,
+SOXL, CL ...). Die haben Boersenzeiten - ausserhalb steht der Kurs, Stops greifen nicht, Spreads reissen auf.
+Der Scanner prueft je Markt die Kennzeichnung von Bitget und die letzten 7 Tage Stundenkerzen (mehr als 10 %
+Stunden ohne Umsatz = kein 24/7-Markt) und laesst solche Kontrakte weg.
+
 ## Supergehirn (alle Blickwinkel je Markt)
 
 Im KI-Autopilot-Feld unter dem Status: fuer den gewaehlten Markt werden alle Sichtweisen an einer Stelle

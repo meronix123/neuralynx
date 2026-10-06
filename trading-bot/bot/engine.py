@@ -989,6 +989,8 @@ class Bot:
                 vol = float(tk.get("quoteVolume") or 0)
                 if not (bid and ask and last) or vol < min_volume:
                     continue
+                if not self._round_the_clock(sym, m):          # Aktien-/Rohstoff-Kontrakte mit Boersenzeiten: nein
+                    continue
                 launch = (m.get("info") or {}).get("launchTime") or (m.get("info") or {}).get("listTime")
                 age = (now_ms - float(launch)) / 86_400_000 if launch else None
                 row = {"symbol": sym, "volume": round(vol), "spread": round((ask - bid) / last, 5), "age_days": None if age is None else round(age, 1)}
@@ -1004,6 +1006,36 @@ class Bot:
         fresh.sort(key=lambda r: -(r["age_days"] or 0))          # die mit den meisten Daten zuerst
         cache.update(at=time.time(), out={"top": rows[:30], "new": fresh[:10], "symbols": []})
         return pick(cache["out"])
+
+    RTC_WORDS = ("stock", "tradfi", "commodit", "index", "etf", "forex", "equity", "share")
+
+    def _round_the_clock(self, sym: str, m: dict) -> bool:
+        """Nur echte Krypto-Maerkte (rund um die Uhr): Bitget listet auch Kontrakte auf Aktien, Rohstoffe und
+        Indizes (MSTR, MU, SOXL, CL ...). Die haben Boersenzeiten - ausserhalb steht der Kurs, Stops greifen nicht,
+        Spreads reissen auf, und die KI lernt aus Stillstand. Erkennung: Kennzeichnung von Bitget (falls
+        vorhanden) und die letzten 7 Tage Stundenkerzen - mehr als 10 % Stunden ohne Umsatz = nicht 24/7.
+        Ergebnis wird je Markt 24 h gemerkt."""
+        cache = self.__dict__.setdefault("_rtc", {})
+        hit = cache.get(sym)
+        if hit and time.time() - hit[0] < 86_400:
+            return hit[1]
+        ok = True
+        for v in (m.get("info") or {}).values():
+            if isinstance(v, str) and any(w in v.lower() for w in self.RTC_WORDS):
+                ok = False
+        if ok:
+            try:
+                rows = self.ex.c.fetch_ohlcv(sym, "1h", limit=168)
+                if len(rows) >= 48:
+                    idle = sum(1 for r in rows if not float(r[5] or 0)) / len(rows)
+                    ok = idle <= 0.10
+            except Exception as e:  # noqa: BLE001 - ohne Daten lieber nicht aufnehmen
+                log.debug("Scanner 24/7-Pruefung %s: %s", sym, e)
+                ok = False
+        if not ok:
+            log.info("Markt-Scanner: %s uebersprungen (kein 24/7-Krypto-Markt)", sym)
+        cache[sym] = (time.time(), ok)
+        return ok
 
     def market_status(self, sym: str) -> str | None:
         """Status des Marktes laut Bitget ('normal', 'maintain', ...) - alle 10 min neu geladen. Vor und waehrend
