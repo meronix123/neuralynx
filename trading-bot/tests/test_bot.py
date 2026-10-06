@@ -3209,10 +3209,14 @@ def test_supergehirn_summarizes_all_views_and_ki_learns_bot_view(tmp_path, monke
     assert b["learned_views"] == ["reg_range", "strat_sig"] and "Erwartungswert" in b["fazit"]
     bot.autopilot.active, bot.autopilot.session = True, {"symbols": [sym]}
     bot.autopilot.slots[sym] = {"state": "idle", "signal": {"votes": {"KI": "LONG", "Sicherheit": 0.51, "wartet": "KI nur 51,0 % sicher - braucht 56 %"}}}
+    assert bot.brain(sym) is bot.brain(sym)                                          # 20 s Zwischenspeicher je Markt
+    bot._brain_cache.clear()
     assert "KI nur 51,0 % sicher" in bot.brain(sym)["action"]
     bot.autopilot.slots[sym] = {"state": "open", "side": "long"}
+    bot._brain_cache.clear()
     assert bot.brain(sym)["action"].startswith("Autopilot: LONG offen")
     bot.forecast = lambda s: {"ok": False, "msg": "KI sammelt noch"}                 # ohne Prognose: ehrlich sagen
+    bot._brain_cache.clear()
     b = bot.brain(sym)
     assert b["views"][0] == {"name": "KI 5 min", "dir": 0, "text": "KI sammelt noch", "weight": 1.0}
 
@@ -3377,7 +3381,8 @@ def test_grid_mode_units_take_profit_add_on_dips_and_net_stop():
     with pytest.raises(ValueError, match="gebuehren"):
         ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_take_pct=0.05, cost_guard=False)
     ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_unit_margin=0.1, grid_budget=0.3,
-             grid_step_pct=0.2, grid_take_pct=0.3, grid_max_loss_pct=50, min_conf=0.56, cost_guard=False, fast_entry=False)
+             grid_step_pct=0.2, grid_take_pct=0.3, grid_max_loss_pct=50, min_conf=0.56, cost_guard=False, fast_entry=False,
+             grid_limit=False)
     ap.stop(close=True)
     ap.thread.join(5)
     ap.cur["loop_s"] = 0.0
@@ -3435,3 +3440,76 @@ def test_grid_mode_units_take_profit_add_on_dips_and_net_stop():
     fc.update(p_up=0.62, p_up_raw=0.62, decision="LONG")
     ap.step(sym)
     assert s["state"] == "idle" and "Gesamt-Risiko" in s["signal"]["votes"]["wartet"]   # 5 USDT > 3 % von 87
+
+
+def test_grid_uses_supergehirn_and_does_not_sit_on_losses():
+    """Netz: Supergehirn klar dagegen -> kein Einstieg / kein Nachkauf / Trendwende; ohne Gewinn nach
+    grid_stale_x x Vorhersagezeit wird geschlossen. Normale KI-Einstiege bekommen dasselbe Veto."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 5}
+    brain = {"up": 0.5, "down": 2.5, "lean": "SHORT"}
+    ap = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 0.5, "min_conf": 0.56,
+                      "cost_guard": False, "min_notional": 5.0, "grid_limit": False, "grid_stale_x": 4.0})
+    ap.brain_fn = lambda s: brain
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    s = ap.slots[sym]
+    assert s["state"] == "idle" and s["signal"]["votes"]["wartet"].startswith("Supergehirn dagegen")
+    brain.update(up=2.0, down=1.5)                                          # nicht klar dagegen -> Einstieg
+    ap.step(sym)
+    assert s["state"] == "grid"
+    fc.update(p_up=0.49, p_up_raw=0.49, decision="SHORT")                   # KI neigt leicht dagegen ...
+    brain.update(up=0.5, down=2.5)                                          # ... und Supergehirn klar dagegen
+    ap.step(sym)
+    assert s["state"] == "idle" and "Supergehirn" in ap.trades[-1]["why"]
+    fc.update(p_up=0.62, p_up_raw=0.62, decision="LONG")
+    brain.update(up=2.0, down=0.5)
+    ap.step(sym)
+    assert s["state"] == "grid"
+    s["opened"] -= 21 * 60                                                  # 21 min > 4 x 5 min, kein Gewinn
+    ap.step(sym)
+    assert s["state"] == "idle" and ap.trades[-1]["why"].startswith("zu lange ohne Gewinn")
+    ap2 = _ap(fc, cfg={"min_conf": 0.56, "cost_guard": False})
+    ap2.brain_fn = lambda s_: {"up": 0.0, "down": 1.0}
+    ap2.step(sym)
+    assert ap2.slots[sym]["state"] == "idle" and "Supergehirn" in ap2.slots[sym]["signal"]["votes"]["wartet"]
+    ap2.cur["brain_veto"] = False
+    ap2.step(sym)
+    assert ap2.slots[sym]["state"] == "pending"
+
+
+def test_grid_limit_orders_use_maker_fees():
+    """Limit-Netz: Nachkauf und Mitnahme liegen als Maker-Orders; sie fuellen nur, wenn der Kurs durchlaeuft,
+    Gebuehren sind Maker; KI nicht mehr dafuer -> Nachkauf-Order weg; Schliessen storniert alles."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    feed = {"last": 100.0}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 0.3, "grid_step_pct": 0.5,
+                      "grid_take_pct": 1.0, "grid_max_loss_pct": 50, "min_conf": 0.56, "cost_guard": False, "min_notional": 5.0})
+    ap.data_fn = lambda s_: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01})
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    s = ap.slots[sym]
+    assert s["state"] == "grid" and len(s["units"]) == 1 and s["add"] and s["add"]["price"] == pytest.approx(s["entry"] * 0.995)
+    feed["last"] = 99.7                                                     # noch ueber der Nachkauf-Stufe (99,5)
+    ap.step(sym)
+    assert len(s["units"]) == 1
+    feed["last"] = 99.4                                                     # Stufe durchlaufen -> Einheit 2 (Maker)
+    ap.step(sym)
+    assert len(s["units"]) == 2 and s["units"][1]["maker_in"] and s["units"][1].get("take_oid")
+    assert s["add"] and s["add"]["price"] < s["units"][1]["entry"]           # naechste Stufe liegt schon
+    assert s["units"][0].get("take_oid") is None                            # Hauptposition ohne Mitnahme
+    feed["last"] = 100.3                                                    # Mitnahme Einheit 2 (99,5 x 1,01 = 100,5)? nein
+    ap.step(sym)
+    assert len(s["units"]) == 2
+    feed["last"] = 100.6
+    ap.step(sym)
+    assert len(s["units"]) == 1 and ap.trades[-1]["why"] == "Einheit im Gewinn verkauft"
+    t = ap.trades[-1]
+    assert t["fees"] == pytest.approx((t["entry"] + t["exit"]) * t["qty"] * ap.cur["maker"], abs=2e-6)   # beide Seiten Maker
+    fc.update(p_up=0.5, p_up_raw=0.5)                                       # KI nicht mehr dafuer -> kein Nachkauf
+    ap.step(sym)
+    assert s["add"] is None
+    fc.update(p_up=0.38, p_up_raw=0.38, decision="SHORT")                   # KI dreht: alles zu, keine offenen Orders
+    ap.step(sym)
+    assert s["state"] == "idle" and not ap.broker.open_orders(sym)

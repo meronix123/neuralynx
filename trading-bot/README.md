@@ -338,13 +338,28 @@ alle 15 Minuten im Hintergrund.
 
 Im KI-Autopilot: "Netz (Mini-Einheiten)". Statt einer Position handelt die KI-Richtung in vielen kleinen
 Einheiten: Einheit = Margin x Hebel (0,10 USDT x 50 = 5 USDT, die Bitget-Mindestposition). Die erste Einheit
-(Hauptposition) bleibt offen. Laeuft der Kurs um "Schritt" gegen das Netz, kommt bis zum Budget je Markt eine
-Einheit dazu. Einheiten im Gewinn (ab "Mitnahme", muss ueber den Hin- und Rueckgebuehren liegen) werden einzeln
+(Hauptposition) bleibt offen. Laeuft der Kurs um "Schritt" (0,6 %) gegen das Netz, kommt bis zum Budget je Markt
+eine Einheit dazu. Einheiten im Gewinn (ab "Mitnahme" 1,0 %, muss ueber den Gebuehren liegen) werden einzeln
 verkauft, Einheiten im Minus bleiben. Alles wird geschlossen, wenn der offene Verlust den **Netz-Stop** (% vom
 Budget, Stop liegt auch auf Bitget) erreicht oder eine **Trendwende** kommt: die KI neigt ab 53 % zur Gegenseite
 (unter der Einstiegs-Sicherheit, `grid_flip_conf`) oder der Kurs faellt unter die EMA-20/50-Kreuzung und die
 KI neigt dagegen. Dann schliesst die KI das ganze Netz samt Hauptposition - Verluste werden nicht ausgesessen.
 Auf dem Konto nur mit Bestaetigung NETZ.
+
+**Alle Gehirne:** Einstieg, Nachkauf und Ausstieg des Netzes fragen das Supergehirn (KI 5 min, Turbo,
+Ziel-vor-Stop, Bot-Strategie, Orderfluss, Muster, Makro, Zeitebenen): ist es klar gegen die Richtung
+(Gewicht >= 1), gibt es keinen Einstieg und keinen Nachkauf, und bei KI-Neigung dagegen wird geschlossen
+(`brain_veto`, gilt auch fuer normale KI-Einstiege). Ohne Gewinn wird das Netz nach `grid_stale_x` x
+Vorhersagezeit geschlossen - es sitzt nichts endlos aus. Nachkauf und Mitnahme liegen als **Limit-Orders
+(Maker)** auf Bitget (`grid_limit`), die Hauptposition kommt zum Marktpreis.
+
+**Simulation (Oktober 2026, synthetische 1-Minuten-Kurse mit Trend-/Seitwaerts-Phasen, 36.000 Minuten je
+Einstellung, KI-Stellvertreter mit 55 % bzw. 65 % Trefferquote, 5-USDT-Einheiten):** Schritt 0,6 % /
+Mitnahme 1,0 % / 12x Vorhersagezeit war die beste Einstellung und ist Voreinstellung. Ergebnis trotzdem:
+bei 55 % netto -14 USDT (Gebuehren 11), bei 65 % netto -6 USDT (brutto +4,5, Gebuehren 11). Der normale
+Turbo-Autopilot mit gleich grossen Einheiten lag bei -25 bzw. -19. Die Gebuehren der Markt-Schliessungen
+(KI dreht, Netz-Stop, zu lange ohne Gewinn) fressen den Vorteil - das Netz ist eine Wette darauf, dass
+die KI live deutlich ueber 65 % trifft. Lauf: `python tests/gridsim.py 0.55`.
 
 **Ehrliche Einordnung:** Auf Bitget verschmelzen alle Einheiten eines Marktes zu einer Position mit
 Durchschnittspreis - die Einheiten sind Buchfuehrung im Bot. Jede Einheit zahlt Gebuehren auf 5 USDT (rund

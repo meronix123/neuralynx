@@ -80,6 +80,7 @@ class Bot:
                                                        "log_path": str(ROOT / "data" / f"sitzungen_{cfg['mode']}.jsonl")},
                                      forecast_fn=self.forecast, kind="ki")
         self.autopilot.turbo_fn = self.forecast_turbo
+        self.autopilot.brain_fn = self.brain                 # Supergehirn: alle Blickwinkel fuer Einstieg/Ausstieg
         self.autopilot.status_fn = self.market_status
         self.last_flow: dict = {}               # Symbol -> (Zeit, Messwerte) fuer die Oberflaeche
         self.status: dict = {"symbols": {}}     # fuer die Oberflaeche
@@ -1152,6 +1153,15 @@ class Bot:
         Bot-Sicht als Merkmale GELERNT (statt Meinungen per Hand zu verrechnen), der Autopilot handelt nur bei
         positivem Erwartungswert nach Kosten."""
         from .strategy import REGIMES, STRATEGY_NAMES, compute_signals, resample
+        cache = self.__dict__.setdefault("_brain_cache", {})
+        hit = cache.get(sym)
+        if hit and time.time() - hit[0] < 20:                # Autopilot fragt je Markt jede Runde
+            return hit[1]
+        out = self._brain_views(sym, REGIMES, STRATEGY_NAMES, compute_signals, resample)
+        cache[sym] = (time.time(), out)
+        return out
+
+    def _brain_views(self, sym, REGIMES, STRATEGY_NAMES, compute_signals, resample) -> dict:
         pct = lambda p: f"{round(float(p) * 100)} %"  # noqa: E731
         views, ki = [], self.forecast(sym)
 

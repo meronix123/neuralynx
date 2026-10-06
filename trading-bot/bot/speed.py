@@ -59,11 +59,15 @@ AUTO_DEFAULTS = {
     "grid": False,
     "grid_unit_margin": 0.10,  # Margin je Einheit in USDT (Einheit = Margin x Hebel, mind. Mindestposition 5 USDT)
     "grid_budget": 10.0,       # Margin je Markt hoechstens (USDT)
-    "grid_step_pct": 0.2,      # naechste Einheit, wenn der Kurs um so viel Prozent gegen das Netz gelaufen ist
-    "grid_take_pct": 0.3,      # Einheit verkaufen ab so viel Prozent Gewinn (ueber den Hin- und Rueckgebuehren)
+    "grid_step_pct": 0.6,      # naechste Einheit, wenn der Kurs um so viel Prozent gegen das Netz gelaufen ist (Test: 0,6)
+    "grid_take_pct": 1.0,      # Einheit verkaufen ab so viel Prozent Gewinn (Test: 1,0; weite Stufen = weniger Gebuehren)
+    "grid_limit": True,        # Nachkauf und Mitnahme als Limit-Orders (Maker, 1/3 der Gebuehren) statt Marktpreis
     "grid_max_loss_pct": 50,   # Netz-Stop: ganzes Netz schliessen, wenn der offene Verlust so viel % des Budgets erreicht
     "grid_keep_base": True,    # die erste Einheit (Hauptposition) bleibt offen, bis die KI dreht oder der Netz-Stop greift
     "grid_flip_conf": 0.53,    # Trendwende: KI neigt ab dieser Sicherheit zur Gegenseite -> ganzes Netz schliessen
+    "grid_stale_x": 12.0,      # Netz ohne Gewinn nach 12 x Vorhersagezeit schliessen (nicht endlos aussitzen; Test: 12)
+    "brain_veto": True,        # Supergehirn: klar gegen die Richtung (Gewicht >= brain_margin) -> kein Einstieg / Netz zu
+    "brain_margin": 1.0,
     "fast_entry": True,        # Schnell-Einstieg: deutlich ueber der noetigen Sicherheit -> sofort zum Marktpreis
     "fast_entry_margin": 0.03, # ... ab noetige Sicherheit + 3 Prozentpunkte (Taker-Gebuehr wird mitgerechnet)
     "flow_confirm": 0.30,      # Einstieg nur, wenn der Taker-Fluss nicht KLAR dagegen laeuft (unter -0,30 = dagegen)
@@ -250,6 +254,32 @@ class PaperBroker:
     def protect_stop(self, sym, side, qty, sl):
         return {"sl": sl, "tp": None}
 
+    def place_exit(self, sym, side, qty, price):
+        """Reduzierende Limit-Order (Netz: Einheit im Gewinn verkaufen) - fuellt, wenn der Kurs durchlaeuft."""
+        oid = self._id()
+        self.orders[oid] = {"sym": sym, "side": side, "qty": qty, "price": price, "status": "open", "exit": True}
+        return oid
+
+    def _settle(self, sym):
+        last = self.market_fn(sym)["last"]
+        for o in self.orders.values():
+            if o["sym"] != sym or o["status"] != "open":
+                continue
+            if o.get("exit"):
+                if (o["side"] == 1 and last >= o["price"]) or (o["side"] == -1 and last <= o["price"]):
+                    o["status"] = "filled"
+            elif (o["side"] == 1 and last < o["price"]) or (o["side"] == -1 and last > o["price"]):
+                o["status"] = "filled"
+
+    def open_orders(self, sym):
+        self._settle(sym)
+        return {k for k, o in self.orders.items() if o["sym"] == sym and o["status"] == "open"}
+
+    def order_fill(self, sym, oid):
+        self._settle(sym)
+        o = self.orders[oid]
+        return o["status"], o["price"]
+
 
 class BitgetBroker:
     """Echtes Bitget-Konto (ccxt-Client mit mode_safe). Stop = an die Position gebundener Bitget-Stop."""
@@ -300,6 +330,29 @@ class BitgetBroker:
 
     def pos_size(self, sym, side):
         return self._pos_size(sym, side)
+
+    def place_exit(self, sym, side, qty, price):
+        """Reduzierende Limit-Order (Maker) fuer genau qty."""
+        o = self.c.create_order(sym, "limit", "sell" if side == 1 else "buy", qty,
+                                float(self.c.price_to_precision(sym, price)),
+                                {"reduceOnly": True, "marginMode": self.mm, "postOnly": True})
+        return str(o.get("id") or "")
+
+    def open_orders(self, sym):
+        """Offene Auftraege eines Marktes (eine Anfrage je Runde, hoechstens alle 2 s)."""
+        cache = self.__dict__.setdefault("_oo", {})
+        hit = cache.get(sym)
+        if hit and time.time() - hit[0] < 2:
+            return hit[1]
+        ids = {str(o.get("id")) for o in self.c.fetch_open_orders(sym)}
+        cache[sym] = (time.time(), ids)
+        return ids
+
+    def order_fill(self, sym, oid):
+        o = self.c.fetch_order(oid, sym)
+        st = o.get("status")
+        return ("filled" if st == "closed" else "canceled" if st in ("canceled", "rejected", "expired") else "open",
+                float(o.get("average") or o.get("price") or 0))
 
     def _pos_size(self, sym, side):
         want = "long" if side == 1 else "short"
@@ -972,6 +1025,10 @@ class SpeedTrader:
             if self.kind == "ki" and p.get("grid"):
                 self._grid_open(sym, sl, side, votes, fc, tick, now)
                 return
+            veto = self._brain_against(sym, side) if self.kind == "ki" else ""
+            if veto:
+                sl["signal"]["votes"] = {**votes, "wartet": veto}
+                return
             price = tick["bid"] if side == 1 else tick["ask"]
             stop, target = self._levels(df, price, side, fc)
             if stop is None:
@@ -1080,6 +1137,23 @@ class SpeedTrader:
             elif self.kind == "ki":
                 self._manage(sym, sl, tick, side, votes, df)
 
+    def _brain_against(self, sym, side) -> str:
+        """Supergehirn (alle Blickwinkel: KI 5 min, Turbo, Ziel-vor-Stop, Bot-Strategie, Orderfluss, Muster, Makro,
+        Zeitebenen) klar gegen diese Richtung? -> Grund, sonst ''."""
+        fn = getattr(self, "brain_fn", None)
+        if not fn or not self.cur.get("brain_veto", True) or side == 0:
+            return ""
+        try:
+            b = fn(sym)
+        except Exception as e:  # noqa: BLE001 - Supergehirn ist Zusatz
+            log.debug("Supergehirn %s: %s", sym, e)
+            return ""
+        up, dn = float(b.get("up") or 0), float(b.get("down") or 0)
+        against = (dn - up) if side == 1 else (up - dn)
+        if against >= float(self.cur.get("brain_margin", 1.0)):
+            return f"Supergehirn dagegen ({up:g} Long / {dn:g} Short)"
+        return ""
+
     # ------------------------------------------------------------------ Netz-Modus (Mini-Einheiten)
     def _grid_unit_qty(self, sym, price) -> float:
         p = self.cur
@@ -1097,6 +1171,10 @@ class SpeedTrader:
     def _grid_open(self, sym, sl, side, votes, fc, tick, now) -> None:
         """Erste Einheit (Hauptposition) zum Marktpreis; Netz-Stop auf Bitget fuer die ganze Menge."""
         p = self.cur
+        veto = self._brain_against(sym, side)
+        if veto:
+            sl["signal"]["votes"] = {**votes, "wartet": veto}
+            return
         price = tick["ask"] if side == 1 else tick["bid"]
         qty = self._grid_unit_qty(sym, price)
         if qty <= 0:
@@ -1123,11 +1201,56 @@ class SpeedTrader:
             sl["prot"] = {"sl": sl["sl"], "tp": None}
         self._event(f"{sym.split(':')[0]} NETZ {'LONG' if side == 1 else 'SHORT'}: Hauptposition @ {avg:.6g} x{lev} "
                     f"({qty:g}, Netz-Stop {sl['sl']:.6g})")
+        if p.get("grid_limit", True):
+            self._grid_place_add(sym, sl, avg)
 
-    def _grid_book(self, sym, sl, unit, px, why) -> None:
+    def _grid_place_add(self, sym, sl, ref) -> None:
+        """Naechste Einheit als Limit-Order eine Stufe gegen das Netz legen (Maker)."""
+        p = self.cur
+        d = sl["side"]
+        used = sum(u["entry"] * u["qty"] for u in sl["units"]) / max(sl["lev"], 1)
+        if used + float(p["grid_unit_margin"]) > float(p["grid_budget"]) * 1.05 or sl.get("add"):
+            return
+        price = ref * (1 - d * float(p["grid_step_pct"]) / 100)
+        qty = self._grid_unit_qty(sym, price)
+        if qty <= 0:
+            return
+        try:
+            oid = self.broker.place_entry(sym, d, qty, price)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Netz-Nachkauf %s nicht gelegt: %s", sym, e)
+            return
+        sl["add"] = {"oid": oid, "price": price, "qty": qty}
+
+    def _grid_place_take(self, sym, sl, unit) -> None:
+        """Mitnahme einer Einheit als reduzierende Limit-Order (Maker)."""
+        d = sl["side"]
+        price = unit["entry"] * (1 + d * float(self.cur["grid_take_pct"]) / 100)
+        try:
+            unit["take_oid"], unit["take_px"] = self.broker.place_exit(sym, d, unit["qty"], price), price
+        except Exception as e:  # noqa: BLE001
+            log.warning("Netz-Mitnahme %s nicht gelegt: %s", sym, e)
+
+    def _grid_cancel_orders(self, sym, sl) -> None:
+        for unit in sl.get("units") or []:
+            if unit.get("take_oid"):
+                try:
+                    self.broker.cancel(sym, unit["take_oid"])
+                except Exception as e:  # noqa: BLE001
+                    log.debug("Netz Storno Mitnahme: %s", e)
+                unit["take_oid"] = None
+        if sl.get("add"):
+            try:
+                self.broker.cancel(sym, sl["add"]["oid"])
+            except Exception as e:  # noqa: BLE001
+                log.debug("Netz Storno Nachkauf: %s", e)
+            sl["add"] = None
+
+    def _grid_book(self, sym, sl, unit, px, why, maker_out=False) -> None:
         p = self.cur
         gross = sl["side"] * (px - unit["entry"]) * unit["qty"]
-        fees = (unit["entry"] + px) * unit["qty"] * p["taker"]
+        fees = unit["entry"] * unit["qty"] * (p["maker"] if unit.get("maker_in") else p["taker"]) \
+            + px * unit["qty"] * (p["maker"] if maker_out else p["taker"])
         t = {"symbol": sym, "side": "long" if sl["side"] == 1 else "short", "entry": unit["entry"], "exit": px,
              "qty": unit["qty"], "gross": round(gross, 6), "fees": round(fees, 6), "net": round(gross - fees, 6),
              "why": why, "secs": round(time.time() - unit.get("time", time.time())), "time": int(time.time() * 1000),
@@ -1137,6 +1260,7 @@ class SpeedTrader:
 
     def _grid_close(self, sym, sl, why) -> None:
         """Ganzes Netz zum Marktpreis schliessen und jede Einheit einzeln verbuchen."""
+        self._grid_cancel_orders(sym, sl)
         px = self.broker.close(sym, sl["side"], sl["qty"], sl.get("prot") or {"sl": sl.get("sl"), "tp": None})
         net = 0.0
         for unit in sl["units"]:
@@ -1145,6 +1269,64 @@ class SpeedTrader:
         self._event(f"{sym.split(':')[0]} Netz {why}: {len(sl['units'])} Einheiten, netto {net:+.4f} USDT")
         sl.clear()
         sl["state"] = "idle"
+
+    def _grid_limit(self, sym, sl, side, now) -> None:
+        """Limit-Netz: Mitnahmen und Nachkauf liegen als Maker-Orders auf der Boerse; hier nur nachsehen,
+        was gefuellt wurde, und die naechsten Orders legen."""
+        p = self.cur
+        d = sl["side"]
+        try:
+            open_ids = self.broker.open_orders(sym)
+        except Exception as e:  # noqa: BLE001
+            log.debug("Netz offene Auftraege %s: %s", sym, e)
+            return
+        changed = False
+        keep = 1 if p.get("grid_keep_base", True) else 0
+        for unit in list(sl["units"]):
+            oid = unit.get("take_oid")
+            if oid and oid not in open_ids:
+                st, px = self.broker.order_fill(sym, oid)
+                if st == "filled":
+                    self._grid_book(sym, sl, unit, px or unit["take_px"], "Einheit im Gewinn verkauft", maker_out=True)
+                    sl["units"].remove(unit)
+                    changed = True
+                elif st == "canceled":
+                    unit["take_oid"] = None
+            elif not oid and sl["units"].index(unit) >= keep:
+                self._grid_place_take(sym, sl, unit)
+        if not sl["units"]:
+            self._grid_cancel_orders(sym, sl)
+            self._event(f"{sym.split(':')[0]} Netz: alle Einheiten im Gewinn verkauft")
+            sl.clear()
+            sl["state"] = "idle"
+            return
+        add = sl.get("add")
+        if add and add["oid"] not in open_ids:
+            st, px = self.broker.order_fill(sym, add["oid"])
+            sl["add"] = None
+            if st == "filled":
+                unit = {"entry": px or add["price"], "qty": add["qty"], "time": now, "maker_in": True}
+                sl["units"].append(unit)
+                sl["last_add"] = unit["entry"]
+                changed = True
+                self._event(f"{sym.split(':')[0]} Netz: Einheit {len(sl['units'])} @ {unit['entry']:.6g} (Limit)")
+                self._grid_place_take(sym, sl, unit)
+        if side != d and sl.get("add"):                       # KI nicht mehr dafuer: nicht weiter nachkaufen
+            self._grid_cancel_orders_add(sym, sl)
+        elif side == d and not sl.get("add") and time.time() >= self.session.get("pause_until", 0) \
+                and not self._brain_against(sym, d):
+            self._grid_place_add(sym, sl, sl["last_add"])
+        if changed:
+            sl["qty"] = sum(u["qty"] for u in sl["units"])
+            sl["entry"] = sum(u["entry"] * u["qty"] for u in sl["units"]) / sl["qty"]
+            self._grid_restop(sym, sl)
+
+    def _grid_cancel_orders_add(self, sym, sl) -> None:
+        try:
+            self.broker.cancel(sym, sl["add"]["oid"])
+        except Exception as e:  # noqa: BLE001
+            log.debug("Netz Storno Nachkauf: %s", e)
+        sl["add"] = None
 
     def _grid_restop(self, sym, sl) -> None:
         sl["sl"] = self._grid_stop_price(sl)
@@ -1176,6 +1358,10 @@ class SpeedTrader:
             e20, e50 = float(ema(c, 20).iloc[-1]), float(ema(c, 50).iloc[-1])
             if d * (e20 - e50) < 0 and d * (float(c.iloc[-1]) - e20) < 0:
                 return "Trendwende (EMA 20 unter 50, KI neigt dagegen)" if d == 1 else "Trendwende (EMA 20 ueber 50, KI neigt dagegen)"
+        if against:
+            veto = self._brain_against(sl.get("_sym", ""), d)
+            if veto:
+                return f"Trendwende ({veto}, KI neigt dagegen)"
         return ""
 
     def _grid(self, sym, sl, side, votes, tick, now, fc=None, df=None) -> None:
@@ -1213,11 +1399,19 @@ class SpeedTrader:
             self._grid_close(sym, sl, "Netz-Stop")
             return
         # 2) KI dreht / Trendwende -> alles schliessen, auch die Hauptposition
+        sl["_sym"] = sym
         why = "KI gedreht" if side == -d else self._grid_reversal(sl, fc, df)
+        # 2b) nicht endlos aussitzen: nach grid_stale_x x Vorhersagezeit ohne Gewinn schliessen
+        h = float(sl.get("h_min") or 5)
+        if not why and (now - sl.get("opened", now)) / 60 >= float(p.get("grid_stale_x", 4.0)) * h and unreal <= 0:
+            why = f"zu lange ohne Gewinn ({round((now - sl['opened']) / 60)} min)"
         if why:
             self._grid_close(sym, sl, why)
             return
         if self.session.get("stopping"):
+            return
+        if p.get("grid_limit", True):
+            self._grid_limit(sym, sl, side, now)
             return
         # 3) Einheiten im Gewinn verkaufen (die Hauptposition bleibt, solange grid_keep_base)
         take = float(p["grid_take_pct"]) / 100
@@ -1242,7 +1436,7 @@ class SpeedTrader:
         if side == d and d * (sl["last_add"] - buy_px) / sl["last_add"] >= step and used + unit_margin <= float(p["grid_budget"]) * 1.05 \
                 and time.time() >= self.session.get("pause_until", 0):
             qty = self._grid_unit_qty(sym, buy_px)
-            if qty > 0:
+            if qty > 0 and not self._brain_against(sym, d):
                 avg = self.broker.add(sym, d, qty)
                 sl["units"].append({"entry": avg, "qty": qty, "time": now})
                 sl["last_add"] = avg
