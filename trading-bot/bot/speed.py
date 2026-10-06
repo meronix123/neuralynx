@@ -1075,7 +1075,8 @@ class SpeedTrader:
             cap = p.get("max_open_risk_pct") or 0
             if self.kind == "ki" and cap and total > 0 \
                     and self._open_risk() + qty * abs(price - stop) > total * cap / 100:
-                sl["signal"]["votes"] = {**votes, "wartet": f"Gesamt-Risiko offener Positionen waere ueber {cap:g} % des Kontos"}
+                sl["signal"]["votes"] = {**votes, "wartet": (f"Gesamt-Risiko: dieser Trade {qty * abs(price - stop):.2f} USDT + offen "
+                                                              f"{self._open_risk():.2f} > {cap:g} % von {total:.0f} USDT = {total * cap / 100:.2f}")}
                 return
             full = qty
             if self.kind == "ki" and p.get("scale_in"):
@@ -1213,8 +1214,11 @@ class SpeedTrader:
             lev = real
         total = self._balance()[0]
         cap = p.get("max_open_risk_pct") or 0
-        if cap and total > 0 and self._open_risk() + float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100 > total * cap / 100:
-            sl["signal"]["votes"] = {**votes, "wartet": f"Gesamt-Risiko offener Positionen waere ueber {cap:g} % des Kontos"}
+        net_risk = float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100
+        if cap and total > 0 and self._open_risk() + net_risk > total * cap / 100:
+            sl["signal"]["votes"] = {**votes, "wartet": (f"Gesamt-Risiko: Netz {net_risk:.2f} USDT (Budget {float(p['grid_budget']):g} x "
+                                                          f"Netz-Stop {float(p['grid_max_loss_pct']):g} %) + offen {self._open_risk():.2f} "
+                                                          f"> {cap:g} % von {total:.0f} USDT = {total * cap / 100:.2f}")}
             return
         avg = self.broker.add(sym, side, qty)
         sl.update(state="grid", side=side, qty=qty, entry=avg, price=avg, opened=now, lev=lev, taker_in=True,
