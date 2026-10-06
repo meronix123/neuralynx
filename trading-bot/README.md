@@ -341,7 +341,10 @@ Einheiten: Einheit = Margin x Hebel (0,10 USDT x 50 = 5 USDT, die Bitget-Mindest
 (Hauptposition) bleibt offen. Laeuft der Kurs um "Schritt" gegen das Netz, kommt bis zum Budget je Markt eine
 Einheit dazu. Einheiten im Gewinn (ab "Mitnahme", muss ueber den Hin- und Rueckgebuehren liegen) werden einzeln
 verkauft, Einheiten im Minus bleiben. Alles wird geschlossen, wenn der offene Verlust den **Netz-Stop** (% vom
-Budget, Stop liegt auch auf Bitget) erreicht oder die KI klar dreht. Auf dem Konto nur mit Bestaetigung NETZ.
+Budget, Stop liegt auch auf Bitget) erreicht oder eine **Trendwende** kommt: die KI neigt ab 53 % zur Gegenseite
+(unter der Einstiegs-Sicherheit, `grid_flip_conf`) oder der Kurs faellt unter die EMA-20/50-Kreuzung und die
+KI neigt dagegen. Dann schliesst die KI das ganze Netz samt Hauptposition - Verluste werden nicht ausgesessen.
+Auf dem Konto nur mit Bestaetigung NETZ.
 
 **Ehrliche Einordnung:** Auf Bitget verschmelzen alle Einheiten eines Marktes zu einer Position mit
 Durchschnittspreis - die Einheiten sind Buchfuehrung im Bot. Jede Einheit zahlt Gebuehren auf 5 USDT (rund

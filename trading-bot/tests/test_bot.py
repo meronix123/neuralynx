@@ -3413,6 +3413,23 @@ def test_grid_mode_units_take_profit_add_on_dips_and_net_stop():
     ap.step(sym)
     assert s["state"] == "idle" and ap.trades[-1]["why"] == "KI gedreht"
     assert ap.status()["slots"][sym]["units"] is None
+    # Trendwende: die KI neigt nur leicht zur Gegenseite (54 %, unter der Einstiegs-Sicherheit) -> Hauptposition zu
+    fc.update(p_up=0.62, p_up_raw=0.62, decision="LONG")
+    ap.step(sym)
+    assert s["state"] == "grid"
+    fc.update(p_up=0.46, p_up_raw=0.46, decision="SHORT")
+    ap.step(sym)
+    assert s["state"] == "idle" and ap.trades[-1]["why"].startswith("KI gedreht (SHORT 54 %)")
+    # Trendwende im Chart: EMA 20 unter 50 und KI neigt dagegen (49 %) -> ebenfalls zu
+    fc.update(p_up=0.62, p_up_raw=0.62, decision="LONG")
+    ap.step(sym)
+    assert s["state"] == "grid"
+    df_down = _speed_df(120, -0.002)
+    ap.data_fn = lambda s_: (df_down, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01})
+    fc.update(p_up=0.49, p_up_raw=0.49, decision="SHORT")
+    ap.step(sym)
+    assert s["state"] == "idle" and ap.trades[-1]["why"].startswith("Trendwende")
+    ap.data_fn = lambda s_: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01})
     # Risiko-Deckel: ein Netz zaehlt mit seinem moeglichen Verlust (Budget x Netz-Stop) zum Gesamt-Risiko
     ap.cur["grid_budget"], ap.cur["max_open_risk_pct"] = 10.0, 3
     fc.update(p_up=0.62, p_up_raw=0.62, decision="LONG")

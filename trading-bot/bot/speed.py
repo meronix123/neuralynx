@@ -63,6 +63,7 @@ AUTO_DEFAULTS = {
     "grid_take_pct": 0.3,      # Einheit verkaufen ab so viel Prozent Gewinn (ueber den Hin- und Rueckgebuehren)
     "grid_max_loss_pct": 50,   # Netz-Stop: ganzes Netz schliessen, wenn der offene Verlust so viel % des Budgets erreicht
     "grid_keep_base": True,    # die erste Einheit (Hauptposition) bleibt offen, bis die KI dreht oder der Netz-Stop greift
+    "grid_flip_conf": 0.53,    # Trendwende: KI neigt ab dieser Sicherheit zur Gegenseite -> ganzes Netz schliessen
     "fast_entry": True,        # Schnell-Einstieg: deutlich ueber der noetigen Sicherheit -> sofort zum Marktpreis
     "fast_entry_margin": 0.03, # ... ab noetige Sicherheit + 3 Prozentpunkte (Taker-Gebuehr wird mitgerechnet)
     "flow_confirm": 0.30,      # Einstieg nur, wenn der Taker-Fluss nicht KLAR dagegen laeuft (unter -0,30 = dagegen)
@@ -947,7 +948,7 @@ class SpeedTrader:
         sl["signal"] = {"side": side, "votes": votes}
         now = time.time()
         if sl["state"] == "grid":
-            self._grid(sym, sl, side, votes, tick, now)
+            self._grid(sym, sl, side, votes, tick, now, fc, df)
             return
         if sl["state"] == "idle":
             if side == 0 or self.session.get("stopping") or len(self.trades) >= p["max_trades"]:
@@ -1158,7 +1159,26 @@ class SpeedTrader:
             log.warning("Netz-Stop %s nicht angepasst: %s", sym, e)
         sl["prot"] = prot
 
-    def _grid(self, sym, sl, side, votes, tick, now) -> None:
+    def _grid_reversal(self, sl, fc, df) -> str:
+        """Trendwende gegen das Netz: die KI neigt klar zur Gegenseite (ab grid_flip_conf, unter der
+        Einstiegs-Sicherheit), oder der Kurs ist unter/ueber die EMA-Kreuzung gelaufen und die KI neigt dagegen.
+        Dann schliesst die KI das ganze Netz samt Hauptposition - Verluste werden nicht ausgesessen."""
+        d = sl["side"]
+        p_up = (fc or {}).get("p_up")
+        if p_up is None:
+            return ""
+        against = d * (float(p_up) - 0.5) < 0
+        conf = max(float(p_up), 1 - float(p_up))
+        if against and conf >= float(self.cur.get("grid_flip_conf", 0.53)):
+            return f"KI gedreht ({'SHORT' if d == 1 else 'LONG'} {round(conf * 100)} %)"
+        if against and df is not None and len(df) >= 60:
+            c = df["close"].astype(float)
+            e20, e50 = float(ema(c, 20).iloc[-1]), float(ema(c, 50).iloc[-1])
+            if d * (e20 - e50) < 0 and d * (float(c.iloc[-1]) - e20) < 0:
+                return "Trendwende (EMA 20 unter 50, KI neigt dagegen)" if d == 1 else "Trendwende (EMA 20 ueber 50, KI neigt dagegen)"
+        return ""
+
+    def _grid(self, sym, sl, side, votes, tick, now, fc=None, df=None) -> None:
         """Netz fuehren: Einheiten im Gewinn verkaufen (Hauptposition bleibt), bei Kurs gegen das Netz bis zum
         Budget nachkaufen, Netz-Stop und KI-Drehung schliessen alles."""
         p = self.cur
@@ -1192,9 +1212,10 @@ class SpeedTrader:
         if unreal <= -budget_loss or d * (last - sl["sl"]) <= 0:
             self._grid_close(sym, sl, "Netz-Stop")
             return
-        # 2) KI dreht klar -> alles schliessen
-        if side == -d:
-            self._grid_close(sym, sl, "KI gedreht")
+        # 2) KI dreht / Trendwende -> alles schliessen, auch die Hauptposition
+        why = "KI gedreht" if side == -d else self._grid_reversal(sl, fc, df)
+        if why:
+            self._grid_close(sym, sl, why)
             return
         if self.session.get("stopping"):
             return
