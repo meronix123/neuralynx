@@ -8,6 +8,14 @@ Wirtschaftskalender-Filter und Oberflaeche im Browser.
 > Kursbewegung von ca. 10 % gegen dich fuer den Totalverlust der Position.
 > Setze nur Geld ein, dessen Verlust du verkraftest.
 
+## Ein System: die KI handelt
+
+Seit Oktober 2026 gibt es eine Handelslogik: den **KI-Autopilot**. Die Bot-Strategie (Marktlage, Signale,
+Trendfilter, Order Blocks, Muster) wird weiter berechnet und angezeigt, ist aber nur noch **Eingabe fuer die
+KI** (Supergehirn) - sie eroeffnet selbst keine Trades mehr (`ki_only: true` in config.yaml). Offene
+Positionen des alten Bots werden weiter gefuehrt. Wer den Regel-Bot zusaetzlich handeln lassen will, setzt
+`ki_only: false` (zwei Logiken nebeneinander, nicht empfohlen).
+
 ## Was der Bot macht
 
 **So entscheidet der Bot:** Zuerst erkennt er je Markt die **Lage**, dann waehlt er die dazu

@@ -253,6 +253,9 @@ class Bot:
             if block:
                 reasons[sym] = block
                 continue
+            if self.ki_only:                      # ein System: die KI handelt, die Bot-Strategie ist nur Eingabe
+                reasons[sym] = self._ki_only_reason(sym, views[sym])
+                continue
             try:
                 reasons[sym] = self._enter_any(sym, equity, positions, views[sym], risk_factor, now)
             except Exception as e:  # noqa: BLE001 - ein Markt mit Fehler darf die anderen nicht blockieren
@@ -260,6 +263,20 @@ class Bot:
                 reasons[sym] = f"Fehler: {e}"
                 self._set_error(f"{sym}: {e}")
         self._update_status(now, equity, positions, views, reasons, block)
+
+    @property
+    def ki_only(self) -> bool:
+        return bool(self.cfg.get("ki_only", False))
+
+    def _ki_only_reason(self, sym: str, view: dict) -> str:
+        """Was die Bot-Strategie gerade sieht - als Eingabe fuer die KI, die allein handelt."""
+        snap = view.get("snapshot") or {}
+        sig = snap.get("signal") or 0
+        seen = (f"Signal {'LONG' if sig > 0 else 'SHORT'}" if sig else "kein Signal") + f", {snap.get('regime_text', '?')}"
+        ap = self.autopilot
+        if ap.active and sym in (ap.session.get("symbols") or []):
+            return f"KI handelt hier (Bot-Strategie als Eingabe: {seen})"
+        return f"KI-Autopilot aus - Bot-Strategie nur Eingabe ({seen}); KI-Autopilot im KI-Feld einschalten"
 
     def request_close(self, sym: str) -> str:
         """Von der Oberflaeche: Bot-Position beim naechsten Durchlauf schliessen."""
@@ -1294,6 +1311,7 @@ class Bot:
         fng = self.ctx.fng
         self.status = {
             "mode": self.cfg["mode"],
+            "ki_only": self.ki_only,
             "leverage": self.cfg["leverage"],
             "timeframe": self.cfg["timeframe"],
             "tf_select": self.cfg.get("tf_select", "fixed") if self.multi else "fixed",

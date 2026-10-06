@@ -15,6 +15,7 @@ from bot.strategy import compute_signals, last_closed_signal, levels, trail_stop
 CFG = load_config()
 # Tests laufen auf 5m-Testdaten -> kurze Zeiteinheiten, unabhaengig von der aktuellen config.yaml
 CFG["timeframe"], CFG["trend_timeframe"] = "5m", "1h"
+CFG["ki_only"] = False                     # Tests pruefen auch den Regel-Bot selbst (in der Auslieferung: KI handelt allein)
 CFG["strategy"].update(trend_ema_fast=50, trend_ema_slow=200, min_score=4, partial_tp_r=0,
                        breakeven_at_r=1.0,
                        # im Test vergeht keine echte Zeit -> zwischengespeicherte hoehere Zeitebenen
@@ -3329,3 +3330,31 @@ def test_fast_entry_and_impulse_features():
     ap2.slots = {"BTC/USDT:USDT": {"state": "idle"}}
     ap2.step("BTC/USDT:USDT")
     assert ap2.slots["BTC/USDT:USDT"]["state"] == "open"                                   # EV klar positiv: Schnell-Einstieg
+
+
+def test_ki_only_mode_lets_only_the_ki_trade(tmp_path, monkeypatch):
+    """Ein System: mit ki_only eroeffnet der Regel-Bot keine Trades mehr, seine Sicht bleibt Eingabe/Anzeige;
+    offene Positionen werden weiter gefuehrt, der Grund steht in den Signalen."""
+    monkeypatch.setattr(engine, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(engine, "STOP_FILE", tmp_path / "STOP")
+    from bot.exchange import PaperExchange
+
+    cfg = copy.deepcopy(CFG)
+    cfg["symbols"], cfg["ki_only"] = ["AAA/USDT:USDT"], True
+    client = FakeClient(synthetic(600, 3))
+    bot = engine.Bot(cfg, PaperExchange(cfg, client), FakeContext())
+    called = []
+    bot._enter_any = lambda *a, **k: called.append(a) or "x"
+    client.i = 400
+    bot.step()
+    assert not called and bot.status["ki_only"]
+    why = bot.status["symbols"]["AAA/USDT:USDT"]["reason"]
+    assert why.startswith("KI-Autopilot aus") and "Eingabe" in why
+    bot.autopilot.active, bot.autopilot.session = True, {"symbols": ["AAA/USDT:USDT"]}
+    client.i = 401
+    bot.step()
+    assert bot.status["symbols"]["AAA/USDT:USDT"]["reason"].startswith("KI handelt hier")
+    cfg["ki_only"] = False
+    client.i = 402
+    bot.step()
+    assert called                                                           # ohne ki_only: Regel-Bot wie bisher

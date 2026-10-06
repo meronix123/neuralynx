@@ -186,7 +186,7 @@
 </head>
 <body>
 <header id="head">Lade ...</header>
-<nav><button id="tab-bot" class="on" onclick="tab('bot')">Bot</button><button id="tab-brain" onclick="tab('brain')">Bot-Gehirn</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button>
+<nav><button id="tab-bot" class="on" onclick="tab('bot')">KI &amp; Bot</button><button id="tab-brain" onclick="tab('brain')">Bot-Gehirn</button><button id="tab-acc" onclick="tab('acc')">Bitget-Konto</button>
   <span class="modebar"><span class="sub">Bot handelt mit:</span>
     <button id="mode-paper" onclick="switchMode('paper')">Simulation</button>
     <button id="mode-demo" onclick="switchMode('demo')">Testkonto</button>
@@ -353,6 +353,7 @@
   </section>
   <section class="panel">
     <div class="speed kipanel">
+      <div id="kionly" class="sub" hidden style="margin-bottom:6px">&#10004; <b>Ein System:</b> die KI handelt. Die Bot-Strategie (Marktlage, Signale, Trendfilter) ist nur noch Eingabe fuer die KI und wird unten angezeigt.</div>
       <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, sichert Gewinne (nie mehr als die Haelfte zurueckgeben, ATR-Stop, RSI/Umkehrkerzen), verkauft einen Teil bei +1,5 R, steigt aus wenn die KI klar dreht oder die Prognosezeit vorbei ist</small></div>
       <div class="speedform">
         <span id="ap-syms"></span>
@@ -399,7 +400,7 @@
     <div class="wrap"><table id="market"></table></div>
   </section>
   <section class="panel" style="grid-column:1/-1">
-    <h3>Signale - was der Bot gesehen hat und warum (nicht) gehandelt</h3>
+    <h3 id="sigtitle">Signale - was der Bot gesehen hat und warum (nicht) gehandelt</h3>
     <div id="sleepwarn" class="warn" style="margin-bottom:6px"></div>
     <div class="wrap"><table id="signals"></table></div>
   </section>
@@ -912,6 +913,10 @@ function render() {
   if (!data) return;
   const dayPnl = data.equity - data.day_start_equity;
   const fg = data.fear_greed;
+  const ko = document.getElementById("kionly");
+  if (ko) ko.hidden = !data.ki_only;
+  const st = document.getElementById("sigtitle");
+  if (st) st.textContent = data.ki_only ? "Bot-Strategie - Eingabe fuer die KI (die KI handelt)" : "Signale - was der Bot gesehen hat und warum (nicht) gehandelt";
   document.getElementById("head").innerHTML = `
     <span class="badge ${data.mode}">${{ paper: "SIMULATION", demo: "TESTKONTO", live: "ECHTES KONTO" }[data.mode] || data.mode}</span>
     <div class="kpi"><span>Konto</span><b>${fmt(data.equity)} USDT</b></div>
