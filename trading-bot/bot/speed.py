@@ -673,6 +673,9 @@ class SpeedTrader:
                         self.step(sym)
                     except Exception as e:  # noqa: BLE001 - ein Fehler darf die Sitzung nicht beenden
                         self._event(f"{sym.split(':')[0]} Fehler: {e}")
+                        sl = self.slots.get(sym)
+                        if sl is not None and sl.get("state") == "idle":      # im Status sichtbar, nicht nur im Ablauf
+                            sl.setdefault("signal", {}).setdefault("votes", {})["wartet"] = f"Fehler: {str(e)[:160]}"
                         wait = max(wait, self._backoff(e))
                 self._persist_maybe()
                 time.sleep(wait)
