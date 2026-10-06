@@ -77,6 +77,14 @@ def make_features(df: pd.DataFrame, leader=None, funding: pd.DataFrame | None = 
     f["press"] = press.rolling(12).sum() / (vol.rolling(12).sum() + 1e-9)
     f["atr_pct"] = a / c * 100
     f["atr_trend"] = np.log(a / a.rolling(288, min_periods=48).mean())
+    # Impuls und Ausbruch (Hilfen, um Einstiege frueh zu erkennen): Bewegung in ATR, Kerzenspanne zur ATR,
+    # Abstand zum Hoch/Tief der letzten 20 Kerzen (positiv = gerade ausgebrochen)
+    f["r1_atr"] = (c - c.shift(1)) / a
+    f["r3_atr"] = (c - c.shift(3)) / a
+    f["rng_x"] = (h - lo) / a
+    f["rng3_x"] = (h - lo).rolling(3).sum() / a
+    f["brk_hi"] = (c - h.shift(1).rolling(20).max()) / a
+    f["brk_lo"] = (lo.shift(1).rolling(20).min() - c) / a
     t = pd.to_datetime(df["ts"], unit="ms", utc=True)
     hours = t.dt.hour + t.dt.minute / 60
     f["hour_sin"], f["hour_cos"] = np.sin(2 * np.pi * hours / 24), np.cos(2 * np.pi * hours / 24)

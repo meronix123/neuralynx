@@ -313,6 +313,19 @@ Live-Bilanz bleiben je Markt. Gold/Silber bleiben draussen (andere Handelszeiten
 KI-Feld steht dann z. B. "Modell: linear + Pool · Pool: 18 Maerkte, 120.000 Beispiele". Rechenzeit: etwa 20 s
 alle 15 Minuten im Hintergrund.
 
+## Hilfen fuer schnelle Einstiege
+
+- **Schnell-Einstieg:** liegt die KI-Sicherheit mindestens 3 Prozentpunkte ueber dem, was fuer einen Einstieg
+  noetig ist, steigt der Autopilot sofort zum Marktpreis ein statt auf den kleinen Ruecksetzer zu warten (die
+  besten Signale laufen sonst weg). Bedingungen: Orderfluss nicht dagegen, und mit Kosten-Schutz muss der
+  Erwartungswert auch mit Taker-Gebuehr ueber der Schwelle bleiben. Im Ablauf steht dann "Schnell-Einstieg",
+  im Signal "Schnell: ja". Einstellung `autopilot.fast_entry` / `fast_entry_margin` in config.yaml.
+- **Impuls- und Ausbruchs-Merkmale:** Bewegung der letzten 1 und 3 Kerzen in ATR, Kerzenspanne zur ATR,
+  Abstand zum Hoch/Tief der letzten 20 Kerzen (positiv = gerade ausgebrochen). Damit erkennt die KI
+  Momentum-Starts und Ausbrueche frueher - gelernt, nicht per Hand gewichtet.
+- **Laufende Kerze:** die KI bewertet die laufende Kerze alle 5 Sekunden mit den gelernten Modellen, der
+  Autopilot prueft alle 1 bis 3 Sekunden, Stops und Ziele liegen als Bitget-Auftraege auf der Boerse.
+
 ## Handelszeiten Gold/Silber
 
 Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in

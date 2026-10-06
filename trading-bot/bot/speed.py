@@ -55,6 +55,8 @@ AUTO_DEFAULTS = {
     "chase_max_r": 0.3,        #   ... wenn der Kurs hoechstens 0,3 R vom Limit weggelaufen ist (Limit liegt 0,15 R tiefer)
     "chase_avoid_marks": True, #   ... nicht um :00/:15/:30/:45 und Funding (Spread springt dort)
     "entry_pullback_r": 0.15,  # Limit 0,15 R unter dem Kurs (Long) / darueber (Short): Einstieg im kleinen Ruecksetzer
+    "fast_entry": True,        # Schnell-Einstieg: deutlich ueber der noetigen Sicherheit -> sofort zum Marktpreis
+    "fast_entry_margin": 0.03, # ... ab noetige Sicherheit + 3 Prozentpunkte (Taker-Gebuehr wird mitgerechnet)
     "flow_confirm": 0.30,      # Einstieg nur, wenn der Taker-Fluss nicht KLAR dagegen laeuft (unter -0,30 = dagegen)
     "flip_extra": 0.03,        # Ausstieg bei KI-Wende nur mit 3 Punkten mehr Sicherheit als fuer den Einstieg
     "min_hold_frac": 0.5,      #   ... und fruehestens nach der halben Vorhersagezeit
@@ -733,6 +735,9 @@ class SpeedTrader:
         if blocked:
             return 0, {**votes, "wartet": blocked}, fc
         side = (1 if p_up >= 0.5 else -1) if conf >= need else 0
+        # Schnell-Einstieg: deutlich ueber der noetigen Sicherheit -> sofort zum Marktpreis statt auf den
+        # Ruecksetzer zu warten (die besten Signale laufen sonst weg); die Taker-Gebuehr wird unten mitgerechnet
+        quick = side != 0 and bool(self.cur.get("fast_entry", True)) and conf >= need + float(self.cur.get("fast_entry_margin", 0.03))
         if side == 0 and conf >= self.cur["min_conf"]:
             votes["wartet"] = f"Kosten-Schutz: braucht {round(need * 100)} % Sicherheit"
         elif side == 0:
@@ -766,6 +771,12 @@ class SpeedTrader:
             if ev < self.cur.get("ev_min_r", 0.05):
                 side = 0
                 votes["wartet"] = f"Erwartungswert nach Kosten {ev:+.2f} R (Ziel vor Stop {round(p * 100)} %)"
+            elif quick and ev - (self.cur["taker"] - self.cur["maker"]) / r_frac < self.cur.get("ev_min_r", 0.05):
+                quick = False                                              # Taker-Gebuehr wuerde den Vorteil auffressen
+        if quick and side != 0 and flow is not None and side * float(flow) < 0:
+            quick = False                                                  # Orderfluss nicht dafuer: lieber im Ruecksetzer
+        if quick and side != 0:
+            votes["Schnell"] = "ja"
         return side, votes, fc
 
     BLEND_MAX_MIN = 15          # 5-Minuten-KI im Turbo: nur ihre kurzen Vorhersagezeiten (bis 15 min)
@@ -926,7 +937,8 @@ class SpeedTrader:
             if stop is None:
                 sl["signal"]["votes"] = {**votes, "wartet": "Widerstand/Unterstuetzung zu nah - Ziel lohnt nicht"}
                 return
-            if self.kind == "ki" and p.get("entry_pullback_r"):
+            quick = self.kind == "ki" and votes.get("Schnell") == "ja" and not self.session.get("stopping")
+            if self.kind == "ki" and p.get("entry_pullback_r") and not quick:
                 # Einstieg im kleinen Ruecksetzer (Limit etwas unter/ueber dem Kurs); laeuft der Kurs weg, fasst
                 # der Markt-Einstieg nach (chase). Stop/Ziel wandern mit dem tatsaechlichen Einstieg.
                 r = abs(price - stop)
@@ -970,6 +982,18 @@ class SpeedTrader:
                 part = self._round(sym, qty * p["first_frac"])
                 if part > 0 and part * price >= p["min_notional"]:
                     qty = part                                   # Teilkauf: erst ein Teil, Rest im Gewinn
+            if quick:
+                # Schnell-Einstieg: zum Marktpreis, Stop/Ziel wandern mit dem tatsaechlichen Einstieg; erst den
+                # Zustand merken, dann absichern (schlaegt der Stop fehl, wird nie ein zweites Mal gekauft)
+                avg = self.broker.add(sym, side, qty)
+                shift = avg - price
+                sl.update(state="open", side=side, qty=qty, full=full, price=avg, entry=avg, opened=now, placed=now,
+                          sl=stop + shift, tp=target + shift, r0=abs(avg - stop - shift), best=avg, lev=lev, taker_in=True,
+                          why_in={k: v for k, v in votes.items() if k != "wartet"}, h_min=(fc or {}).get("decision_min"))
+                self._protect(sym, sl)
+                self._event(f"{sym.split(':')[0]} {'LONG' if side == 1 else 'SHORT'} Schnell-Einstieg @ {avg:.6g} x{lev} "
+                            f"(Ziel {sl['tp']:.6g}, Stop {sl['sl']:.6g})")
+                return
             oid = self.broker.place_entry(sym, side, qty, price)
             sl.update(state="pending", oid=oid, side=side, qty=qty, full=full, price=price, sl=stop, tp=target,
                       placed=now, lev=lev, why_in={k: v for k, v in votes.items() if k != "wartet"},
