@@ -254,6 +254,9 @@ class PaperBroker:
     def protect_stop(self, sym, side, qty, sl):
         return {"sl": sl, "tp": None}
 
+    def add_margin(self, sym, side, amount):
+        return float(amount)
+
     def place_exit(self, sym, side, qty, price):
         """Reduzierende Limit-Order (Netz: Einheit im Gewinn verkaufen) - fuellt, wenn der Kurs durchlaeuft."""
         oid = self._id()
@@ -330,6 +333,12 @@ class BitgetBroker:
 
     def pos_size(self, sym, side):
         return self._pos_size(sym, side)
+
+    def add_margin(self, sym, side, amount):
+        """Margin aus dem Budget nachschiessen (isolated): schiebt die Liquidation hinter den Netz-Stop."""
+        self.c.add_margin(sym, float(f"{amount:.4f}"), {"holdSide": "long" if side == 1 else "short", "marginCoin": "USDT"})
+        self._bal = None
+        return float(amount)
 
     def place_exit(self, sym, side, qty, price):
         """Reduzierende Limit-Order (Maker) fuer genau qty."""
@@ -1182,14 +1191,35 @@ class SpeedTrader:
             return 0.0                                          # eine Einheit allein sprengt das Budget
         return qty
 
+    MMR_BUFFER = 0.008          # Erhaltungsmargin + Gebuehren-Puffer (0,8 % des Positionswerts), damit der Stop vor der Liquidation greift
+
+    def _grid_margin(self, sl) -> float:
+        """Margin der Netz-Position: Einheiten/Hebel plus nachgeschossene Margin."""
+        lev = max(float(sl.get("lev") or self.cur["leverage"]), 1)
+        return sum(u["entry"] * u["qty"] for u in sl["units"]) / lev + float(sl.get("added_margin") or 0)
+
     def _grid_stop_price(self, sl) -> float:
-        """Netz-Stop: Verlust am Stop = Budget x Netz-Stop-%, aber nie weiter als 70 % des Wegs zur Liquidation
-        (bei 50x liegt die etwa 2 % entfernt) - sonst wuerde Bitget die Position vor dem Stop liquidieren."""
+        """Netz-Stop: Verlust am Stop = Budget x Netz-Stop-%. Damit Bitget nicht vorher liquidiert, wird Margin aus
+        dem Budget nachgeschossen (isolated), bis die Liquidation hinter dem Stop liegt; reicht das Budget nicht,
+        rueckt der Stop so weit heran, dass er sicher vor der Liquidation liegt."""
         p = self.cur
-        budget_loss = float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100
-        dist = budget_loss / max(sl["qty"], 1e-12)
-        dist = min(dist, sl["entry"] * 0.7 / max(float(sl.get("lev") or p["leverage"]), 1))
-        return sl["entry"] - sl["side"] * dist
+        budget = float(p["grid_budget"])
+        budget_loss = budget * float(p["grid_max_loss_pct"]) / 100
+        qty, entry = max(sl["qty"], 1e-12), sl["entry"]
+        dist = budget_loss / qty
+        want = min(budget, qty * dist + qty * entry * self.MMR_BUFFER)      # Margin, die der Stop braucht
+        have = self._grid_margin(sl)
+        if want > have + 0.02 and hasattr(self.broker, "add_margin"):
+            try:
+                sym = sl.get("_sym") or ""
+                self.broker.add_margin(sym, sl["side"], want - have)
+                sl["added_margin"] = float(sl.get("added_margin") or 0) + (want - have)
+                have = want
+            except Exception as e:  # noqa: BLE001 - dann Stop enger
+                log.warning("Netz %s: Margin nachschiessen fehlgeschlagen: %s", sl.get("_sym"), e)
+        safe = max((have - qty * entry * self.MMR_BUFFER) / qty * 0.9, entry * 0.002)   # vor der Liquidation
+        dist = min(dist, safe)
+        return entry - sl["side"] * dist
 
     def _grid_open(self, sym, sl, side, votes, fc, tick, now) -> None:
         """Erste Einheit (Hauptposition) zum Marktpreis; Netz-Stop auf Bitget fuer die ganze Menge."""
@@ -1221,8 +1251,8 @@ class SpeedTrader:
                                                           f"> {cap:g} % von {total:.0f} USDT = {total * cap / 100:.2f}")}
             return
         avg = self.broker.add(sym, side, qty)
-        sl.update(state="grid", side=side, qty=qty, entry=avg, price=avg, opened=now, lev=lev, taker_in=True,
-                  units=[{"entry": avg, "qty": qty, "time": now}], last_add=avg, sl=None, tp=None,
+        sl.update(state="grid", side=side, qty=qty, entry=avg, price=avg, opened=now, lev=lev, taker_in=True, _sym=sym,
+                  units=[{"entry": avg, "qty": qty, "time": now}], last_add=avg, sl=None, tp=None, added_margin=0.0,
                   why_in={k: v for k, v in votes.items() if k != "wartet"}, h_min=(fc or {}).get("decision_min"))
         sl["sl"] = self._grid_stop_price(sl)
         try:
@@ -1239,10 +1269,16 @@ class SpeedTrader:
         """Naechste Einheit als Limit-Order eine Stufe gegen das Netz legen (Maker)."""
         p = self.cur
         d = sl["side"]
-        used = sum(u["entry"] * u["qty"] for u in sl["units"]) / max(sl["lev"], 1)
+        used = self._grid_margin(sl)
         if used + float(p["grid_unit_margin"]) > float(p["grid_budget"]) * 1.05 or sl.get("add"):
             return
         price = ref * (1 - d * float(p["grid_step_pct"]) / 100)
+        try:
+            last = float(self.market[sym]["last"])
+            if d * (price - last) > -last * 0.001:              # Limit muss klar auf der Maker-Seite liegen
+                price = last * (1 - d * float(p["grid_step_pct"]) / 100)
+        except Exception:  # noqa: BLE001
+            pass
         qty = self._grid_unit_qty(sym, price)
         if qty <= 0:
             return
@@ -1250,7 +1286,10 @@ class SpeedTrader:
             oid = self.broker.place_entry(sym, d, qty, price)
         except Exception as e:  # noqa: BLE001
             log.warning("Netz-Nachkauf %s nicht gelegt: %s", sym, e)
+            sl["add_err"] = f"Nachkauf-Order abgelehnt: {str(e)[:120]}"
+            sl["add_retry"] = time.time() + 60                     # nicht jede Sekunde erneut versuchen
             return
+        sl.pop("add_err", None)
         sl["add"] = {"oid": oid, "price": price, "qty": qty}
 
     def _grid_place_take(self, sym, sl, unit) -> None:
@@ -1334,7 +1373,8 @@ class SpeedTrader:
         add = sl.get("add")
         if add and add["oid"] not in open_ids:
             st, px = self.broker.order_fill(sym, add["oid"])
-            sl["add"] = None
+            if st != "open":
+                sl["add"] = None
             if st == "filled":
                 unit = {"entry": px or add["price"], "qty": add["qty"], "time": now, "maker_in": True}
                 sl["units"].append(unit)
@@ -1344,7 +1384,7 @@ class SpeedTrader:
                 self._grid_place_take(sym, sl, unit)
         if side != d and sl.get("add"):                       # KI nicht mehr dafuer: nicht weiter nachkaufen
             self._grid_cancel_orders_add(sym, sl)
-        elif side == d and not sl.get("add") and time.time() >= self.session.get("pause_until", 0) \
+        elif side == d and not sl.get("add") and time.time() >= max(self.session.get("pause_until", 0), sl.get("add_retry", 0)) \
                 and not self._brain_against(sym, d):
             self._grid_place_add(sym, sl, sl["last_add"])
         if changed:
@@ -1404,10 +1444,11 @@ class SpeedTrader:
         sell_px = tick["bid"] if d == 1 else tick["ask"]
         buy_px = tick["ask"] if d == 1 else tick["bid"]
         unreal = d * (last - sl["entry"]) * sl["qty"]
-        used = sum(u["entry"] * u["qty"] for u in sl["units"]) / max(sl["lev"], 1)
+        used = self._grid_margin(sl)
         budget_loss = float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100
-        votes = {**votes, "Netz": f"{len(sl['units'])} Einheiten, Margin {used:.2f}/{float(p['grid_budget']):g} USDT, "
-                                  f"offen {unreal:+.4f} USDT"}
+        votes = {**votes, "Netz": f"{len(sl['units'])} Einheiten, Margin {used:.2f}/{float(p['grid_budget']):g} USDT"
+                                  f"{' (davon ' + format(sl.get('added_margin') or 0, '.2f') + ' nachgeschossen)' if sl.get('added_margin') else ''}, "
+                                  f"offen {unreal:+.4f} USDT" + (f" - {sl['add_err']}" if sl.get("add_err") else "")}
         sl["signal"]["votes"] = votes
         # 1) Netz-Stop (Software; auf Bitget liegt derselbe Stop) oder von aussen geschlossen
         if hasattr(self.broker, "pos_size"):

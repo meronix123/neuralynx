@@ -3384,9 +3384,9 @@ def test_grid_mode_units_take_profit_add_on_dips_and_net_stop():
         ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=10, grid_unit_margin=0.1, cost_guard=False)
     with pytest.raises(ValueError, match="gebuehren"):
         ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_take_pct=0.05, cost_guard=False)
-    ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_unit_margin=0.1, grid_budget=0.3,
+    ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_unit_margin=0.1, grid_budget=0.5,
              grid_step_pct=0.2, grid_take_pct=0.3, grid_max_loss_pct=50, min_conf=0.56, cost_guard=False, fast_entry=False,
-             grid_limit=False)
+             grid_limit=False)                                           # 0,5 = 3 Einheiten + nachgeschossene Margin
     ap.stop(close=True)
     ap.thread.join(5)
     ap.cur["loop_s"] = 0.0
@@ -3398,11 +3398,14 @@ def test_grid_mode_units_take_profit_add_on_dips_and_net_stop():
     s = ap.slots[sym]
     assert s["state"] == "grid" and len(s["units"]) == 1 and s["qty"] * s["entry"] >= ap.cur["min_notional"]
     assert s["lev"] == 50 and s["sl"] < s["entry"] and "NETZ LONG" in ap.events[-1]
-    assert s["entry"] - s["sl"] == pytest.approx(s["entry"] * 0.7 / 50, rel=1e-6)     # vor der Liquidation (1 Einheit)
+    # Netz-Stop = Budget x 50 % = 0,15 USDT Verlust; dafuer wird Margin nachgeschossen (0,15 + 0,8 % Puffer),
+    # die Liquidation liegt damit hinter dem Stop
+    assert s["qty"] * (s["entry"] - s["sl"]) == pytest.approx(0.25 * 0.9, rel=0.02)      # Budget 0,5 x 50 %, 10 % Sicherheitsabstand
+    assert s["added_margin"] == pytest.approx(0.25 + s["qty"] * s["entry"] * 0.008 - s["qty"] * s["entry"] / 50, abs=0.01)
     feed["last"] = 99.75                                                    # 0,25 % gegen das Netz -> Einheit 2
     ap.step(sym)
     assert len(s["units"]) == 2 and s["entry"] < 100.0
-    feed["last"] = 99.5                                                     # Einheit 3 (Budget 0,3 = 3 Einheiten)
+    feed["last"] = 99.5                                                     # Einheit 3
     ap.step(sym)
     assert len(s["units"]) == 3
     feed["last"] = 99.25                                                    # Budget voll: keine 4. Einheit
@@ -3489,7 +3492,7 @@ def test_grid_limit_orders_use_maker_fees():
     feed = {"last": 100.0}
     df = _speed_df(120, 0.0)
     book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
-    ap = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 0.3, "grid_step_pct": 0.5,
+    ap = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 0.6, "grid_step_pct": 0.5,
                       "grid_take_pct": 1.0, "grid_max_loss_pct": 50, "min_conf": 0.56, "cost_guard": False, "min_notional": 5.0})
     ap.data_fn = lambda s_: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01})
     sym = "BTC/USDT:USDT"
@@ -3537,3 +3540,25 @@ def test_grid_unit_respects_market_min_amount():
     ap.cur["grid_budget"] = 5.0
     ap.step(sym)
     assert ap.slots[sym]["state"] == "grid" and ap.slots[sym]["qty"] == 2.0
+
+
+def test_grid_margin_top_up_is_capped_by_budget_and_stop_moves_in():
+    """Reicht das Budget nicht fuer den Budget-Stop, wird nur bis zum Budget nachgeschossen und der Stop rueckt
+    so heran, dass er vor der Liquidation liegt; schlaegt der Nachschuss fehl, ebenfalls."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 0.3, "grid_max_loss_pct": 100,
+                      "min_conf": 0.56, "cost_guard": False, "min_notional": 5.0, "grid_limit": False})
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    s = ap.slots[sym]
+    assert s["state"] == "grid"
+    have = s["qty"] * s["entry"] / 50 + s["added_margin"]
+    assert have == pytest.approx(0.3, abs=0.01)                                       # bis zum Budget nachgeschossen
+    assert s["qty"] * (s["entry"] - s["sl"]) < have - s["qty"] * s["entry"] * 0.008      # Stop vor der Liquidation
+    ap2 = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 1.0, "grid_max_loss_pct": 50,
+                       "min_conf": 0.56, "cost_guard": False, "min_notional": 5.0, "grid_limit": False})
+    ap2.broker.add_margin = lambda *a: (_ for _ in ()).throw(RuntimeError("nope"))
+    ap2.step(sym)
+    s2 = ap2.slots[sym]
+    assert s2["state"] == "grid" and s2["added_margin"] == 0
+    assert s2["qty"] * (s2["entry"] - s2["sl"]) < s2["qty"] * s2["entry"] / 50          # enger als die eigene Margin
