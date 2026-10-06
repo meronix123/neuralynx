@@ -55,6 +55,14 @@ AUTO_DEFAULTS = {
     "chase_max_r": 0.3,        #   ... wenn der Kurs hoechstens 0,3 R vom Limit weggelaufen ist (Limit liegt 0,15 R tiefer)
     "chase_avoid_marks": True, #   ... nicht um :00/:15/:30/:45 und Funding (Spread springt dort)
     "entry_pullback_r": 0.15,  # Limit 0,15 R unter dem Kurs (Long) / darueber (Short): Einstieg im kleinen Ruecksetzer
+    # Netz-Modus (auf ausdruecklichen Wunsch, siehe README "Netz"): viele kleine Einheiten statt einer Position
+    "grid": False,
+    "grid_unit_margin": 0.10,  # Margin je Einheit in USDT (Einheit = Margin x Hebel, mind. Mindestposition 5 USDT)
+    "grid_budget": 10.0,       # Margin je Markt hoechstens (USDT)
+    "grid_step_pct": 0.2,      # naechste Einheit, wenn der Kurs um so viel Prozent gegen das Netz gelaufen ist
+    "grid_take_pct": 0.3,      # Einheit verkaufen ab so viel Prozent Gewinn (ueber den Hin- und Rueckgebuehren)
+    "grid_max_loss_pct": 50,   # Netz-Stop: ganzes Netz schliessen, wenn der offene Verlust so viel % des Budgets erreicht
+    "grid_keep_base": True,    # die erste Einheit (Hauptposition) bleibt offen, bis die KI dreht oder der Netz-Stop greift
     "fast_entry": True,        # Schnell-Einstieg: deutlich ueber der noetigen Sicherheit -> sofort zum Marktpreis
     "fast_entry_margin": 0.03, # ... ab noetige Sicherheit + 3 Prozentpunkte (Taker-Gebuehr wird mitgerechnet)
     "flow_confirm": 0.30,      # Einstieg nur, wenn der Taker-Fluss nicht KLAR dagegen laeuft (unter -0,30 = dagegen)
@@ -238,6 +246,9 @@ class PaperBroker:
     def resize(self, sym, side, qty, prot):
         pass
 
+    def protect_stop(self, sym, side, qty, sl):
+        return {"sl": sl, "tp": None}
+
 
 class BitgetBroker:
     """Echtes Bitget-Konto (ccxt-Client mit mode_safe). Stop = an die Position gebundener Bitget-Stop."""
@@ -279,6 +290,15 @@ class BitgetBroker:
             log.warning("Speed: Ziel %s nicht gesetzt: %s", sym, e)
             tp_o = {"id": ""}
         return {"sl": sl, "tp": tp, "sl_id": sl_id, "tp_id": str(tp_o.get("id") or ""), "t": time.time(), "miss": 0}
+
+    def protect_stop(self, sym, side, qty, sl):
+        """Nur einen Stop fuer GENAU qty setzen (Netz-Modus: kein festes Ziel, Einheiten werden einzeln verkauft)."""
+        from .exchange import place_size_tpsl
+        sl_id = place_size_tpsl(self.c, sym, "long" if side == 1 else "short", "loss_plan", sl, qty, self.mm)
+        return {"sl": sl, "tp": None, "sl_id": sl_id, "tp_id": "", "t": time.time(), "miss": 0}
+
+    def pos_size(self, sym, side):
+        return self._pos_size(sym, side)
 
     def _pos_size(self, sym, side):
         want = "long" if side == 1 else "short"
@@ -414,6 +434,15 @@ class SpeedTrader:
             if not symbols:
                 raise ValueError("Mindestens einen Markt waehlen")
             p = {**self.p, **{k: v for k, v in opts.items() if v is not None}}
+            if self.kind == "ki" and p.get("grid"):
+                unit = float(p["grid_unit_margin"]) * float(p["leverage"])
+                if unit < float(p["min_notional"]) * 0.99:
+                    raise ValueError(f"Netz: Einheit {p['grid_unit_margin']:g} USDT x{p['leverage']} = {unit:.2f} USDT - "
+                                     f"Bitget-Mindestposition ist {p['min_notional']:g} USDT (Hebel oder Einheit erhoehen)")
+                if float(p["grid_take_pct"]) / 100 <= 2 * p["taker"]:
+                    raise ValueError("Netz: Mitnahme muss ueber den Hin- und Rueckgebuehren liegen")
+                if float(p["grid_budget"]) < float(p["grid_unit_margin"]):
+                    raise ValueError("Netz: Budget kleiner als eine Einheit")
             if self.kind == "ki" and p.get("turbo"):
                 p.update(TURBO_AUTO)
                 if getattr(self, "turbo_fn", None) is None:
@@ -550,7 +579,7 @@ class SpeedTrader:
         """Haelt die Sitzung in diesem Markt gerade selbst eine Position/Order auf dem echten Konto?
         (Simulation sperrt nichts; ein Markt, in dem nur gesucht wird, ist frei.)"""
         return (self.active and self.session.get("label") != "Simulation"
-                and (self.slots.get(sym) or {}).get("state") in ("pending", "open"))
+                and (self.slots.get(sym) or {}).get("state") in ("pending", "open", "grid"))
 
     # --- Ablauf ------------------------------------------------------------
     def _event(self, text: str) -> None:
@@ -581,7 +610,7 @@ class SpeedTrader:
                                     f"{time.strftime('%d.%m. %H:%M', time.gmtime(ses['pause_until']))} UTC")
                 if ses["stopping"]:
                     self._cancel_pending()
-                    if not any(v.get("state") == "open" for v in self.slots.values()):
+                    if not any(v.get("state") in ("open", "grid") for v in self.slots.values()):
                         break                                   # nichts mehr offen -> Sitzung zu Ende
                 self._rotate()
                 wait = self.cur["loop_s"]
@@ -653,7 +682,9 @@ class SpeedTrader:
         """Summe des Verlusts am Stop aller offenen/wartenden Positionen (USDT)."""
         out = 0.0
         for v in self.slots.values():
-            if v.get("state") in ("open", "pending") and v.get("sl") is not None:
+            if v.get("state") == "grid":
+                out += float(self.cur.get("grid_budget", 0)) * float(self.cur.get("grid_max_loss_pct", 100)) / 100
+            elif v.get("state") in ("open", "pending") and v.get("sl") is not None:
                 px = v.get("entry") or v.get("price") or 0
                 out += (v.get("qty") or 0) * abs(px - v["sl"])
         return out
@@ -677,10 +708,12 @@ class SpeedTrader:
     def _wind_down(self, close: bool = False) -> None:
         self._cancel_pending()
         for sym, sl in self.slots.items():
-            if sl.get("state") != "open":
+            if sl.get("state") not in ("open", "grid"):
                 continue
             try:
-                if close:
+                if close and sl["state"] == "grid":
+                    self._grid_close(sym, sl, "von Hand geschlossen")
+                elif close:
                     px = self.broker.close(sym, sl["side"], sl["qty"], sl["prot"])
                     self._book(sym, sl, px, "von Hand geschlossen", maker=False)
                 else:
@@ -913,6 +946,9 @@ class SpeedTrader:
         side, votes, fc = self._signal(sym, df, book)
         sl["signal"] = {"side": side, "votes": votes}
         now = time.time()
+        if sl["state"] == "grid":
+            self._grid(sym, sl, side, votes, tick, now)
+            return
         if sl["state"] == "idle":
             if side == 0 or self.session.get("stopping") or len(self.trades) >= p["max_trades"]:
                 return
@@ -931,6 +967,9 @@ class SpeedTrader:
             blocked = self._anomaly(sym, sl, df, tick, now)
             if blocked:
                 sl["signal"]["votes"] = {**votes, "wartet": blocked}
+                return
+            if self.kind == "ki" and p.get("grid"):
+                self._grid_open(sym, sl, side, votes, fc, tick, now)
                 return
             price = tick["bid"] if side == 1 else tick["ask"]
             stop, target = self._levels(df, price, side, fc)
@@ -1039,6 +1078,159 @@ class SpeedTrader:
                 self._book(sym, sl, px, "Zeit-Limit", maker=False)
             elif self.kind == "ki":
                 self._manage(sym, sl, tick, side, votes, df)
+
+    # ------------------------------------------------------------------ Netz-Modus (Mini-Einheiten)
+    def _grid_unit_qty(self, sym, price) -> float:
+        p = self.cur
+        notional = max(float(p["grid_unit_margin"]) * float(p["leverage"]), float(p["min_notional"]) * 1.01)
+        qty = self._round(sym, notional / price)
+        if qty * price < p["min_notional"]:                     # Rundung nach unten: eine Stufe hoeher
+            qty = self._round(sym, notional * 1.1 / price)
+        return qty if qty * price >= p["min_notional"] else 0.0
+
+    def _grid_stop_price(self, sl) -> float:
+        p = self.cur
+        budget_loss = float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100
+        return sl["entry"] - sl["side"] * budget_loss / max(sl["qty"], 1e-12)
+
+    def _grid_open(self, sym, sl, side, votes, fc, tick, now) -> None:
+        """Erste Einheit (Hauptposition) zum Marktpreis; Netz-Stop auf Bitget fuer die ganze Menge."""
+        p = self.cur
+        price = tick["ask"] if side == 1 else tick["bid"]
+        qty = self._grid_unit_qty(sym, price)
+        if qty <= 0:
+            sl["signal"]["votes"] = {**votes, "wartet": "Einheit zu klein fuer die Mindestposition"}
+            return
+        lev = int(p["leverage"])
+        real = self.broker.set_leverage(sym, lev)
+        if real and real != lev:
+            lev = real
+        total = self._balance()[0]
+        cap = p.get("max_open_risk_pct") or 0
+        if cap and total > 0 and self._open_risk() + float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100 > total * cap / 100:
+            sl["signal"]["votes"] = {**votes, "wartet": f"Gesamt-Risiko offener Positionen waere ueber {cap:g} % des Kontos"}
+            return
+        avg = self.broker.add(sym, side, qty)
+        sl.update(state="grid", side=side, qty=qty, entry=avg, price=avg, opened=now, lev=lev, taker_in=True,
+                  units=[{"entry": avg, "qty": qty, "time": now}], last_add=avg, sl=None, tp=None,
+                  why_in={k: v for k, v in votes.items() if k != "wartet"}, h_min=(fc or {}).get("decision_min"))
+        sl["sl"] = self._grid_stop_price(sl)
+        try:
+            sl["prot"] = self.broker.protect_stop(sym, side, qty, sl["sl"])
+        except Exception as e:  # noqa: BLE001 - Stop bleibt in Software (jede Runde geprueft)
+            log.warning("Netz-Stop %s nicht gesetzt: %s", sym, e)
+            sl["prot"] = {"sl": sl["sl"], "tp": None}
+        self._event(f"{sym.split(':')[0]} NETZ {'LONG' if side == 1 else 'SHORT'}: Hauptposition @ {avg:.6g} x{lev} "
+                    f"({qty:g}, Netz-Stop {sl['sl']:.6g})")
+
+    def _grid_book(self, sym, sl, unit, px, why) -> None:
+        p = self.cur
+        gross = sl["side"] * (px - unit["entry"]) * unit["qty"]
+        fees = (unit["entry"] + px) * unit["qty"] * p["taker"]
+        t = {"symbol": sym, "side": "long" if sl["side"] == 1 else "short", "entry": unit["entry"], "exit": px,
+             "qty": unit["qty"], "gross": round(gross, 6), "fees": round(fees, 6), "net": round(gross - fees, 6),
+             "why": why, "secs": round(time.time() - unit.get("time", time.time())), "time": int(time.time() * 1000),
+             "kind": self.kind, "label": self.session.get("label"), "why_in": sl.get("why_in"), "h_min": sl.get("h_min")}
+        self.trades.append(t)
+        self._save_trade(t)
+
+    def _grid_close(self, sym, sl, why) -> None:
+        """Ganzes Netz zum Marktpreis schliessen und jede Einheit einzeln verbuchen."""
+        px = self.broker.close(sym, sl["side"], sl["qty"], sl.get("prot") or {"sl": sl.get("sl"), "tp": None})
+        net = 0.0
+        for unit in sl["units"]:
+            self._grid_book(sym, sl, unit, px, why)
+            net += self.trades[-1]["net"]
+        self._event(f"{sym.split(':')[0]} Netz {why}: {len(sl['units'])} Einheiten, netto {net:+.4f} USDT")
+        sl.clear()
+        sl["state"] = "idle"
+
+    def _grid_restop(self, sym, sl) -> None:
+        sl["sl"] = self._grid_stop_price(sl)
+        prot = sl.get("prot") or {}
+        prot["sl"] = sl["sl"]
+        try:
+            if hasattr(self.broker, "pos_size"):
+                self.broker.resize(sym, sl["side"], sl["qty"], prot)
+                if sl["sl"] != prot.get("sl"):
+                    self.broker.move_stop(sym, sl["side"], sl["qty"], prot, sl["sl"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("Netz-Stop %s nicht angepasst: %s", sym, e)
+        sl["prot"] = prot
+
+    def _grid(self, sym, sl, side, votes, tick, now) -> None:
+        """Netz fuehren: Einheiten im Gewinn verkaufen (Hauptposition bleibt), bei Kurs gegen das Netz bis zum
+        Budget nachkaufen, Netz-Stop und KI-Drehung schliessen alles."""
+        p = self.cur
+        d = sl["side"]
+        last = tick["last"]
+        sell_px = tick["bid"] if d == 1 else tick["ask"]
+        buy_px = tick["ask"] if d == 1 else tick["bid"]
+        unreal = d * (last - sl["entry"]) * sl["qty"]
+        used = sum(u["entry"] * u["qty"] for u in sl["units"]) / max(sl["lev"], 1)
+        budget_loss = float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100
+        votes = {**votes, "Netz": f"{len(sl['units'])} Einheiten, Margin {used:.2f}/{float(p['grid_budget']):g} USDT, "
+                                  f"offen {unreal:+.4f} USDT"}
+        sl["signal"]["votes"] = votes
+        # 1) Netz-Stop (Software; auf Bitget liegt derselbe Stop) oder von aussen geschlossen
+        if hasattr(self.broker, "pos_size"):
+            try:
+                if self.broker.pos_size(sym, d) < sl["qty"] * 0.5:
+                    sl["miss"] = sl.get("miss", 0) + 1
+                    if sl["miss"] >= 3:
+                        px = sl["sl"] if abs(last - sl["sl"]) <= abs(sl["sl"]) * 0.003 else last
+                        for unit in sl["units"]:
+                            self._grid_book(sym, sl, unit, px, "Netz-Stop (Bitget)" if px == sl["sl"] else "von aussen geschlossen")
+                        self._event(f"{sym.split(':')[0]} Netz auf Bitget geschlossen @ {px:.6g}")
+                        sl.clear()
+                        sl["state"] = "idle"
+                        return
+                else:
+                    sl["miss"] = 0
+            except Exception as e:  # noqa: BLE001
+                log.debug("Netz Positionsgroesse %s: %s", sym, e)
+        if unreal <= -budget_loss or d * (last - sl["sl"]) <= 0:
+            self._grid_close(sym, sl, "Netz-Stop")
+            return
+        # 2) KI dreht klar -> alles schliessen
+        if side == -d:
+            self._grid_close(sym, sl, "KI gedreht")
+            return
+        if self.session.get("stopping"):
+            return
+        # 3) Einheiten im Gewinn verkaufen (die Hauptposition bleibt, solange grid_keep_base)
+        take = float(p["grid_take_pct"]) / 100
+        keep = 1 if p.get("grid_keep_base", True) else 0
+        changed = False
+        for unit in list(sl["units"]):
+            if len(sl["units"]) <= keep:
+                break
+            if d * (sell_px - unit["entry"]) / unit["entry"] >= take:
+                px = self.broker.close_part(sym, d, unit["qty"], sl.get("prot") or {})
+                self._grid_book(sym, sl, unit, px, "Einheit im Gewinn verkauft")
+                sl["units"].remove(unit)
+                changed = True
+        if changed and not sl["units"]:
+            self._event(f"{sym.split(':')[0]} Netz: alle Einheiten im Gewinn verkauft")
+            sl.clear()
+            sl["state"] = "idle"
+            return
+        # 4) Nachkaufen, wenn der Kurs gegen das Netz gelaufen ist und Budget uebrig ist
+        step = float(p["grid_step_pct"]) / 100
+        unit_margin = float(p["grid_unit_margin"])
+        if side == d and d * (sl["last_add"] - buy_px) / sl["last_add"] >= step and used + unit_margin <= float(p["grid_budget"]) * 1.05 \
+                and time.time() >= self.session.get("pause_until", 0):
+            qty = self._grid_unit_qty(sym, buy_px)
+            if qty > 0:
+                avg = self.broker.add(sym, d, qty)
+                sl["units"].append({"entry": avg, "qty": qty, "time": now})
+                sl["last_add"] = avg
+                changed = True
+                self._event(f"{sym.split(':')[0]} Netz: Einheit {len(sl['units'])} @ {avg:.6g}")
+        if changed:
+            sl["qty"] = sum(u["qty"] for u in sl["units"])
+            sl["entry"] = sum(u["entry"] * u["qty"] for u in sl["units"]) / sl["qty"]
+            self._grid_restop(sym, sl)
 
     def _anomaly(self, sym, sl, df, tick, now) -> str:
         """Schutz vor Boersen-Anomalien (belegte Bitget-Vorfaelle): Wartung, zu weiter Spread, Kurs-Sprung in
@@ -1365,7 +1557,7 @@ class SpeedTrader:
             "slots": {s: {"state": v.get("state"), "side": v.get("side"), "entry": v.get("entry") or v.get("price"),
                           "opened": int(v["opened"]) if v.get("opened") else None,
                           "sl": v.get("sl"), "tp": v.get("tp"), "qty": v.get("qty"), "partial": v.get("partial_done"),
-                          "lev": v.get("lev"), "added": v.get("added"),
+                          "lev": v.get("lev"), "added": v.get("added"), "units": len(v.get("units") or []) or None,
                           "signal": (v.get("signal") or {}).get("votes")}
                       for s, v in self.slots.items()},
         }

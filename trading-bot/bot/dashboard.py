@@ -134,6 +134,16 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
             raise RuntimeError("Ohne Kosten-Schutz auf dem Konto nur mit Bestaetigung OHNE SCHUTZ")
     if body.get("scale_in") is not None:
         opts["scale_in"] = bool(body.get("scale_in"))
+    if body.get("grid"):
+        opts["grid"] = True
+        for k in ("grid_unit_margin", "grid_budget", "grid_step_pct", "grid_take_pct", "grid_max_loss_pct"):
+            v = _num(body.get(k))
+            if v is not None:
+                opts[k] = float(v)
+        if opts.get("grid_max_loss_pct", 50) > 100:
+            opts["grid_max_loss_pct"] = 100.0
+        if body.get("target") == "account" and body.get("confirm_grid") != "NETZ":
+            raise RuntimeError("Netz-Modus auf dem Konto nur mit Bestaetigung NETZ")
     if body.get("target") == "account":
         if not account or not account.connected:
             raise RuntimeError("Erst im Reiter Bitget-Konto ein Konto verbinden")

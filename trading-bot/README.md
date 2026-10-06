@@ -334,6 +334,22 @@ alle 15 Minuten im Hintergrund.
 - **Laufende Kerze:** die KI bewertet die laufende Kerze alle 5 Sekunden mit den gelernten Modellen, der
   Autopilot prueft alle 1 bis 3 Sekunden, Stops und Ziele liegen als Bitget-Auftraege auf der Boerse.
 
+## Netz-Modus (Mini-Einheiten) - auf ausdruecklichen Wunsch
+
+Im KI-Autopilot: "Netz (Mini-Einheiten)". Statt einer Position handelt die KI-Richtung in vielen kleinen
+Einheiten: Einheit = Margin x Hebel (0,10 USDT x 50 = 5 USDT, die Bitget-Mindestposition). Die erste Einheit
+(Hauptposition) bleibt offen. Laeuft der Kurs um "Schritt" gegen das Netz, kommt bis zum Budget je Markt eine
+Einheit dazu. Einheiten im Gewinn (ab "Mitnahme", muss ueber den Hin- und Rueckgebuehren liegen) werden einzeln
+verkauft, Einheiten im Minus bleiben. Alles wird geschlossen, wenn der offene Verlust den **Netz-Stop** (% vom
+Budget, Stop liegt auch auf Bitget) erreicht oder die KI klar dreht. Auf dem Konto nur mit Bestaetigung NETZ.
+
+**Ehrliche Einordnung:** Auf Bitget verschmelzen alle Einheiten eines Marktes zu einer Position mit
+Durchschnittspreis - die Einheiten sind Buchfuehrung im Bot. Jede Einheit zahlt Gebuehren auf 5 USDT (rund
+0,6 Cent Taker hin und zurueck), ein Gewinn von 0,1 % bringt 0,5 Cent. Verluste halten heisst viele kleine
+Gewinne und ab und zu ein grosser Verlust; bei 50x liegt die Liquidation etwa 2 % entfernt. Das Netz ist
+deshalb bewusst NICHT die Voreinstellung. Tagesverlust-Limit 5 % und Gesamt-Risiko 3 % (ein Netz zaehlt mit
+Budget x Netz-Stop) bleiben, Kosten-Schutz gilt fuer die Richtungsentscheidung der KI weiter.
+
 ## Handelszeiten Gold/Silber
 
 Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in

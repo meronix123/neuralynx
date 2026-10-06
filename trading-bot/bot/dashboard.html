@@ -364,6 +364,14 @@
           <input id="ap-sizeval" value="1" style="width:52px"> <span id="ap-unit">% Risiko</span></label>
         <label>max. Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
         <label title="Erst einen Teil kaufen, den Rest nur im Gewinn nachkaufen - nie im Verlust"><input type="checkbox" id="ap-scale"> Teilkauf</label>
+        <label title="Auf ausdruecklichen Wunsch: statt einer Position viele kleine Einheiten in KI-Richtung. Hauptposition bleibt offen, Einheiten im Gewinn werden verkauft, bei Kurs gegen das Netz wird bis zum Budget nachgekauft. Netz-Stop und KI-Drehung schliessen alles. Gebuehren fallen je Einheit an - siehe README."><input type="checkbox" id="ap-grid" autocomplete="off" onchange="document.getElementById('ap-grid-l').hidden = !this.checked"> Netz (Mini-Einheiten)</label>
+        <div id="ap-grid-l" hidden class="sub" style="display:flex;flex-wrap:wrap;gap:4px 8px">
+          Einheit <input id="ap-grid-unit" value="0.10" style="width:44px" autocomplete="off"> USDT Margin &middot;
+          Budget <input id="ap-grid-budget" value="10" style="width:40px" autocomplete="off"> USDT &middot;
+          Schritt <input id="ap-grid-step" value="0.2" style="width:36px" autocomplete="off"> % &middot;
+          Mitnahme <input id="ap-grid-take" value="0.3" style="width:36px" autocomplete="off"> % &middot;
+          Netz-Stop <input id="ap-grid-loss" value="50" style="width:36px" autocomplete="off"> % vom Budget
+        </div>
         <label>Teilverkauf bei +1,5 R <select id="ap-part"><option value="0">aus</option><option value="25">25 %</option><option value="50" selected>50 %</option><option value="75">75 %</option></select></label>
         <label>Tempo <select id="ap-fast" autocomplete="off"><option value="0">normal (bis 30 min)</option><option value="1">Fast (5-10 min)</option><option value="2">Turbo: Hebel-Speed-KI (1-Minuten-Modell)</option></select></label>
         <small class="sub" id="ap-tempo-note">Fast/Turbo: Stops so eng, dass die Gebuehren meist ueber 1 R kosten - handelt nur bei positivem Erwartungswert, auf dem Konto also selten. In der Simulation mit Kosten-Schutz aus siehst du alle Trades.</small>
@@ -639,6 +647,7 @@ function scannerBlock() {
   return `<div class="sub" style="margin-top:10px;font-weight:600">Scanner (KI-Autopilot)</div>` + extra.map(([s, v]) => {
     const sig = v.signal && v.signal.votes ? v.signal.votes : {};
     const st = v.state === "open" ? `<span class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"} @ ${px(v.entry)}</span>`
+      : v.state === "grid" ? `<span class="${v.side === 1 ? "up" : "down"}">NETZ ${v.side === 1 ? "LONG" : "SHORT"}</span> ${v.units || 0} Einheiten @ ${px(v.entry)}`
       : v.state === "pending" ? "Limit wartet" : sig.wartet ? `wartet: ${sig.wartet}` : "sucht";
     return `<div class="sym"><div class="top"><span>${s.split(":")[0]}</span><span class="sub">${sig.KI ? sig.KI + " " + q(sig.Sicherheit) : ""}</span></div><div class="sub">${st}</div></div>`;
   }).join("");
@@ -1449,6 +1458,7 @@ function renderSession(k) {
   const sig = v => v && v.signal && v.signal.KI ? ` <small class="sub">(KI ${v.signal.KI}${v.signal.Sicherheit ? " " + q(v.signal.Sicherheit) : ""})</small>` : "";
   const slots = Object.entries(sp.slots || {}).map(([s, v]) => `${s.split("/")[0]}: ${v.state === "open"
     ? `<b class="${v.side === 1 ? "up" : "down"}">${v.side === 1 ? "LONG" : "SHORT"}</b>${v.lev ? " x" + v.lev : ""} @ ${px(v.entry)} &middot; Stop ${px(v.sl)}${v.added ? " &middot; nachgekauft" : ""}${v.partial ? " &middot; Teil verkauft" : ""}`
+    : v.state === "grid" ? `<b class="${v.side === 1 ? "up" : "down"}">NETZ ${v.side === 1 ? "LONG" : "SHORT"}</b>${v.lev ? " x" + v.lev : ""} &middot; ${v.units || 0} Einheiten @ ${px(v.entry)} &middot; Netz-Stop ${px(v.sl)}${v.signal && v.signal.Netz ? " &middot; " + v.signal.Netz : ""}`
     : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : v.signal && v.signal.wartet ? `wartet (${v.signal.wartet})` : "sucht"}${sig(v)}`).join(" &middot; ");
   out(`<div class="sprun">
     ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}${(sp.params || {}).turbo ? " &middot; <b class=\"warn\">TURBO (1-Minuten-Modell)</b>" : (sp.params || {}).fast ? " &middot; <b class=\"warn\">FAST</b>" : " &middot; Tempo normal"}) seit ${hm(sp.running_s || 0)}${sp.resumed ? " &middot; nach Neustart fortgesetzt" : ""}${sp.pause_until ? ` &middot; <span class="warn">Tagesverlust-Limit: Pause bis ${time(sp.pause_until * 1000)}</span>` : ""} &middot; ${slots}<br>` :
@@ -1506,6 +1516,12 @@ async function sessionStart(k) {
     body.scale_in = document.getElementById("ap-scale").checked;
     if (document.getElementById("ap-scan").checked) body.scan_top = val("ap-scan-n");
     body.partial_frac = val("ap-part");
+    if (document.getElementById("ap-grid").checked) {
+      body.grid = true;
+      body.grid_unit_margin = val("ap-grid-unit").replace(",", "."); body.grid_budget = val("ap-grid-budget").replace(",", ".");
+      body.grid_step_pct = val("ap-grid-step").replace(",", "."); body.grid_take_pct = val("ap-grid-take").replace(",", ".");
+      body.grid_max_loss_pct = val("ap-grid-loss").replace(",", ".");
+    }
   }
   if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.turbo = val("ap-fast") === "2"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; body.cost_guard = document.getElementById("ap-cost").checked; }
   const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
@@ -1516,6 +1532,11 @@ async function sessionStart(k) {
       const r = await askBox(`ACHTUNG: ${name} mit ECHTEM GELD einschalten (${size} je Trade, max. ${body.leverage}x, laeuft bis Aus). Zum Bestaetigen JA eintippen:`, [["Bestaetigung", ""]]);
       if (!r || r[0].trim().toUpperCase() !== "JA") return toast("Nicht gestartet - Bestaetigung JA fehlt", false);
       body.confirm = "JA";
+    }
+    if (k === "ap" && body.grid) {
+      const r3 = await askBox(`NETZ auf dem Konto: je Markt bis ${body.grid_budget} USDT Margin in Einheiten zu ${body.grid_unit_margin} USDT bei ${body.leverage}x. Verluste werden gehalten, bis der Netz-Stop (${body.grid_max_loss_pct} % vom Budget) greift oder die KI dreht. Jede Einheit zahlt Gebuehren. Zum Bestaetigen NETZ eintippen:`, [["Bestaetigung", ""]]);
+      if (!r3 || r3[0].trim().toUpperCase() !== "NETZ") return toast("Nicht gestartet - Bestaetigung NETZ fehlt", false);
+      body.confirm_grid = "NETZ";
     }
     if (k === "ap" && body.cost_guard === false) {
       const r2 = await askBox("OHNE KOSTEN-SCHUTZ auf dem Konto: Die KI handelt dann auch Trades, bei denen die Gebuehren rechnerisch mehr kosten als der Stop (Turbo/Fast). Tagesverlust-Limit 5 % und Gesamt-Risiko 3 % bleiben. Zum Bestaetigen OHNE SCHUTZ eintippen:", [["Bestaetigung", ""]]);

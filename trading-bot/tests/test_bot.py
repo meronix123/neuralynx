@@ -3358,3 +3358,63 @@ def test_ki_only_mode_lets_only_the_ki_trade(tmp_path, monkeypatch):
     client.i = 402
     bot.step()
     assert called                                                           # ohne ki_only: Regel-Bot wie bisher
+
+
+def test_grid_mode_units_take_profit_add_on_dips_and_net_stop():
+    """Netz-Modus: Hauptposition bleibt, Einheiten im Gewinn werden verkauft, bei Kurs gegen das Netz wird bis
+    zum Budget nachgekauft, Netz-Stop und KI-Drehung schliessen alles; Start prueft Mindestposition/Gebuehren."""
+    from bot.speed import PaperBroker, SpeedTrader
+
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    feed = {"last": 100.0}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01}),
+                     {"loop_s": 0.0}, forecast_fn=lambda s: fc, kind="ki")
+    broker = PaperBroker(lambda s: ap.market[s], ap.p)
+    with pytest.raises(ValueError, match="Mindestposition"):
+        ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=10, grid_unit_margin=0.1, cost_guard=False)
+    with pytest.raises(ValueError, match="gebuehren"):
+        ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_take_pct=0.05, cost_guard=False)
+    ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_unit_margin=0.1, grid_budget=0.3,
+             grid_step_pct=0.2, grid_take_pct=0.3, grid_max_loss_pct=50, min_conf=0.56, cost_guard=False, fast_entry=False)
+    ap.stop(close=True)
+    ap.thread.join(5)
+    ap.cur["loop_s"] = 0.0
+    ap.active, ap.session = True, {"symbols": ["BTC/USDT:USDT"], "end": time.time() + 600, "equity0": 87.0,
+                                   "label": "Simulation", "stopping": False}
+    ap.slots = {"BTC/USDT:USDT": {"state": "idle"}}
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    s = ap.slots[sym]
+    assert s["state"] == "grid" and len(s["units"]) == 1 and s["qty"] * s["entry"] >= ap.cur["min_notional"]
+    assert s["lev"] == 50 and s["sl"] < s["entry"] and "NETZ LONG" in ap.events[-1]
+    feed["last"] = 99.75                                                    # 0,25 % gegen das Netz -> Einheit 2
+    ap.step(sym)
+    assert len(s["units"]) == 2 and s["entry"] < 100.0
+    feed["last"] = 99.5                                                     # Einheit 3 (Budget 0,3 = 3 Einheiten)
+    ap.step(sym)
+    assert len(s["units"]) == 3
+    feed["last"] = 99.25                                                    # Budget voll: keine 4. Einheit
+    ap.step(sym)
+    assert len(s["units"]) == 3 and "Budget" not in ap.events[-1]
+    feed["last"] = 100.1                                                    # Einheiten 2 und 3 im Gewinn (>= 0,3 %) raus
+    ap.step(sym)
+    assert len(s["units"]) == 1 and s["units"][0]["entry"] == pytest.approx(100.01, abs=0.02)   # Hauptposition bleibt
+    sold = [t for t in ap.trades if t["why"] == "Einheit im Gewinn verkauft"]
+    assert len(sold) == 2 and all(t["net"] > 0 for t in sold)
+    stop_px = s["sl"]
+    feed["last"] = stop_px - 0.01                                           # Netz-Stop
+    ap.step(sym)
+    assert s["state"] == "idle" and ap.trades[-1]["why"] == "Netz-Stop" and ap.trades[-1]["net"] < 0
+    ap.step(sym)                                                            # neues Netz, dann dreht die KI
+    assert s["state"] == "grid"
+    fc.update(p_up=0.38, p_up_raw=0.38, decision="SHORT")
+    ap.step(sym)
+    assert s["state"] == "idle" and ap.trades[-1]["why"] == "KI gedreht"
+    assert ap.status()["slots"][sym]["units"] is None
+    # Risiko-Deckel: ein Netz zaehlt mit seinem moeglichen Verlust (Budget x Netz-Stop) zum Gesamt-Risiko
+    ap.cur["grid_budget"], ap.cur["max_open_risk_pct"] = 10.0, 3
+    fc.update(p_up=0.62, p_up_raw=0.62, decision="LONG")
+    ap.step(sym)
+    assert s["state"] == "idle" and "Gesamt-Risiko" in s["signal"]["votes"]["wartet"]   # 5 USDT > 3 % von 87
