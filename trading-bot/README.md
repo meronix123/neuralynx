@@ -298,6 +298,21 @@ bis 15 min. Es zaehlt die staerkere ehrliche (kalibrierte, gedeckelte) Sicherhei
 eigene Live-Bilanz mit - ist das 1-Minuten-Modell auf einem Markt gesperrt, kann die 5-Minuten-KI dort
 trotzdem handeln, wenn sie sich live bewaehrt. Im Status steht, welche KI entschieden hat ("KI 5 min").
 
+## Gemeinsames Lernen (Pool aller Maerkte)
+
+Jede KI lernt weiter ihren eigenen Markt. Zusaetzlich lernt alle 15 Minuten ein **gemeinsames Modell aus allen
+Krypto-Maerkten** (je Markt die neuesten 8.000 Kerzen, gleiche Merkmale, normiert in ATR/Prozent) - 20 Maerkte
+sehen 20-mal so viele Beispiele wie einer allein. In der Prognose-Forschung schlagen solche "globalen" Modelle
+Einzelmodelle fast immer, gerade bei wenig Daten je Markt (neue Listings, Turbo-1-Minuten-Modell).
+
+Ehrlich bleibt es so: je Markt und Vorhersagezeit wird der **Pool-Anteil (0 ... 100 %) an der Auswahl-Strecke
+gewaehlt** - hilft der Pool dort nicht, bleibt er draussen. Der Pool hat einen **gemeinsamen Stichtag** (Beginn
+der fruehesten Auswahl-Strecke): sein Auswahl-Modell kennt nur Kerzen davor, damit kein Markt an Kerzen gemessen
+wird, die ein anderer Markt dem Pool schon verraten hat (Maerkte laufen gleichzeitig). Kalibrierung, Deckel und
+Live-Bilanz bleiben je Markt. Gold/Silber bleiben draussen (andere Handelszeiten, andere Merkmale). Im
+KI-Feld steht dann z. B. "Modell: linear + Pool · Pool: 18 Maerkte, 120.000 Beispiele". Rechenzeit: etwa 20 s
+alle 15 Minuten im Hintergrund.
+
 ## Handelszeiten Gold/Silber
 
 Gold und Silber sind Freitag 21:00 bis Sonntag 22:00 UTC und taeglich 21:00-22:00 UTC zu (anpassbar in

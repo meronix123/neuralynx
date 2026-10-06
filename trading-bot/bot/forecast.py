@@ -483,6 +483,113 @@ def tp_before_sl(df: pd.DataFrame, X_all: np.ndarray, flat_c: np.ndarray, warm: 
     return out
 
 
+POOL_ROWS = 8000                         # je Markt hoechstens die neuesten 8.000 Kerzen in den Pool
+POOL_EVERY_S = 900                       # Pool alle 15 Minuten neu lernen
+POOL_GRID = (1.0, 8.0, 32.0)             # Regularisierung des Pools (Auswahl am gemeinsamen Stichtag)
+
+
+class Pool:
+    """Gemeinsames Modell aller Maerkte mit gleichen Merkmalen ("globales" Modell): lernt aus allen Kerzen aller
+    Maerkte zusammen - 20 Maerkte sehen 20-mal so viele Beispiele wie ein Markt allein. Je Markt entscheidet die
+    Auswahl-Strecke, wie viel Pool beigemischt wird (0 ... 100 %), und Kalibrierung, Deckel und Live-Bilanz
+    bleiben je Markt. Zwei Modelle je Vorhersagezeit: 'sel' kennt nur Kerzen vor dem gemeinsamen Stichtag
+    (fuer die ehrliche Auswahl/Messung je Markt), 'final' alle Kerzen (fuer die Live-Prognose)."""
+
+    def __init__(self, names: list[str], horizons: list[int], step: int):
+        self.names, self.horizons, self.step = list(names), list(horizons), step
+        self.sel: dict[int, object] = {}
+        self.final: dict[int, object] = {}
+        self.cut_ts, self.n_markets, self.n_rows, self.l2, self.at = 0, 0, 0, 0.0, 0.0
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.final) and self.n_markets >= 2
+
+    def matrix(self, feats: pd.DataFrame) -> np.ndarray:
+        return np.nan_to_num(feats.reindex(columns=self.names).to_numpy(float), nan=0.0)
+
+    def p(self, h: int, X: np.ndarray, final: bool = False) -> np.ndarray:
+        m = (self.final if final else self.sel).get(h)
+        return _logit_p(m, X) if m is not None else np.full(len(X), 0.5)
+
+
+def pool_samples(df: pd.DataFrame, feats: pd.DataFrame, horizons: list[int], step: int, move_min: float) -> dict | None:
+    """Lernbeispiele eines Marktes fuer den Pool: Merkmale (neueste POOL_ROWS Kerzen), je Zeit Index + Ziel,
+    Zeitstempel - mit denselben Regeln wie beim Einzelmodell (nur abgeschlossene Kerzen, keine Luecken/Stillstand,
+    nur Bewegungen >= move_min %)."""
+    from .hours import flat_mask
+    n_closed = len(df) - 1
+    if n_closed < 300:
+        return None
+    start = max(0, n_closed - POOL_ROWS)
+    d, f = df.iloc[start:n_closed + 1].reset_index(drop=True), feats.iloc[start:n_closed + 1].reset_index(drop=True)
+    nc = len(d) - 1
+    lr = np.log(d["close"].astype(float).to_numpy())
+    ts = d["ts"].astype("int64").to_numpy()
+    gap = np.r_[False, np.diff(ts) > 2 * step * 60_000]
+    flat_c = np.r_[0, np.cumsum(flat_mask(d) | gap)]
+    warm = min(300, nc // 5)
+    out = {"feats": f, "ts": ts, "labels": {}}
+    for h in horizons:
+        idx = np.arange(warm, nc - h)
+        ret = (lr[idx + h] - lr[idx]) * 100
+        ok = ((flat_c[idx + h + 1] - flat_c[idx]) == 0) & (np.abs(ret) >= move_min)
+        out["labels"][h] = (idx[ok], (ret[ok] > 0).astype(float))
+    return out
+
+
+def fit_pool(parts: dict[str, dict], horizons: list[int], step: int, val_share: float = 0.3,
+             half_life: int = 6000) -> Pool | None:
+    """Pool aus den Beispielen mehrerer Maerkte lernen. Gemeinsamer Stichtag = fruehester Beginn der
+    Auswahl-Strecke ueber alle Maerkte (letzte val_share der Kerzen je Markt): 'sel' lernt nur davor, damit
+    kein Markt an Kerzen gemessen wird, die ein anderer Markt dem Pool schon verraten hat (Maerkte laufen
+    gleichzeitig). Regularisierung wird an den Kerzen nach dem Stichtag gewaehlt, 'final' lernt dann alles."""
+    parts = {k: v for k, v in parts.items() if v}
+    if len(parts) < 2:
+        return None
+    names = sorted(set.intersection(*(set(v["feats"].columns) for v in parts.values())))
+    if not names:
+        return None
+    pool = Pool(names, horizons, step)
+    pool.cut_ts = int(min(v["ts"][int(len(v["ts"]) * (1 - val_share))] for v in parts.values()))
+    t_now = max(int(v["ts"][-1]) for v in parts.values())
+    Xs = {k: pool.matrix(v["feats"]) for k, v in parts.items()}
+    best_l2 = None
+    for h in horizons:
+        X_sel, y_sel, w_sel, X_va, y_va, X_all, y_all, w_all = [], [], [], [], [], [], [], []
+        for k, v in parts.items():
+            idx, y = v["labels"].get(h, (np.array([], int), np.array([])))
+            if not len(idx):
+                continue
+            ts_i = v["ts"][idx]
+            age = (t_now - ts_i) / (step * 60_000)
+            w = 0.5 ** (age / half_life)
+            before = ts_i + (h + 1) * step * 60_000 <= pool.cut_ts      # Ziel-Zeitraum endet vor dem Stichtag
+            X_sel.append(Xs[k][idx[before]]); y_sel.append(y[before]); w_sel.append(w[before])
+            X_va.append(Xs[k][idx[~before]]); y_va.append(y[~before])
+            X_all.append(Xs[k][idx]); y_all.append(y); w_all.append(w)
+        if not X_all:
+            continue
+        X_sel, y_sel, w_sel = np.vstack(X_sel), np.concatenate(y_sel), np.concatenate(w_sel)
+        X_va, y_va = np.vstack(X_va), np.concatenate(y_va)
+        X_all, y_all, w_all = np.vstack(X_all), np.concatenate(y_all), np.concatenate(w_all)
+        if len(y_sel) < 1000 or len(y_va) < 300:
+            continue
+        if best_l2 is None:                                           # Regularisierung einmal (laengste Zeit zuerst)
+            scores = []
+            for l2 in POOL_GRID:
+                m = _logit_fit(X_sel, y_sel, w_sel, l2)
+                scores.append((_logloss(_logit_p(m, X_va), y_va), l2))
+            best_l2 = min(scores)[1]
+        pool.sel[h] = _logit_fit(X_sel, y_sel, w_sel, best_l2)
+        pool.final[h] = _logit_fit(X_all, y_all, w_all, best_l2)
+        pool.n_rows = max(pool.n_rows, int(len(y_all)))
+    if not pool.final:
+        return None
+    pool.l2, pool.n_markets, pool.at = best_l2 or 0.0, len(parts), time.time()
+    return pool
+
+
 def _local_cal(p_te: np.ndarray, yt: np.ndarray, p_now: float, h: int) -> tuple[float, float, int]:
     """Sicherheit je Meinungsstaerke: Wie oft lag die KI an ungesehenen Daten richtig, wenn sie eine
     aehnlich starke Meinung hatte wie jetzt? -> (kalibrierte Wahrscheinlichkeit "hoeher", z-Wert, Anzahl).
@@ -532,7 +639,7 @@ def selective(p_te: np.ndarray, yt: np.ndarray, h: int, thresholds=(0.52, 0.54, 
 def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | None = None,
           funding: pd.DataFrame | None = None, macro: pd.DataFrame | None = None, gold: bool = False,
           boost: bool = True, keep_test: bool = False, move_min: float = 0.1, step_min: int = None,
-          horizons: list[int] | None = None, strat: dict | None = None) -> dict | None:
+          horizons: list[int] | None = None, strat: dict | None = None, pool=None) -> dict | None:
     """Modell aus 5-Minuten-Kerzen (ts, open, high, low, close, volume; die letzte darf offen sein).
 
     Drei Abschnitte: Lernen (erste 70 %), Auswahl (naechste 10 %: Einstellungen + Mischung linear/Baeume),
@@ -549,6 +656,8 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     keep = ~np.isnan(X_all[:-1]).all(0)           # Merkmale ohne Daten weglassen
     names = [n for n, k in zip(feats.columns, keep) if k]
     X_all = np.nan_to_num(X_all[:, keep], nan=0.0)
+    # Gemeinsames Modell aller Maerkte (Pool): gleiche Merkmalsliste, fehlende Spalten = 0
+    Xp = pool.matrix(feats) if pool is not None and pool.ready else None
     lr = np.log(df["close"].astype(float).to_numpy())
     age = np.arange(len(df))[::-1].astype(float)
     warm = min(300, n_closed // 5)                 # die ersten Kerzen haben unvollstaendige Indikatoren
@@ -599,7 +708,9 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
     live = live or {}
     probs, raw, moves, quality, caps = [], [], [], [], []
     test_keep: dict = {}
-    kept_models: dict = {"names": names, "dir": {}, "mix": mix, "boost": None, "tb": {}, "H": H, "step": STEP}
+    kept_models: dict = {"names": names, "dir": {}, "mix": mix, "boost": None, "tb": {}, "H": H, "step": STEP,
+                         "pool": pool if Xp is not None else None, "pool_w": {}}
+    ts_closed = ts_[:n_closed]
     for h in HZ:
         idx, ret, ret_alive = labeled(np.arange(warm, n_closed - h), h)
         if len(idx) < 200:
@@ -622,6 +733,17 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
             b_now = float(b_final.proba(X_all[n_closed - 1:n_closed])[0])
             p_now = (1 - mix) * p_now + mix * b_now
             kept_models["boost"] = b_final
+        if Xp is not None and h in pool.sel:
+            # Pool dazu? Anteil an der Auswahl-Strecke waehlen. Das Auswahl-Modell des Pools kennt nur Kerzen vor
+            # dem gemeinsamen Stichtag - liegt die Auswahl-Strecke dieses Marktes davor, ist sie nicht unberuehrt:
+            # dann kein Pool (ehrlich bleiben).
+            if ts_closed[idx[va_i[0]]] >= pool.cut_ts:
+                q_va, q_te = pool.p(h, Xp[idx[va_i]]), pool.p(h, Xp[idx[te_i]])
+                w = min((0.0, 0.25, 0.5, 0.75, 1.0), key=lambda a_: _logloss((1 - a_) * p_va + a_ * q_va, y[va_i]))
+                if w > 0:
+                    p_va, p_te = (1 - w) * p_va + w * q_va, (1 - w) * p_te + w * q_te
+                    p_now = (1 - w) * p_now + w * float(pool.p(h, Xp[n_closed - 1:n_closed], final=True)[0])
+                kept_models["pool_w"][h] = w
         # Platt-Kalibrierung (2 Parameter) am Auswahl-Abschnitt: wie viel von der Rohmeinung ist echt?
         # Bei Zufall geht die Steigung gegen 0 (-> 50 %), bei echtem Vorsprung bleibt die Sicherheit erhalten.
         cal = None
@@ -714,7 +836,10 @@ def build(df: pd.DataFrame, leader=None, test_share: float = 0.2, live: dict | N
         "_models": kept_models,
         "sr_up_pct": _sr_pct(feats, "m5_sr_up"), "sr_dn_pct": _sr_pct(feats, "m5_sr_dn"),
         "model": {"l2": L2_, "half_life_days": round(HL_ * STEP / 1440, 1), "trees": mix,
-                  "kind": "linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume"},
+                  "kind": ("linear" if mix == 0 else "Baeume" if mix == 1 else "linear + Baeume")
+                  + (" + Pool" if any(kept_models["pool_w"].values()) else ""),
+                  "pool": {"w": {h * STEP: w for h, w in kept_models["pool_w"].items()},
+                           "markets": pool.n_markets, "rows": pool.n_rows} if Xp is not None else None},
     }
 
 
@@ -1050,6 +1175,8 @@ class Forecaster:
         self.filled: set[str] = set()
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[float, object]] = {}
+        self.pool: Pool | None = None                     # gemeinsames Modell aller Krypto-Maerkte
+        self.pool_at, self.pool_busy = 0.0, False
 
     # hoechstens 2 Trainings gleichzeitig (alle KIs zusammen) - sonst wuergt der Rechner beim Handeln
     TRAIN_SLOTS = threading.BoundedSemaphore(2)
@@ -1194,22 +1321,60 @@ class Forecaster:
         with self.TRAIN_SLOTS:
             self._train_now(sym, df, bar)
 
+    def _inputs(self, sym: str, fresh_only: bool = False) -> tuple[dict, object, object]:
+        """Leitwaehrungen, Funding und Makro fuer einen Markt (wie beim Lernen)."""
+        lead = {}
+        if "XAU" not in sym and "XAG" not in sym:
+            for ls in self.leaders:
+                if ls == sym:
+                    continue
+                try:
+                    if fresh_only:
+                        if ls in self.fresh:
+                            lead[ls.split("/")[0].lower()] = self.fresh[ls][1]
+                    else:
+                        lead[ls.split("/")[0].lower()] = self._candles(ls)
+                except Exception as e:  # noqa: BLE001 - ohne Leitwaehrung weiter
+                    log.debug("KI: %s fehlt (%s)", ls, e)
+        funding = self._cached(f"funding|{sym}", 3600, lambda: self.funding_fn(sym)) if self.funding_fn else None
+        macro = self._cached("macro", 6 * 3600, self.macro_fn) if self.macro_fn else None
+        return lead, funding, macro
+
+    def _pool_due(self) -> bool:
+        syms = [s for s in self.fresh if "XAU" not in s and "XAG" not in s]
+        return len(syms) >= 2 and not self.pool_busy and time.time() - self.pool_at >= POOL_EVERY_S
+
+    def _train_pool(self) -> None:
+        """Gemeinsames Modell aller Krypto-Maerkte neu lernen (alle 15 min, im Hintergrund, ein Lernplatz).
+        Gold/Silber bleiben draussen (andere Merkmale, andere Handelszeiten)."""
+        self.pool_busy = True
+        try:
+            with self.TRAIN_SLOTS:
+                t0 = time.time()
+                parts = {}
+                for sym, (_, df) in list(self.fresh.items()):
+                    if "XAU" in sym or "XAG" in sym or len(df) < 400:
+                        continue
+                    lead, funding, macro = self._inputs(sym, fresh_only=True)
+                    feats = make_features(df, lead, funding, macro, False, self.step, self.build_opts.get("strat"))
+                    parts[sym] = pool_samples(df, feats, self.horizons, self.step, self.build_opts.get("move_min", 0.1))
+                pool = fit_pool(parts, self.horizons, self.step)
+                if pool is not None:
+                    self.pool = pool
+                    log.info("KI-Pool: %d Maerkte, %d Beispiele, L2 %g (%.0f s)", pool.n_markets, pool.n_rows, pool.l2,
+                             time.time() - t0)
+        except Exception as e:  # noqa: BLE001 - Pool ist Zusatz
+            log.warning("KI-Pool: %s", e)
+        finally:
+            self.pool_at, self.pool_busy = time.time(), False
+
     def _train_now(self, sym: str, df: pd.DataFrame, bar: int) -> None:
         try:
-            lead = {}
-            if "XAU" not in sym and "XAG" not in sym:
-                for ls in self.leaders:
-                    if ls != sym:
-                        try:
-                            lead[ls.split("/")[0].lower()] = self._candles(ls)
-                        except Exception as e:  # noqa: BLE001 - ohne Leitwaehrung weiter
-                            log.debug("KI: %s fehlt (%s)", ls, e)
-            funding = self._cached(f"funding|{sym}", 3600, lambda: self.funding_fn(sym)) if self.funding_fn else None
-            macro = self._cached("macro", 6 * 3600, self.macro_fn) if self.macro_fn else None
+            lead, funding, macro = self._inputs(sym)
             t0 = time.time()
             fc = build(df, lead, live=self.log.stats(sym), funding=funding, macro=macro,
                        gold="XAU" in sym or "XAG" in sym, step_min=self.step, horizons=self.horizons,
-                       **self.build_opts)
+                       pool=self.pool if ("XAU" not in sym and "XAG" not in sym) else None, **self.build_opts)
             if fc:
                 fc["learn_s"] = round(time.time() - t0, 1)
                 self.log.add(sym, fc, float(df["close"].iloc[-1]))
@@ -1277,6 +1442,10 @@ class Forecaster:
                 p_raw = float(_logit_p(model, X)[0])
                 if h == m["H"] and m.get("mix", 0) > 0 and m.get("boost") is not None:
                     p_raw = (1 - m["mix"]) * p_raw + m["mix"] * float(m["boost"].proba(X)[0])
+                w = (m.get("pool_w") or {}).get(h)
+                if w and m.get("pool") is not None:
+                    q = float(m["pool"].p(h, m["pool"].matrix(feats.iloc[-1:]), final=True)[0])
+                    p_raw = (1 - w) * p_raw + w * q
                 if cal_h is not None:
                     z = math.log(max(p_raw, 1e-6) / max(1 - p_raw, 1e-6))
                     p_raw = float(_logit_p(cal_h, np.array([[z]]))[0])
@@ -1314,6 +1483,9 @@ class Forecaster:
             if stale and sym not in self.busy:              # neue 5-Minuten-Kerze -> im Hintergrund neu lernen
                 self.busy.add(sym)
                 self._spawn(self._train, sym, df, bar)
+            if self._pool_due():                            # gemeinsames Modell aller Maerkte (alle 15 min)
+                self.pool_busy = True
+                self._spawn(self._train_pool)
         cached = self.models.get(sym)
         info = self.info(sym, df)
         fc = cached[1] if cached else None

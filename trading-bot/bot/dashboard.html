@@ -1607,7 +1607,8 @@ function learnLine(L, d) {
   const dur = since >= 86400 ? `${Math.floor(since / 86400)} T ${Math.floor(since % 86400 / 3600)} Std` : `${Math.floor(since / 3600)} Std ${Math.floor(since % 3600 / 60)} min`;
   const n = v => Number(v || 0).toLocaleString("de-DE");
   const weeks = (L.weeks || []).map(w => `${w.week}: ${Math.round(w.hit * 100)} %`).join(", ");
-  const m = d && d.model ? ` &middot; Modell: ${d.model.kind}, ${d.features} Merkmale` : "";
+  const m = d && d.model ? ` &middot; Modell: ${d.model.kind}, ${d.features} Merkmale` +
+    (d.model.pool ? ` &middot; Pool: ${d.model.pool.markets} Maerkte, ${n(d.model.pool.rows)} Beispiele` : "") : "";
   const book = L.book_bars >= L.book_needed ? "Orderbuch: aktiv" : `Orderbuch: sammelt ${n(L.book_bars)}/${n(L.book_needed)}`;
   return `<div class="sub" style="margin-top:2px">&#129504; Lernt seit <b>${dur}</b> &middot; Gedaechtnis <b>${n(L.bars)}</b> Kerzen (${String(L.data_days).replace(".", ",")} Tage)` +
     `${m} &middot; ${n(L.retrains)}x neu gelernt &middot; ${n(L.checked)} Entscheidungen geprueft &middot; ${book}` +

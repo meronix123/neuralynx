@@ -3246,3 +3246,40 @@ def test_turbo_blends_one_minute_model_with_five_minute_ki():
     fc5["live"] = {"n": 200, "hit": 0.45}                                               # 5-min-Quelle live gesperrt
     ap.step("BTC/USDT:USDT")
     assert "Markt gesperrt" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["KI"]
+
+
+def test_pool_model_learns_across_markets_without_leaking_test_data(tmp_path):
+    """Gemeinsames Lernen: Maerkte mit wenig Daten profitieren vom Pool (Mischanteil am Auswahl-Abschnitt gewaehlt),
+    der gemeinsame Stichtag schuetzt die Mess-Strecke, und der Forecaster lernt den Pool im Hintergrund mit."""
+    from bot.forecast import HORIZONS, Forecaster, build, fit_pool, make_features, pool_samples
+
+    dfs = {f"M{i}/USDT:USDT": _fc_frame(1500, 0.25, 10 + i) for i in range(8)}
+    parts = {k: pool_samples(df, make_features(df), HORIZONS, 5, 0.1) for k, df in dfs.items()}
+    pool = fit_pool(parts, HORIZONS, 5)
+    assert pool.ready and pool.n_markets == 8 and set(pool.sel) == set(HORIZONS) and pool.l2 > 0
+    for v in parts.values():                                   # Stichtag: vor jeder Auswahl-Strecke
+        assert pool.cut_ts <= v["ts"][int(len(v["ts"]) * 0.7)]
+    loc, pooled, ws = [], [], []
+    for k in list(dfs)[:4]:
+        a, b = build(dfs[k]), build(dfs[k], pool=pool)
+        loc.append(a["hit_30m"]); pooled.append(b["hit_30m"]); ws.append(b["model"]["pool"]["w"])
+    assert np.mean(pooled) > np.mean(loc) + 0.02 and any(w.get(5, 0) > 0 for w in ws)
+    assert all("Pool" in build(dfs[k], pool=pool)["model"]["kind"] for k in list(dfs)[:1])
+    assert build(dfs["M0/USDT:USDT"])["model"]["pool"] is None   # ohne Pool: wie bisher
+    # Forecaster: Pool wird im Hintergrund (hier synchron) gelernt und fliesst in die Prognosen ein
+    import bot.forecast as fcmod
+    fx = Forecaster(lambda s, tf="5m", limit=300: dfs[s], tmp_path, "paper", None, lambda s: None, background=False)
+    fx.fresh = {k: (0.0, df) for k, df in dfs.items()}
+    fx.pool_at = 0.0
+    assert fx._pool_due()
+    fx._train_pool()
+    assert fx.pool is not None and fx.pool.n_markets == 8 and not fx.pool_busy
+    fx.pool_at = time.time()
+    assert not fx._pool_due()                                  # erst wieder nach POOL_EVERY_S
+    fx._train_now("M0/USDT:USDT", dfs["M0/USDT:USDT"], 1)
+    fc = fx.models["M0/USDT:USDT"][1]
+    assert fc["model"]["pool"]["markets"] == 8 and fc["_models"]["pool"] is fx.pool
+    gold = Forecaster(lambda s, tf="5m", limit=300: dfs["M0/USDT:USDT"], tmp_path, "paper", None, lambda s: None, background=False)
+    gold.fresh = {"XAU/USDT:USDT": (0.0, dfs["M0/USDT:USDT"]), "XAG/USDT:USDT": (0.0, dfs["M1/USDT:USDT"])}
+    assert not gold._pool_due()                                # Gold/Silber: kein Pool
+    assert fcmod.POOL_EVERY_S >= 600
