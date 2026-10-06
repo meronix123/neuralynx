@@ -1155,13 +1155,28 @@ class SpeedTrader:
         return ""
 
     # ------------------------------------------------------------------ Netz-Modus (Mini-Einheiten)
+    def _min_amount(self, sym) -> float:
+        """Kleinste handelbare Menge laut Bitget (z. B. BTC 0,001, ETH 0,01) - 0 = unbekannt."""
+        try:
+            m = self.broker.c.market(sym) if hasattr(self.broker, "c") else {}
+            return float(((m.get("limits") or {}).get("amount") or {}).get("min") or 0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     def _grid_unit_qty(self, sym, price) -> float:
+        """Menge einer Einheit: Margin x Hebel, mindestens Bitget-Mindestposition (5 USDT) und Mindestmenge des
+        Marktes (bei BTC/ETH deutlich mehr als 5 USDT). Passt die Mindestmenge nicht ins Budget -> 0."""
         p = self.cur
         notional = max(float(p["grid_unit_margin"]) * float(p["leverage"]), float(p["min_notional"]) * 1.01)
         qty = self._round(sym, notional / price)
         if qty * price < p["min_notional"]:                     # Rundung nach unten: eine Stufe hoeher
             qty = self._round(sym, notional * 1.1 / price)
-        return qty if qty * price >= p["min_notional"] else 0.0
+        qty = max(qty, self._min_amount(sym))
+        if qty * price < p["min_notional"]:
+            return 0.0
+        if qty * price / max(float(p["leverage"]), 1) > float(p["grid_budget"]):
+            return 0.0                                          # eine Einheit allein sprengt das Budget
+        return qty
 
     def _grid_stop_price(self, sl) -> float:
         p = self.cur
@@ -1178,7 +1193,12 @@ class SpeedTrader:
         price = tick["ask"] if side == 1 else tick["bid"]
         qty = self._grid_unit_qty(sym, price)
         if qty <= 0:
-            sl["signal"]["votes"] = {**votes, "wartet": "Einheit zu klein fuer die Mindestposition"}
+            mn = self._min_amount(sym)
+            need = mn * price / max(float(p["leverage"]), 1)
+            sl["signal"]["votes"] = {**votes, "wartet": (f"Mindestmenge {mn:g} = {need:.2f} USDT Margin je Einheit - "
+                                                          f"groesser als das Netz-Budget {float(p['grid_budget']):g}"
+                                                          if mn and need > float(p["grid_budget"]) else
+                                                          "Einheit zu klein fuer die Mindestposition")}
             return
         lev = int(p["leverage"])
         real = self.broker.set_leverage(sym, lev)

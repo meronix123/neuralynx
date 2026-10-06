@@ -1026,6 +1026,13 @@ class Bot:
         return pick(cache["out"])
 
     RTC_WORDS = ("stock", "tradfi", "commodit", "index", "etf", "forex", "equity", "share")
+    # Bitget-Kontrakte auf Aktien, ETFs, Rohstoffe und Indizes (Stand Oktober 2026) - kein Krypto, raus
+    TRADFI = {"MSTR", "MU", "INTC", "SOXL", "SNDK", "SPCX", "KORU", "CL", "BZ", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL",
+              "META", "MSFT", "COIN", "HOOD", "CRCL", "PLTR", "AMD", "NFLX", "GME", "AMC", "SPY", "QQQ", "TQQQ", "SQQQ",
+              "SPX", "NDX", "DJI", "XAUT", "USOIL", "UKOIL", "NG", "HG", "SI", "GC", "ES", "NQ", "EURUSD", "GBPUSD",
+              "USDJPY", "AUDUSD", "DXY", "TSLL", "NVDL", "MSTU", "MSTX", "CONL", "SMCI", "ORCL", "AVGO", "TSM", "ASML",
+              "IBIT", "GLD", "SLV", "USO", "UNG", "XOM", "BABA", "PDD", "JPM", "BRK", "V", "MA", "DIS", "NKE", "UBER",
+              "RBLX", "SNAP", "PYPL", "SQ", "SHOP", "ARM", "MRVL", "QCOM", "LRCX", "AMAT", "KLAC", "ANET", "DELL", "HPQ"}
 
     def _round_the_clock(self, sym: str, m: dict) -> bool:
         """Nur echte Krypto-Maerkte (rund um die Uhr): Bitget listet auch Kontrakte auf Aktien, Rohstoffe und
@@ -1038,6 +1045,10 @@ class Bot:
         if hit and time.time() - hit[0] < 86_400:
             return hit[1]
         ok = True
+        base = str(m.get("base") or sym.split("/")[0]).upper()
+        excl = {str(x).upper() for x in (self.cfg.get("scan_exclude") or [])}
+        if base in self.TRADFI or base in excl:
+            ok = False
         for v in (m.get("info") or {}).values():
             if isinstance(v, str) and any(w in v.lower() for w in self.RTC_WORDS):
                 ok = False

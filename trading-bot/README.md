@@ -278,8 +278,14 @@ Vorteil aus. Nicht alle ~500 Maerkte: Bitget erlaubt 20 Anfragen/s, und das Lern
 
 **Nur echte Krypto-Maerkte (24/7):** Bitget listet auch Kontrakte auf Aktien, Rohstoffe und Indizes (MSTR, MU,
 SOXL, CL ...). Die haben Boersenzeiten - ausserhalb steht der Kurs, Stops greifen nicht, Spreads reissen auf.
-Der Scanner prueft je Markt die Kennzeichnung von Bitget und die letzten 7 Tage Stundenkerzen (mehr als 10 %
-Stunden ohne Umsatz = kein 24/7-Markt) und laesst solche Kontrakte weg.
+Der Scanner prueft je Markt eine eingebaute Liste solcher Kontrakte (MSTR, MU, SOXL, CL, NVDA, TSLA ...), die
+Kennzeichnung von Bitget und die letzten 7 Tage Stundenkerzen (mehr als 10 % Stunden ohne Umsatz = kein
+24/7-Markt) und laesst solche Kontrakte weg. Eigene Ausschluesse: `scan_exclude` in config.yaml. Bei der
+naechsten Rotation (10 min) fliegen ausgeschlossene Maerkte ohne offene Position aus der Sitzung.
+
+**Mindestmengen:** Bitget hat je Markt eine kleinste Menge (BTC 0,001, ETH 0,01 ...), bei BTC/ETH weit ueber
+5 USDT. Das Netz nimmt dann die Mindestmenge, wenn sie ins Budget passt, sonst wartet es mit Begruendung
+("Mindestmenge 0,01 = 0,80 USDT Margin je Einheit - groesser als das Netz-Budget").
 
 ## Supergehirn (alle Blickwinkel je Markt)
 

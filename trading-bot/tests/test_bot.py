@@ -3095,12 +3095,14 @@ def test_market_scanner_picks_liquid_markets_and_shows_new_listings(tmp_path, mo
     client.markets = {"AAA/USDT:USDT": mk("AAA", 400), "BIG/USDT:USDT": mk("BIG", 300), "MID/USDT:USDT": mk("MID", 200),
                       "WIDE/USDT:USDT": mk("WIDE", 100), "TINY/USDT:USDT": mk("TINY", 100), "NEW/USDT:USDT": mk("NEW", 1.2),
                       "BABY/USDT:USDT": mk("BABY", 0.4), "SPOT/USDT": {"swap": False, "quote": "USDT"},
-                      "MSTR/USDT:USDT": mk("MSTR", 100), "CL/USDT:USDT": {**mk("CL", 100), "info": {"symbolType": "stock"}}}
+                      "MSTR/USDT:USDT": mk("MSTR", 100), "CL/USDT:USDT": {**mk("CL", 100), "info": {"symbolType": "stock"}},
+                      "ZZZ/USDT:USDT": mk("ZZZ", 100), "ACME/USDT:USDT": mk("ACME", 100)}
+    cfg["scan_exclude"] = ["acme"]
     client.load_markets = lambda *a, **k: client.markets
     base_ohlcv = client.fetch_ohlcv
 
     def ohlcv(sym, tf, limit=300, since=None):
-        if sym == "MSTR/USDT:USDT":                                # Aktien-Kontrakt: nachts/am Wochenende kein Umsatz
+        if sym == "ZZZ/USDT:USDT":                                 # Boersenzeiten: nachts/am Wochenende kein Umsatz
             return [[i * 3_600_000, 1, 1, 1, 1, 5.0 if i % 24 < 7 else 0.0] for i in range(168)]
         return base_ohlcv(sym, tf, limit=limit, since=since)
     client.fetch_ohlcv = ohlcv
@@ -3111,7 +3113,8 @@ def test_market_scanner_picks_liquid_markets_and_shows_new_listings(tmp_path, mo
         return {"AAA/USDT:USDT": t(99.99, 100.01, 9e9), "BIG/USDT:USDT": t(99.99, 100.01, 5e9), "MID/USDT:USDT": t(99.99, 100.01, 1e9),
                 "WIDE/USDT:USDT": t(99.5, 100.5, 3e9), "TINY/USDT:USDT": t(99.99, 100.01, 1e6), "NEW/USDT:USDT": t(99.99, 100.01, 8e9),
                 "BABY/USDT:USDT": t(99.9, 100.1, 7e9), "SPOT/USDT": t(99.99, 100.01, 9e9),
-                "MSTR/USDT:USDT": t(99.99, 100.01, 9e9), "CL/USDT:USDT": t(99.99, 100.01, 9e9)}
+                "MSTR/USDT:USDT": t(99.99, 100.01, 9e9), "CL/USDT:USDT": t(99.99, 100.01, 9e9),
+                "ZZZ/USDT:USDT": t(99.99, 100.01, 9e9), "ACME/USDT:USDT": t(99.99, 100.01, 9e9)}
     client.fetch_tickers = tickers
     bot = engine.Bot(cfg, PaperExchange(cfg, client), FakeContext())
     r = bot.scan_markets(3)
@@ -3119,8 +3122,9 @@ def test_market_scanner_picks_liquid_markets_and_shows_new_listings(tmp_path, mo
     assert r["fresh_slots"] == ["NEW/USDT:USDT"]
     assert [x["symbol"] for x in r["new"]] == ["NEW/USDT:USDT", "BABY/USDT:USDT"]   # BABY (0,4 Tage): nur Anzeige
     assert r["top"][0]["volume"] == 5e9                                   # eigener Markt, Spot, zu weit, zu klein raus
-    assert not {"MSTR/USDT:USDT", "CL/USDT:USDT"} & {x["symbol"] for x in r["top"]}   # Aktie (Stillstand), Kennzeichnung
-    assert bot._rtc["MSTR/USDT:USDT"][1] is False and bot._rtc["BIG/USDT:USDT"][1] is True
+    assert not {"MSTR/USDT:USDT", "CL/USDT:USDT", "ZZZ/USDT:USDT", "ACME/USDT:USDT"} & {x["symbol"] for x in r["top"]}
+    assert bot._rtc["MSTR/USDT:USDT"][1] is False and bot._rtc["ZZZ/USDT:USDT"][1] is False     # Liste, Stillstand
+    assert bot._rtc["ACME/USDT:USDT"][1] is False and bot._rtc["BIG/USDT:USDT"][1] is True       # config, Krypto ok
     client.fetch_tickers = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
     assert bot.scan_markets(1)["symbols"] == ["NEW/USDT:USDT"]           # Zwischenspeicher, kein Absturz
     # Rotation in der Sitzung: neue Maerkte dazu, nicht mehr gelistete ohne Position raus, feste bleiben
@@ -3513,3 +3517,22 @@ def test_grid_limit_orders_use_maker_fees():
     fc.update(p_up=0.38, p_up_raw=0.38, decision="SHORT")                   # KI dreht: alles zu, keine offenen Orders
     ap.step(sym)
     assert s["state"] == "idle" and not ap.broker.open_orders(sym)
+
+
+def test_grid_unit_respects_market_min_amount():
+    """Netz: BTC/ETH haben Mindestmengen weit ueber 5 USDT - passt die Einheit nicht ins Budget, wartet das Netz
+    mit klarer Begruendung statt 'zu klein'."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 1.0, "min_conf": 0.56,
+                      "cost_guard": False, "min_notional": 5.0}, last=100.0)
+
+    class C:
+        def market(self, sym): return {"limits": {"amount": {"min": 2.0}}}          # 2 Stueck = 200 USDT = 4 USDT Margin
+        def amount_to_precision(self, sym, q): return f"{q:.3f}"
+    ap.broker.c = C()
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    assert ap.slots[sym]["state"] == "idle" and ap.slots[sym]["signal"]["votes"]["wartet"].startswith("Mindestmenge 2 = 4.00 USDT")
+    ap.cur["grid_budget"] = 5.0
+    ap.step(sym)
+    assert ap.slots[sym]["state"] == "grid" and ap.slots[sym]["qty"] == 2.0
