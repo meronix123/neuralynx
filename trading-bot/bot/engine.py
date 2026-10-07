@@ -1031,7 +1031,7 @@ class Bot:
               "META", "MSFT", "COIN", "HOOD", "CRCL", "PLTR", "AMD", "NFLX", "GME", "AMC", "SPY", "QQQ", "TQQQ", "SQQQ",
               "SPX", "NDX", "DJI", "XAUT", "USOIL", "UKOIL", "NG", "HG", "SI", "GC", "ES", "NQ", "EURUSD", "GBPUSD",
               "USDJPY", "AUDUSD", "DXY", "TSLL", "NVDL", "MSTU", "MSTX", "CONL", "SMCI", "ORCL", "AVGO", "TSM", "ASML",
-              "IBIT", "GLD", "SLV", "USO", "UNG", "XOM", "BABA", "PDD", "JPM", "BRK", "V", "MA", "DIS", "NKE", "UBER",
+              "IBIT", "GLD", "SLV", "USO", "UNG", "XOM", "NATGAS", "SKHY", "SKHYNIX", "SOXS", "WTI", "BRENT", "COPPER", "SILVER", "GOLD", "BABA", "PDD", "JPM", "BRK", "V", "MA", "DIS", "NKE", "UBER",
               "RBLX", "SNAP", "PYPL", "SQ", "SHOP", "ARM", "MRVL", "QCOM", "LRCX", "AMAT", "KLAC", "ANET", "DELL", "HPQ"}
 
     def _round_the_clock(self, sym: str, m: dict) -> bool:
