@@ -496,6 +496,10 @@ class SpeedTrader:
                 raise RuntimeError(f"{self.name} laeuft bereits")
             if not symbols:
                 raise ValueError("Mindestens einen Markt waehlen")
+            carry = bool(opts.pop("carry", False))
+            # Uebernahme aus der vorigen Sitzung (gleiches Konto): offene Positionen und Netze laufen weiter
+            keep = {s: v for s, v in (getattr(self, "slots", None) or {}).items()
+                    if carry and v.get("state") in ("open", "grid") and (getattr(self, "session", None) or {}).get("label") == label}
             p = {**self.p, **{k: v for k, v in opts.items() if v is not None}}
             if self.kind == "ki" and p.get("grid"):
                 unit = float(p["grid_unit_margin"]) * float(p["leverage"])
@@ -531,10 +535,15 @@ class SpeedTrader:
                                                                                  "size_mode", "size_pct", "risk_pct",
                                                                                  "scale_in", "partial_frac")}}
             self.slots = {s: {"state": "idle"} for s in symbols}
+            for s_, v in keep.items():
+                self.slots[s_] = v
+                if s_ not in self.session["symbols"]:
+                    self.session["symbols"].append(s_)
             self.trades, self.events = [], []
             self.history = self._load_history(label)
             self.active = True
-            self._event(f"Ein: {', '.join(x.split(':')[0] for x in symbols)} ({label})")
+            self._event(f"Ein: {', '.join(x.split(':')[0] for x in symbols)} ({label})"
+                        + (f" - uebernommen: {', '.join(x.split(':')[0] for x in keep)}" if keep else ""))
             self._persist()
             self.thread = threading.Thread(target=self._run, daemon=True, name=self.kind)
             self.thread.start()
@@ -622,9 +631,11 @@ class SpeedTrader:
             self.thread.start()
             return f"{self.name} nach Neustart fortgesetzt ({self.session.get('label')})"
 
-    def stop(self, why: str = "Aus gedrueckt", close: bool = False) -> str:
+    def stop(self, why: str = "Aus gedrueckt", close: bool = False, handover: bool = False) -> str:
         """Aus: keine neuen Trades mehr, wartende Limit-Orders weg. Offene Positionen behalten Stop und Ziel
-        und werden weiter gefuehrt, bis sie zu sind (close=True: sofort alle zum Marktpreis schliessen)."""
+        und werden weiter gefuehrt, bis sie zu sind (close=True: sofort alle zum Marktpreis schliessen).
+        handover=True: Sitzung sofort beenden, offene Positionen/Netze bleiben und werden von der naechsten
+        Sitzung uebernommen (Neustart mit neuen Einstellungen, ohne etwas zu schliessen)."""
         with self.lock:
             if not self.active:
                 return f"{self.name} ist aus"
@@ -632,6 +643,10 @@ class SpeedTrader:
             self.session["stopping"] = True
             if close:
                 self.session["close_now"] = True
+            if handover:
+                self.session["handover"] = True
+        if handover:
+            return f"{self.name}: Sitzung wird uebergeben - offene Positionen bleiben und laufen in der neuen Sitzung weiter"
         if close:
             return f"{self.name} aus - offene Positionen der Sitzung werden jetzt geschlossen"
         n = sum(1 for v in self.slots.values() if v.get("state") == "open")
@@ -658,7 +673,7 @@ class SpeedTrader:
         try:
             while True:
                 ses = self.session
-                if ses.get("close_now"):
+                if ses.get("close_now") or ses.get("handover"):
                     break
                 if not ses["stopping"]:
                     if time.time() >= ses["end"]:
@@ -780,6 +795,11 @@ class SpeedTrader:
 
     def _wind_down(self, close: bool = False) -> None:
         self._cancel_pending()
+        if self.session.get("handover"):
+            kept = [s.split(":")[0] for s, v in self.slots.items() if v.get("state") in ("open", "grid")]
+            self.active = False
+            self._event("Uebergabe an die naechste Sitzung" + (f" - offen: {', '.join(kept)}" if kept else ""))
+            return
         for sym, sl in self.slots.items():
             if sl.get("state") not in ("open", "grid"):
                 continue
@@ -1431,6 +1451,13 @@ class SpeedTrader:
         d = sl["side"]
         p_up = (fc or {}).get("p_up")
         if p_up is None:
+            # KI hat gerade keine Prognose (lernt neu nach einem Neustart): dann entscheidet der Chart allein,
+            # sonst haette das Netz minutenlang nur den harten Stop
+            if df is not None and len(df) >= 60:
+                c = df["close"].astype(float)
+                e20, e50 = float(ema(c, 20).iloc[-1]), float(ema(c, 50).iloc[-1])
+                if d * (e20 - e50) < 0 and d * (float(c.iloc[-1]) - e20) < 0:
+                    return "Trendwende (EMA 20 unter 50, KI ohne Prognose)" if d == 1 else "Trendwende (EMA 20 ueber 50, KI ohne Prognose)"
             return ""
         against = d * (float(p_up) - 0.5) < 0
         conf = max(float(p_up), 1 - float(p_up))

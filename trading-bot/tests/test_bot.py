@@ -3595,3 +3595,73 @@ def test_grid_unit_uses_real_leverage_from_bitget():
     ap.cur["grid_budget"] = 20.0
     ap.step(sym)
     assert s["state"] == "grid" and s["lev"] == 5 and s["qty"] == 0.7
+
+
+def test_restart_hands_over_open_positions_to_the_new_session():
+    """Neu starten mit anderen Einstellungen schliesst nichts: offene Positionen/Netze werden uebernommen."""
+    from bot.speed import PaperBroker, SpeedTrader
+
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.05},
+                     forecast_fn=lambda s: fc, kind="ki")
+    broker = PaperBroker(lambda s: ap.market[s], ap.p)
+    ap.start(["BTC/USDT:USDT"], broker, 87.0, "Simulation", grid=True, leverage=50, grid_unit_margin=0.1, grid_budget=1.0,
+             min_conf=0.56, cost_guard=False, fast_entry=False, grid_limit=False, max_open_risk_pct=50)
+    for _ in range(40):
+        if ap.slots["BTC/USDT:USDT"].get("state") == "grid":
+            break
+        time.sleep(0.05)
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "grid"
+    msg = ap.stop(handover=True)
+    ap.thread.join(5)
+    assert "uebergeben" in msg and not ap.active and ap.slots["BTC/USDT:USDT"]["state"] == "grid"   # nichts geschlossen
+    assert "Uebergabe" in ap.events[-1]
+    ap.start(["ETH/USDT:USDT"], broker, 87.0, "Simulation", carry=True, grid=True, leverage=50, grid_unit_margin=0.1,
+             grid_budget=2.0, min_conf=0.56, cost_guard=False, fast_entry=False, grid_limit=False, max_open_risk_pct=50)
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "grid" and "BTC/USDT:USDT" in ap.session["symbols"]
+    assert ap.cur["grid_budget"] == 2.0 and "uebernommen: BTC" in ap.events[0]
+    ap.stop(close=True)
+    ap.thread.join(5)
+    assert not ap.active and ap.trades and ap.trades[-1]["why"] == "von Hand geschlossen"
+    ap2 = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.05},
+                      forecast_fn=lambda s: fc, kind="ki")
+    ap2.slots = {"X/USDT:USDT": {"state": "grid", "side": 1, "qty": 1, "units": [], "entry": 100.0}}
+    ap2.session = {"label": "Testkonto"}
+    ap2.start(["BTC/USDT:USDT"], PaperBroker(lambda s: ap2.market[s], ap2.p), 87.0, "Simulation", carry=True, fast_entry=False)
+    assert "X/USDT:USDT" not in ap2.slots                                      # anderes Konto: nichts uebernehmen
+    ap2.stop(close=True)
+    ap2.thread.join(5)
+
+
+def test_models_survive_restart_and_grid_closes_on_chart_reversal_without_forecast(tmp_path):
+    """Nach einem Neustart laedt die KI ihr gespeichertes Modell (handelt sofort statt 'lernt gerade');
+    waehrend die KI keine Prognose hat, schliesst das Netz bei Trendwende anhand des Charts."""
+    from bot.forecast import Forecaster
+
+    df = _fc_frame(1500, 0.3, 4)
+    fx = Forecaster(lambda s, tf="5m", limit=300: df, tmp_path, "paper", None, lambda s: None, background=False)
+    fx.fresh = {"M0/USDT:USDT": (0.0, df)}
+    fx._train_now("M0/USDT:USDT", df, int(df["ts"].iloc[-1]) // 1000)
+    assert fx._model_path("M0/USDT:USDT").exists()
+    fx2 = Forecaster(lambda s, tf="5m", limit=300: df, tmp_path, "paper", None, lambda s: None, background=False)
+    fx2.MODEL_MAX_AGE_S = 10 ** 12                                                # Testdaten sind alt
+    loaded = fx2._load_model("M0/USDT:USDT")
+    assert loaded and loaded[1]["decision"] in ("LONG", "SHORT") and loaded[1]["_models"]["dir"]
+    fx2.MODEL_MAX_AGE_S = 60
+    assert fx2._load_model("M0/USDT:USDT") is None                                  # zu alt -> neu lernen
+    # Netz ohne Prognose: Chart-Trendwende schliesst
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 5}
+    feed = {"last": 100.0}
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = _ap(fc, cfg={"grid": True, "leverage": 50, "grid_unit_margin": 0.1, "grid_budget": 1.0, "min_conf": 0.56,
+                      "cost_guard": False, "min_notional": 5.0, "grid_limit": False, "max_open_risk_pct": 50})
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    assert ap.slots[sym]["state"] == "grid"
+    down = _speed_df(120, -0.002)
+    ap.data_fn = lambda s_: (down, book, {"last": feed["last"], "bid": feed["last"] - 0.01, "ask": feed["last"] + 0.01})
+    ap.forecast_fn = lambda s_: {"ok": False, "msg": "KI lernt gerade ..."}
+    ap.step(sym)
+    assert ap.slots[sym]["state"] == "idle" and "KI ohne Prognose" in ap.trades[-1]["why"]

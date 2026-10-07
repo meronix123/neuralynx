@@ -120,6 +120,7 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
         opts["min_conf"] /= 100                     # 56 -> 0,56
     opts["use_raw"] = bool(body.get("use_raw"))
     opts["scan_top"] = opts_scan
+    opts["carry"] = bool(body.get("carry"))                  # Neustart: offene Positionen der vorigen Sitzung uebernehmen
     opts["fast"] = bool(body.get("fast"))
     opts["turbo"] = bool(body.get("turbo"))
     if body.get("size_mode") in ("auto", "usdt", "pct", "risk"):
@@ -265,11 +266,11 @@ def handle_action(bot, account, path: str, body: dict, stop_file: Path) -> str:
     if path == "/api/speed/start":
         return speed_start(bot, account, body)
     if path == "/api/speed/stop":
-        return bot.speed.stop(close=bool(body.get("close")))
+        return bot.speed.stop(close=bool(body.get("close")), handover=bool(body.get("handover")))
     if path == "/api/auto/start":
         return speed_start(bot, account, body, bot.autopilot)
     if path == "/api/auto/stop":
-        return bot.autopilot.stop(close=bool(body.get("close")))
+        return bot.autopilot.stop(close=bool(body.get("close")), handover=bool(body.get("handover")))
     if path == "/api/account/quick":
         for tr in (getattr(bot, "speed", None), getattr(bot, "autopilot", None)):
             if tr is not None and tr.busy(body.get("symbol")):

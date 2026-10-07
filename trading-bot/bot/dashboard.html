@@ -381,7 +381,7 @@
         <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
         <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
         <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)">Aus</button>
-        <button class="btn" id="ap-restart" hidden onclick="sessionRestart('ap')" title="Aus und sofort wieder Ein mit den Einstellungen oben (Tempo, Groesse, Maerkte ...)">Neu starten mit diesen Einstellungen</button>
+        <button class="btn" id="ap-restart" hidden onclick="sessionRestart('ap')" title="Sofort wieder Ein mit den Einstellungen oben (Tempo, Groesse, Maerkte ...). Offene Positionen und Netze bleiben und laufen in der neuen Sitzung weiter - es wird nichts geschlossen.">Neu starten mit diesen Einstellungen</button>
         <button class="btn red" id="ap-close" hidden onclick="sessionStop('ap', true)">Aus + Positionen jetzt schliessen</button>
       </div>
       <div id="ap-status"></div>
@@ -1497,20 +1497,21 @@ async function sessionStop(k, close) {
   if (ok) { pollSession.until[k] = Date.now() + 10 * 60_000; pollSession(); }
 }
 async function sessionRestart(k) {
-  // Einstellungen (Tempo, Groesse ...) gelten erst fuer eine neue Sitzung: Aus, warten bis zu, dann Ein
-  const ok = await act(SESS[k].api + "/stop", { close: false });
+  // Einstellungen (Tempo, Groesse ...) gelten erst fuer eine neue Sitzung: Uebergabe (offene Positionen und
+  // Netze bleiben und laufen in der neuen Sitzung weiter), warten bis aus, dann Ein mit Uebernahme
+  const ok = await act(SESS[k].api + "/stop", { close: false, handover: true });
   if (!ok) return;
   for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 500));
     try { const v = await (await fetch(SESS[k].api)).json(); data[SESS[k].key] = v; if (!v.active) break; } catch (e) { /* kurz nicht erreichbar */ }
   }
-  if ((data[SESS[k].key] || {}).active) return toast("Noch Positionen offen - die Sitzung laeuft weiter, bis sie zu sind. Danach Ein druecken.", false);
-  await sessionStart(k);
+  if ((data[SESS[k].key] || {}).active) return toast("Sitzung noch nicht uebergeben - bitte gleich nochmal versuchen.", false);
+  await sessionStart(k, true);
 }
-async function sessionStart(k) {
+async function sessionStart(k, carry) {
   const syms = [...document.querySelectorAll(`.${k}-sym:checked`)].map(x => x.value);
   if (!syms.length) return toast("Mindestens einen Markt waehlen", false);
-  const body = { symbols: syms, leverage: val(k + "-lev"), target: val(k + "-target") };
+  const body = { symbols: syms, leverage: val(k + "-lev"), target: val(k + "-target"), carry: !!carry };
   if (k === "sp") body.margin_usdt = val("sp-margin").replace(",", ".");
   if (k === "sp") body.aggressiveness = val("sp-agg");
   if (k === "ap") {

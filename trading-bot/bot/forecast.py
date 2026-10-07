@@ -1395,6 +1395,7 @@ class Forecaster:
                 self.memory.save_meta()
             self.models[sym] = (bar, fc)
             self.errors.pop(sym, None)
+            self._save_model(sym, bar, fc)
         except Exception as e:  # noqa: BLE001
             log.warning("KI %s lernen: %s", sym, e, exc_info=True)
             self.errors[sym] = f"{type(e).__name__}: {e}"
@@ -1481,11 +1482,54 @@ class Forecaster:
             log.debug("KI Live-Bewertung %s: %s", sym, e)
             return {}
 
+    MODEL_MAX_AGE_S = 6 * 3600          # gespeichertes Modell hoechstens 6 h alt verwenden (bis neu gelernt ist)
+
+    def _model_path(self, sym: str):
+        f = self.memory.folder
+        return f / f"modell_{sym.split(':')[0].replace('/', '')}_{self.tf}.pkl" if f else None
+
+    def _save_model(self, sym: str, bar: int, fc: dict) -> None:
+        """Modell samt Live-Bewertung (Platt, Deckel, Baeume, Pool-Anteile) auf Platte: nach einem Neustart
+        des Dienstes ist die KI sofort wieder handlungsfaehig statt minutenlang 'lernt gerade'."""
+        path = self._model_path(sym)
+        if not path or not fc:
+            return
+        try:
+            import pickle
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "wb") as fh:
+                pickle.dump((bar, {k: v for k, v in fc.items() if k != "test"}), fh, protocol=pickle.HIGHEST_PROTOCOL)
+            tmp.replace(path)
+        except Exception as e:  # noqa: BLE001 - Speichern ist Zusatz
+            log.debug("KI-Modell %s speichern: %s", sym, e)
+
+    def _load_model(self, sym: str):
+        path = self._model_path(sym)
+        if not path or not path.exists():
+            return None
+        try:
+            import pickle
+            with open(path, "rb") as fh:
+                bar, fc = pickle.load(fh)  # noqa: S301 - eigene Datei im Datenordner
+            if time.time() - bar > self.MODEL_MAX_AGE_S or not isinstance(fc, dict) or not fc.get("_models"):
+                return None
+            log.info("KI %s: gespeichertes Modell geladen (%d min alt) - handelt sofort, lernt im Hintergrund neu",
+                     sym, int((time.time() - bar) / 60))
+            return (bar, fc)
+        except Exception as e:  # noqa: BLE001
+            log.debug("KI-Modell %s laden: %s", sym, e)
+            return None
+
     def get(self, sym: str) -> dict:
         df = self._candles(sym)
         bar = int(df["ts"].iloc[-1]) // 1000
         self.log.resolve(sym, df.iloc[:-1])
         cached = self.models.get(sym)
+        if cached is None and sym not in self.busy:
+            cached = self._load_model(sym)                  # nach Neustart: altes Modell sofort nutzen
+            if cached:
+                self.models[sym] = cached
         with self.lock:
             stale = not cached or cached[0] != bar
             if stale and sym not in self.busy:              # neue 5-Minuten-Kerze -> im Hintergrund neu lernen

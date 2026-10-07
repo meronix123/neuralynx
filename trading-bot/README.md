@@ -345,6 +345,13 @@ alle 15 Minuten im Hintergrund.
 - **Laufende Kerze:** die KI bewertet die laufende Kerze alle 5 Sekunden mit den gelernten Modellen, der
   Autopilot prueft alle 1 bis 3 Sekunden, Stops und Ziele liegen als Bitget-Auftraege auf der Boerse.
 
+## Neu starten ohne Verlust
+
+"Neu starten mit diesen Einstellungen" uebergibt die laufende Sitzung an eine neue: offene Positionen und Netze
+bleiben auf Bitget und werden von der neuen Sitzung weiter gefuehrt (im Ablauf: "uebernommen: ..."). Es wird
+nichts geschlossen. Nur "Aus + Positionen jetzt schliessen" verkauft alles zum Marktpreis - das kostet bei
+jedem Neustart Gebuehren und realisiert offene Verluste.
+
 ## Netz-Modus (Mini-Einheiten) - auf ausdruecklichen Wunsch
 
 Im KI-Autopilot: "Netz (Mini-Einheiten)". Statt einer Position handelt die KI-Richtung in vielen kleinen
