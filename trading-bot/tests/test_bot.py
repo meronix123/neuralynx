@@ -3575,3 +3575,23 @@ def test_turbo_ignores_minute_chart_walls():
     ap2.turbo_fn = lambda s: fc
     ap2.step("BTC/USDT:USDT")
     assert ap2.slots["BTC/USDT:USDT"]["state"] == "pending"
+
+
+def test_grid_unit_uses_real_leverage_from_bitget():
+    """Erlaubt Bitget nur 5x, ist die Margin je Einheit entsprechend hoeher - passt sie nicht ins Budget, kein Netz."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    ap = _ap(fc, cfg={"grid": True, "leverage": 67, "grid_unit_margin": 0.1, "grid_budget": 10.0, "min_conf": 0.56,
+                      "cost_guard": False, "min_notional": 5.0, "max_open_risk_pct": 50}, last=100.0)
+
+    class C:
+        def market(self, sym): return {"limits": {"amount": {"min": 0.7}}}          # 70 USDT Position
+        def amount_to_precision(self, sym, q): return f"{q:.3f}"
+    ap.broker.c = C()
+    ap.broker.set_leverage = lambda sym, lev: 5                                      # Bitget: hoechstens 5x
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    s = ap.slots[sym]
+    assert s["state"] == "idle" and s["signal"]["votes"]["wartet"].startswith("Mindestmenge 0.7 = 14.00 USDT")
+    ap.cur["grid_budget"] = 20.0
+    ap.step(sym)
+    assert s["state"] == "grid" and s["lev"] == 5 and s["qty"] == 0.7

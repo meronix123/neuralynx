@@ -1185,18 +1185,20 @@ class SpeedTrader:
         except Exception:  # noqa: BLE001
             return 0.0
 
-    def _grid_unit_qty(self, sym, price) -> float:
+    def _grid_unit_qty(self, sym, price, lev=None) -> float:
         """Menge einer Einheit: Margin x Hebel, mindestens Bitget-Mindestposition (5 USDT) und Mindestmenge des
-        Marktes (bei BTC/ETH deutlich mehr als 5 USDT). Passt die Mindestmenge nicht ins Budget -> 0."""
+        Marktes (bei BTC/ETH deutlich mehr als 5 USDT). Passt die Mindestmenge nicht ins Budget -> 0.
+        lev = der ECHTE Hebel laut Bitget (manche Maerkte erlauben nur 5x - dann ist die Margin je Einheit hoeher)."""
         p = self.cur
-        notional = max(float(p["grid_unit_margin"]) * float(p["leverage"]), float(p["min_notional"]) * 1.01)
+        lev = float(lev or p["leverage"])
+        notional = max(float(p["grid_unit_margin"]) * lev, float(p["min_notional"]) * 1.01)
         qty = self._round(sym, notional / price)
         if qty * price < p["min_notional"]:                     # Rundung nach unten: eine Stufe hoeher
             qty = self._round(sym, notional * 1.1 / price)
         qty = max(qty, self._min_amount(sym))
         if qty * price < p["min_notional"]:
             return 0.0
-        if qty * price / max(float(p["leverage"]), 1) > float(p["grid_budget"]):
+        if qty * price / max(lev, 1) > float(p["grid_budget"]):
             return 0.0                                          # eine Einheit allein sprengt das Budget
         return qty
 
@@ -1238,19 +1240,19 @@ class SpeedTrader:
             sl["signal"]["votes"] = {**votes, "wartet": veto}
             return
         price = tick["ask"] if side == 1 else tick["bid"]
-        qty = self._grid_unit_qty(sym, price)
+        lev = int(p["leverage"])
+        real = self.broker.set_leverage(sym, lev)             # erst den echten Hebel kennen, dann die Einheit rechnen
+        if real and real != lev:
+            lev = real
+        qty = self._grid_unit_qty(sym, price, lev)
         if qty <= 0:
             mn = self._min_amount(sym)
-            need = mn * price / max(float(p["leverage"]), 1)
+            need = mn * price / max(float(lev), 1)
             sl["signal"]["votes"] = {**votes, "wartet": (f"Mindestmenge {mn:g} = {need:.2f} USDT Margin je Einheit - "
                                                           f"groesser als das Netz-Budget {float(p['grid_budget']):g}"
                                                           if mn and need > float(p["grid_budget"]) else
                                                           "Einheit zu klein fuer die Mindestposition")}
             return
-        lev = int(p["leverage"])
-        real = self.broker.set_leverage(sym, lev)
-        if real and real != lev:
-            lev = real
         total = self._balance()[0]
         cap = p.get("max_open_risk_pct") or 0
         net_risk = float(p["grid_budget"]) * float(p["grid_max_loss_pct"]) / 100
@@ -1282,13 +1284,14 @@ class SpeedTrader:
         if used + float(p["grid_unit_margin"]) > float(p["grid_budget"]) * 1.05 or sl.get("add"):
             return
         price = ref * (1 - d * float(p["grid_step_pct"]) / 100)
+        lev = sl.get("lev")
         try:
             last = float(self.market[sym]["last"])
             if d * (price - last) > -last * 0.001:              # Limit muss klar auf der Maker-Seite liegen
                 price = last * (1 - d * float(p["grid_step_pct"]) / 100)
         except Exception:  # noqa: BLE001
             pass
-        qty = self._grid_unit_qty(sym, price)
+        qty = self._grid_unit_qty(sym, price, lev)
         if qty <= 0:
             return
         try:
