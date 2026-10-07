@@ -736,6 +736,13 @@ class SpeedTrader:
         day0 = (int(time.time()) // 86400) * 86400 * 1000
         return sum(t["net"] for t in self.trades if (t.get("time") or 0) >= day0)
 
+    def _day_net_all(self) -> float:
+        """Netto heute ueber alle Sitzungen dieser Art/dieses Kontos (Neustart setzt die Anzeige nicht zurueck)."""
+        day0 = (int(time.time()) // 86400) * 86400 * 1000
+        seen = {(t.get("time"), t.get("symbol"), t.get("net")) for t in self.trades}
+        hist = [t for t in getattr(self, "history", []) or [] if (t.get("time"), t.get("symbol"), t.get("net")) not in seen]
+        return self._day_net() + sum(t["net"] for t in hist if (t.get("time") or 0) >= day0)
+
     def _persist_maybe(self) -> None:
         """Sitzung regelmaessig (alle 20 s) und bei jeder Aenderung einer Position speichern."""
         key = tuple((s, v.get("state"), v.get("sl"), v.get("qty")) for s, v in self.slots.items())
@@ -1837,6 +1844,7 @@ class SpeedTrader:
             "params": self.session.get("params", {}), "stop_reason": self.session.get("stop_reason"),
             "pause_until": self.session.get("pause_until") if self.session.get("pause_until", 0) > time.time() else None,
             "open_risk": round(self._open_risk(), 4), "day_net": round(self._day_net(), 4),
+            "day_net_all": round(self._day_net_all(), 4),          # heute, auch aus frueheren Sitzungen (gleiches Konto)
             "resumed": bool(self.session.get("resumed")),
             "trades": len(tr), "wins": len(wins), "hit": round(len(wins) / len(tr), 3) if tr else None,
             "gross": round(sum(t["gross"] for t in tr), 4), "fees": round(sum(t["fees"] for t in tr), 4),

@@ -96,6 +96,11 @@ Die Oberflaeche ist nur auf deinem PC erreichbar, nicht aus dem Internet.
 
 ## Bitget-Konto in der Oberflaeche
 
+**Kopfzeile:** Ist ein Bitget-Konto verbunden, stehen oben zuerst der echte Kontostand (Gesamt, frei), das offene
+Ergebnis aller Konto-Positionen und das Netto des KI-Autopiloten heute (ueber alle Sitzungen, ein Neustart setzt
+es nicht zurueck). Die Werte "Simulation (Spielgeld)" daneben gehoeren zur Simulation des Bots im Paper-Modus
+und haben mit dem Konto nichts zu tun.
+
 Reiter **Bitget-Konto** in der Oberflaeche: API-Key, Secret und Passphrase eingeben, "Verbinden".
 Die Schluessel werden einmal gegen Bitget geprueft und nur lokal in `.env` gespeichert.
 Danach siehst du Guthaben (gesamt / verfuegbar / gebunden), alle offenen Positionen mit

@@ -928,9 +928,13 @@ function render() {
   if (st) st.textContent = data.ki_only ? "Bot-Strategie - Eingabe fuer die KI (die KI handelt)" : "Signale - was der Bot gesehen hat und warum (nicht) gehandelt";
   document.getElementById("head").innerHTML = `
     <span class="badge ${data.mode}">${{ paper: "SIMULATION", demo: "TESTKONTO", live: "ECHTES KONTO" }[data.mode] || data.mode}</span>
-    <div class="kpi"><span>Konto</span><b>${fmt(data.equity)} USDT</b></div>
-    <div class="kpi"><span>Heute</span><b class="${dayPnl >= 0 ? "up" : "down"}">${dayPnl >= 0 ? "+" : ""}${fmt(dayPnl)} USDT</b></div>
-    <div class="kpi"><span>Offen (unrealisiert)</span><b class="${(data.unrealized||0) >= 0 ? "up" : "down"}">${(data.unrealized||0) >= 0 ? "+" : ""}${fmt(data.unrealized||0)} USDT</b></div>
+    ${acc && acc.connected && acc.balance ? `
+    <div class="kpi"><span>Bitget-Konto${acc.demo ? " (Test)" : ""}</span><b>${fmt(acc.balance.total)} USDT</b> <small class="sub">frei ${fmt(acc.balance.free)}</small></div>
+    <div class="kpi"><span>Konto offen (unrealisiert)</span><b class="${(acc.unrealized||0) >= 0 ? "up" : "down"}">${(acc.unrealized||0) >= 0 ? "+" : ""}${fmt(acc.unrealized||0)} USDT</b></div>
+    <div class="kpi"><span>KI-Autopilot heute (netto)</span><b class="${((data.autopilot||{}).day_net_all||0) >= 0 ? "up" : "down"}">${((data.autopilot||{}).day_net_all||0) >= 0 ? "+" : ""}${fmt((data.autopilot||{}).day_net_all||0)} USDT</b></div>` : ""}
+    <div class="kpi"><span>${data.mode === "paper" ? "Simulation (Spielgeld)" : "Konto"}</span><b>${fmt(data.equity)} USDT</b></div>
+    <div class="kpi"><span>${data.mode === "paper" ? "Simulation heute" : "Heute"}</span><b class="${dayPnl >= 0 ? "up" : "down"}">${dayPnl >= 0 ? "+" : ""}${fmt(dayPnl)} USDT</b></div>
+    <div class="kpi"><span>${data.mode === "paper" ? "Simulation offen" : "Offen (unrealisiert)"}</span><b class="${(data.unrealized||0) >= 0 ? "up" : "down"}">${(data.unrealized||0) >= 0 ? "+" : ""}${fmt(data.unrealized||0)} USDT</b></div>
     <div class="kpi"><span>Positionen</span><b>${(data.positions||[]).length} / ${data.max_positions ?? "-"}</b></div>
     <div class="kpi"><span>Trades heute</span><b>${data.trades_today} / ${data.max_trades_per_day}</b></div>
     <div class="kpi"><span>Hebel</span><b>${data.leverage}x</b></div>
