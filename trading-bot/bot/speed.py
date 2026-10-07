@@ -1004,7 +1004,9 @@ class SpeedTrader:
         tp_d = max(r * p["tp_r"], p["min_tp_fee_x"] * fees)
         # Ziel vor dem naechsten Widerstand (Long) / der naechsten Unterstuetzung (Short) - lohnt es nicht, kein Trade
         wall = fc.get("sr_up_pct") if side == 1 else fc.get("sr_dn_pct")
-        if wall and p.get("size_mode") == "auto":
+        # Turbo/Fast: die Marken aus dem 1-/5-Minuten-Chart liegen fast immer naeher als 1,2 R - das wuerde fast
+        # jeden Trade verhindern; dort gilt nur der ATR-Stop, das Ziel bleibt tp_r x R
+        if wall and p.get("size_mode") == "auto" and not p.get("turbo") and not p.get("fast"):
             room = price * wall / 100 * 0.9
             if room < tp_d:
                 if room < 1.2 * r:

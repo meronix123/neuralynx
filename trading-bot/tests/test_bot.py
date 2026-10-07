@@ -3562,3 +3562,16 @@ def test_grid_margin_top_up_is_capped_by_budget_and_stop_moves_in():
     s2 = ap2.slots[sym]
     assert s2["state"] == "grid" and s2["added_margin"] == 0
     assert s2["qty"] * (s2["entry"] - s2["sl"]) < s2["qty"] * s2["entry"] / 50          # enger als die eigene Margin
+
+
+def test_turbo_ignores_minute_chart_walls():
+    """Turbo/Fast: Widerstand/Unterstuetzung aus dem Minuten-Chart blockiert keinen Einstieg (nur im normalen Tempo)."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "sd_5m_pct": 0.2, "decision": "LONG", "decision_min": 5,
+          "sr_up_pct": 0.02, "sr_dn_pct": 0.02, "live": {"n": 300, "hit": 0.61}}
+    ap = _ap(fc, cfg={"size_mode": "auto", "risk_pct": 1.0, "cost_guard": False, "min_conf": 0.56})
+    ap.step("BTC/USDT:USDT")
+    assert ap.slots["BTC/USDT:USDT"]["state"] == "idle" and "Widerstand" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["wartet"]
+    ap2 = _ap(fc, cfg={"size_mode": "auto", "risk_pct": 1.0, "cost_guard": False, "min_conf": 0.56, "turbo": True, "fast": True})
+    ap2.turbo_fn = lambda s: fc
+    ap2.step("BTC/USDT:USDT")
+    assert ap2.slots["BTC/USDT:USDT"]["state"] == "pending"
