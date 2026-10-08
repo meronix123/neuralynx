@@ -364,6 +364,7 @@
           <input id="ap-sizeval" value="1" style="width:52px"> <span id="ap-unit">% Risiko</span></label>
         <label>max. Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
         <label title="Erst einen Teil kaufen, den Rest nur im Gewinn nachkaufen - nie im Verlust"><input type="checkbox" id="ap-scale"> Teilkauf</label>
+        <label title="Nur Maerkte, auf denen die KI live nachweislich trifft (mind. 53 % von 100 geprueften Entscheidungen). Weniger Trades, aber nur dort, wo ein Vorteil belegt ist."><input type="checkbox" id="ap-proven" autocomplete="off"> Nur bewaehrte Maerkte</label>
         <label title="Auf ausdruecklichen Wunsch: statt einer Position viele kleine Einheiten in KI-Richtung. Hauptposition bleibt offen, Einheiten im Gewinn werden verkauft, bei Kurs gegen das Netz wird bis zum Budget nachgekauft. Netz-Stop und KI-Drehung schliessen alles. Gebuehren fallen je Einheit an - siehe README."><input type="checkbox" id="ap-grid" autocomplete="off" onchange="document.getElementById('ap-grid-l').hidden = !this.checked"> Netz (Mini-Einheiten)</label>
         <div id="ap-grid-l" hidden class="sub" style="display:flex;flex-wrap:wrap;gap:4px 8px">
           Einheit <input id="ap-grid-unit" value="0.10" style="width:44px" autocomplete="off"> USDT Margin &middot;
@@ -1465,6 +1466,7 @@ function renderSession(k) {
     : v.state === "grid" ? `<b class="${v.side === 1 ? "up" : "down"}">NETZ ${v.side === 1 ? "LONG" : "SHORT"}</b>${v.lev ? " x" + v.lev : ""} &middot; ${v.units || 0} Einheiten @ ${px(v.entry)} &middot; Netz-Stop ${px(v.sl)}${v.signal && v.signal.Netz ? " &middot; " + v.signal.Netz : ""}`
     : v.state === "pending" ? `Limit ${px(v.entry)} wartet` : v.signal && v.signal.wartet ? `wartet (${v.signal.wartet})` : "sucht"}${sig(v)}`).join(" &middot; ");
   out(`<div class="sprun">
+    ${sp.active && sp.reasons && Object.keys(sp.reasons).length ? `<div class="sub" style="margin-bottom:4px">Warum gerade nichts eroeffnet wird: ${Object.entries(sp.reasons).map(([k, n]) => `${n}x ${k}`).join(" &middot; ")}</div>` : ""}
     ${sp.active && !sp.stopping ? `<b class="up">AN</b> (${sp.label}${(sp.params || {}).turbo ? " &middot; <b class=\"warn\">TURBO (1-Minuten-Modell)</b>" : (sp.params || {}).fast ? " &middot; <b class=\"warn\">FAST</b>" : " &middot; Tempo normal"}) seit ${hm(sp.running_s || 0)}${sp.resumed ? " &middot; nach Neustart fortgesetzt" : ""}${sp.pause_until ? ` &middot; <span class="warn">Tagesverlust-Limit: Pause bis ${time(sp.pause_until * 1000)}</span>` : ""} &middot; ${slots}<br>` :
       sp.active ? `<b style="color:#f59e0b">AUS</b> - keine neuen Trades, offene Positionen laufen mit Stop und Ziel weiter &middot; ${slots}<br>` :
       `<b>AUS</b>${sp.stop_reason ? " (" + sp.stop_reason + ")" : ""} &middot; `}
@@ -1519,6 +1521,7 @@ async function sessionStart(k, carry) {
     const v = val("ap-sizeval").replace(",", ".");
     if (body.size_mode === "usdt") body.margin_usdt = v; else if (body.size_mode === "pct") body.size_pct = v; else body.risk_pct = v;
     body.scale_in = document.getElementById("ap-scale").checked;
+    body.proven_only = document.getElementById("ap-proven").checked;
     if (document.getElementById("ap-scan").checked) body.scan_top = val("ap-scan-n");
     body.partial_frac = val("ap-part");
     if (document.getElementById("ap-grid").checked) {

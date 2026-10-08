@@ -135,6 +135,8 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
             raise RuntimeError("Ohne Kosten-Schutz auf dem Konto nur mit Bestaetigung OHNE SCHUTZ")
     if body.get("scale_in") is not None:
         opts["scale_in"] = bool(body.get("scale_in"))
+    if body.get("proven_only") is not None:
+        opts["proven_only"] = bool(body.get("proven_only"))
     if body.get("grid"):
         opts["grid"] = True
         for k in ("grid_unit_margin", "grid_budget", "grid_step_pct", "grid_take_pct", "grid_max_loss_pct"):

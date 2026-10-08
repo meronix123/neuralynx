@@ -66,6 +66,7 @@ AUTO_DEFAULTS = {
     "grid_keep_base": True,    # die erste Einheit (Hauptposition) bleibt offen, bis die KI dreht oder der Netz-Stop greift
     "grid_flip_conf": 0.53,    # Trendwende: KI neigt ab dieser Sicherheit zur Gegenseite -> ganzes Netz schliessen
     "grid_stale_x": 12.0,      # Netz ohne Gewinn nach 12 x Vorhersagezeit schliessen (nicht endlos aussitzen; Test: 12)
+    "proven_only": False,      # nur Maerkte handeln, auf denen die KI live nachweislich trifft (>= 53 % von 100)
     "brain_veto": True,        # Supergehirn: klar gegen die Richtung (Gewicht >= brain_margin) -> kein Einstieg / Netz zu
     "brain_margin": 1.0,
     "fast_entry": True,        # Schnell-Einstieg: deutlich ueber der noetigen Sicherheit -> sofort zum Marktpreis
@@ -1045,8 +1046,17 @@ class SpeedTrader:
             self._grid(sym, sl, side, votes, tick, now, fc, df)
             return
         if sl["state"] == "idle":
-            if side == 0 or self.session.get("stopping") or len(self.trades) >= p["max_trades"]:
+            if len(self.trades) >= p["max_trades"]:
+                sl["signal"]["votes"] = {**votes, "wartet": f"Sitzungs-Limit: {p['max_trades']} Abschluesse erreicht - Neu starten"}
                 return
+            if side == 0 or self.session.get("stopping"):
+                return
+            if self.cur.get("proven_only") and self.kind == "ki":
+                live = (fc or {}).get("live") or {}
+                if live.get("n", 0) < 100 or (live.get("hit") or 0) < 0.53:
+                    sl["signal"]["votes"] = {**votes, "wartet": (f"nur bewaehrte Maerkte: live {round((live.get('hit') or 0) * 100)} % "
+                                                                  f"von {live.get('n', 0)} (noetig 53 % von 100)")}
+                    return
             if time.time() < self.session.get("pause_until", 0):
                 sl["signal"]["votes"] = {**votes, "wartet": "Tagesverlust-Limit erreicht - Pause bis morgen (UTC)"}
                 return
@@ -1866,10 +1876,34 @@ class SpeedTrader:
     def _net(self) -> float:
         return sum(t["net"] for t in self.trades)
 
+    REASON_GROUPS = (("gesperrt", "gesperrt (KI live unter 50 %)"), ("gelernt", "gelernt: pausiert (Verluste)"),
+                     ("Tagesverlust", "Tagesverlust-Limit"), ("Gesamt-Risiko", "Gesamt-Risiko-Limit"),
+                     ("Sitzungs-Limit", "Sitzungs-Limit"), ("Kosten", "Kosten-Schutz"), ("keinen Vorteil", "KI ohne Vorteil"),
+                     ("sicher", "KI-Sicherheit zu niedrig"), ("Orderfluss", "Orderfluss dagegen"),
+                     ("Supergehirn", "Supergehirn dagegen"), ("uneins", "KI 1 min / 5 min uneins"), ("lernt", "KI lernt gerade"),
+                     ("Widerstand", "Ziel zu nah"), ("Mindest", "Mindestmenge/-position"), ("Fehler", "Fehler"),
+                     ("geschlossen", "Markt geschlossen"), ("bewaehrt", "noch nicht bewaehrt"), ("andere Position", "andere Position offen"))
+
+    def reasons(self) -> dict:
+        """Warum gerade nichts eroeffnet wird - je Grund die Anzahl Maerkte (fuer die Statuszeile)."""
+        out: dict = {}
+        for v in self.slots.values():
+            if v.get("state") != "idle":
+                continue
+            sig = v.get("signal") or {}
+            votes = sig.get("votes") or {}
+            text = str(votes.get("wartet") or votes.get("KI") or "")
+            key = next((name for needle, name in self.REASON_GROUPS if needle.lower() in text.lower()), None)
+            if key is None:
+                key = "sucht (kein Signal)" if sig.get("side", 0) == 0 or not text else "sonstiges"
+            out[key] = out.get(key, 0) + 1
+        return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
     def status(self) -> dict:
         tr = self.trades
         wins = [t for t in tr if t["net"] > 0]
         return {
+            "reasons": self.reasons(),
             "active": self.active, "kind": self.kind, "name": self.name, "label": self.session.get("label"), "symbols": self.session.get("symbols", []),
             "stopping": bool(self.session.get("stopping")),
             "running_s": int(time.time() - self.session.get("start", time.time())) if self.active else 0,

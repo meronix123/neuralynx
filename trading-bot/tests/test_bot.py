@@ -3665,3 +3665,27 @@ def test_models_survive_restart_and_grid_closes_on_chart_reversal_without_foreca
     ap.forecast_fn = lambda s_: {"ok": False, "msg": "KI lernt gerade ..."}
     ap.step(sym)
     assert ap.slots[sym]["state"] == "idle" and "KI ohne Prognose" in ap.trades[-1]["why"]
+
+
+def test_status_reasons_summary_session_limit_and_proven_only():
+    """Statuszeile fasst zusammen, warum nichts eroeffnet wird; Sitzungs-Limit ist sichtbar statt stumm;
+    'nur bewaehrte Maerkte' handelt nur mit nachgewiesener Live-Trefferquote."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30,
+          "live": {"n": 40, "hit": 0.6}}
+    ap = _ap(fc, cfg={"min_conf": 0.56, "cost_guard": False, "proven_only": True})
+    sym = "BTC/USDT:USDT"
+    ap.step(sym)
+    assert ap.slots[sym]["state"] == "idle" and ap.slots[sym]["signal"]["votes"]["wartet"].startswith("nur bewaehrte Maerkte: live 60 % von 40")
+    assert ap.status()["reasons"] == {"noch nicht bewaehrt": 1}
+    fc["live"] = {"n": 200, "hit": 0.55}
+    ap.step(sym)
+    assert ap.slots[sym]["state"] == "pending"
+    ap.slots = {sym: {"state": "idle"}}
+    ap.cur["max_trades"] = 0
+    ap.step(sym)
+    assert "Sitzungs-Limit" in ap.slots[sym]["signal"]["votes"]["wartet"] and ap.status()["reasons"] == {"Sitzungs-Limit": 1}
+    ap.slots = {sym: {"state": "idle", "signal": {"side": 0, "votes": {"KI": "Markt gesperrt: trifft live nur 46 % von 200"}}},
+                "X/USDT:USDT": {"state": "idle", "signal": {"side": 0, "votes": {"KI": "LONG", "wartet": "Orderfluss dagegen (Taker +0.5)"}}},
+                "Y/USDT:USDT": {"state": "idle", "signal": {"side": 0, "votes": {"KI": "KI lernt gerade ..."}}},
+                "Z/USDT:USDT": {"state": "open"}}
+    assert ap.status()["reasons"] == {"gesperrt (KI live unter 50 %)": 1, "Orderfluss dagegen": 1, "KI lernt gerade": 1}

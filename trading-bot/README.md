@@ -345,6 +345,15 @@ alle 15 Minuten im Hintergrund.
 - **Laufende Kerze:** die KI bewertet die laufende Kerze alle 5 Sekunden mit den gelernten Modellen, der
   Autopilot prueft alle 1 bis 3 Sekunden, Stops und Ziele liegen als Bitget-Auftraege auf der Boerse.
 
+## Warum gerade nichts eroeffnet wird
+
+Ueber der Statuszeile des KI-Autopiloten steht eine Zusammenfassung je Grund, z. B. "8x gesperrt (KI live unter
+50 %) · 4x Orderfluss dagegen · 3x KI lernt gerade". Mit der Laufzeit sammeln sich ehrliche Sperren an: Maerkte,
+auf denen die KI live unter 50 % trifft (ab 150 geprueften Entscheidungen), Maerkte mit dauerhaften Verlusten
+(gelernt: pausiert), das Tagesverlust-Limit (Pause bis zum naechsten Tag UTC) und das Sitzungs-Limit von 1000
+Abschluessen (Neu starten). Das ist kein Stillstand, sondern die KI, die aufhoert, wo sie nachweislich nichts
+kann. Option "Nur bewaehrte Maerkte": handelt nur dort, wo die KI live mind. 53 % von 100 trifft.
+
 ## Neu starten ohne Verlust
 
 "Neu starten mit diesen Einstellungen" uebergibt die laufende Sitzung an eine neue: offene Positionen und Netze
