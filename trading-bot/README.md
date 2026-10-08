@@ -345,6 +345,29 @@ alle 15 Minuten im Hintergrund.
 - **Laufende Kerze:** die KI bewertet die laufende Kerze alle 5 Sekunden mit den gelernten Modellen, der
   Autopilot prueft alle 1 bis 3 Sekunden, Stops und Ziele liegen als Bitget-Auftraege auf der Boerse.
 
+## KI-Autopilot: Einstellungen (Oberflaeche)
+
+Das KI-Feld ist in vier Abschnitte geordnet, jede Einstellung hat darunter eine kurze Erklaerung. Der Browser
+merkt sich die Einstellungen; laeuft eine Sitzung, zeigt das Formular deren Einstellungen.
+
+1. **Wo handeln:** Simulation oder Bitget-Konto, Maerkte, Scanner.
+2. **Methode:** Tempo (Normal 30 min / Fast 5-10 min / Turbo 1 min), KI-Sicherheit, **Selbst-Anpassung**, Netz.
+3. **Groesse & Risiko:** Groesse je Trade, max. Hebel, **gleichzeitig hoechstens N Positionen** (Voreinstellung 3,
+   die staerksten Signale kommen zuerst dran), Gesamt-Risiko %, Tagesverlust-Limit %, Teilverkauf, Teilkauf.
+4. **Schutz-Sperren:** Kosten-Schutz, Live-Sperre, Lern-Pause, Supergehirn-Veto, Orderfluss-Bestaetigung,
+   Ziel-zu-nah-Pruefung, Markt-Anomalien, Nur bewaehrte Maerkte. Jede einzeln abschaltbar; auf dem echten
+   Konto verlangt das Starten mit abgeschalteten Sperren die Bestaetigung **OHNE SCHUTZ** (Liste der
+   abgeschalteten Sperren wird angezeigt). Gesamt-Risiko und Tagesverlust: 0 = aus.
+
+"Einstellungen uebernehmen" startet die Sitzung mit den neuen Werten neu, offene Positionen bleiben.
+
+**Selbst-Anpassung:** Jeder Abschluss merkt sich die Methode, mit der er eroeffnet wurde (normal, fast, turbo,
+jeweils mit oder ohne Netz). Bringt die aktive Methode ueber das eingestellte Fenster (Voreinstellung 20 Std)
+netto Verlust bei mind. 6 Abschluessen - oder gar keinen Abschluss -, wechselt der Autopilot selbst: zuerst auf
+eine noch nicht probierte Methode, sonst auf die mit dem besten Ergebnis je Trade der letzten 7 Tage. Sind alle
+im Minus, wird er zusaetzlich strenger (KI-Sicherheit +1 Punkt, hoechstens 62 %). Die Uebersicht zeigt die
+aktive Methode, wann sie geprueft wird, das Ergebnis je Methode und jeden Wechsel mit Grund.
+
 ## Warum gerade nichts eroeffnet wird
 
 Ueber der Statuszeile des KI-Autopiloten steht eine Zusammenfassung je Grund, z. B. "8x gesperrt (KI live unter

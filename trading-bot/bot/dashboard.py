@@ -131,8 +131,27 @@ def speed_start(bot, account, body: dict, sp=None) -> str:
             opts[k] = float(v) / 100 if k == "partial_frac" and float(v) > 1 else float(v)
     if body.get("cost_guard") is not None:
         opts["cost_guard"] = bool(body.get("cost_guard"))
-        if not opts["cost_guard"] and body.get("target") == "account" and body.get("confirm_nocost") != "OHNE SCHUTZ":
-            raise RuntimeError("Ohne Kosten-Schutz auf dem Konto nur mit Bestaetigung OHNE SCHUTZ")
+    # Schutz-Sperren und Grenzen (Oberflaeche "Schutz-Sperren" / "Groesse & Risiko") - jede einzeln schaltbar
+    for k in ("live_gate", "learn_block", "brain_veto", "sr_check", "anomaly_check", "adapt"):
+        if body.get(k) is not None:
+            opts[k] = bool(body.get(k))
+    if body.get("flow_check") is not None and not body.get("flow_check"):
+        opts["flow_confirm"] = 0.0
+    for k, lo, hi in (("max_positions", 0, 50), ("max_open_risk_pct", 0, 100), ("max_loss_pct", 0, 100), ("adapt_hours", 1, 240)):
+        v = _num(body.get(k))
+        if v is not None:
+            opts[k] = int(min(max(v, lo), hi)) if k == "max_positions" else float(min(max(v, lo), hi))
+    off = [name for key, name in (("cost_guard", "Kosten-Schutz"), ("live_gate", "Live-Sperre"), ("learn_block", "Lern-Pause"),
+                                  ("brain_veto", "Supergehirn-Veto"), ("sr_check", "Ziel-zu-nah-Pruefung"),
+                                  ("anomaly_check", "Markt-Anomalien")) if opts.get(key) is False]
+    if opts.get("flow_confirm") == 0.0:
+        off.append("Orderfluss-Bestaetigung")
+    if opts.get("max_loss_pct") == 0:
+        off.append("Tagesverlust-Limit")
+    if opts.get("max_open_risk_pct") == 0:
+        off.append("Gesamt-Risiko-Grenze")
+    if off and body.get("target") == "account" and body.get("confirm_nocost") != "OHNE SCHUTZ":
+        raise RuntimeError(f"Auf dem Konto abgeschaltet: {', '.join(off)} - nur mit Bestaetigung OHNE SCHUTZ")
     if body.get("scale_in") is not None:
         opts["scale_in"] = bool(body.get("scale_in"))
     if body.get("proven_only") is not None:

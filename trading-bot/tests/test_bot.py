@@ -3689,3 +3689,99 @@ def test_status_reasons_summary_session_limit_and_proven_only():
                 "Y/USDT:USDT": {"state": "idle", "signal": {"side": 0, "votes": {"KI": "KI lernt gerade ..."}}},
                 "Z/USDT:USDT": {"state": "open"}}
     assert ap.status()["reasons"] == {"gesperrt (KI live unter 50 %)": 1, "Orderfluss dagegen": 1, "KI lernt gerade": 1}
+
+
+def test_max_positions_locks_switchable_and_self_adapting_method():
+    """Hoechstens N Positionen gleichzeitig (staerkste Signale zuerst); jede Sperre einzeln abschaltbar;
+    Selbst-Anpassung wechselt nach adapt_hours ohne Erfolg die Methode und wird strenger, wenn alles verliert."""
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30,
+          "live": {"n": 200, "hit": 0.45}}
+    ap = _ap(fc, cfg={"min_conf": 0.56, "cost_guard": False, "max_positions": 2})
+    syms = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+    ap.session["symbols"], ap.slots = list(syms), {s: {"state": "idle"} for s in syms}
+    for s in syms:
+        ap.step(s)
+    assert all(ap.slots[s]["state"] == "idle" for s in syms)                               # Live-Sperre (45 % von 200)
+    assert "Markt gesperrt" in ap.slots["BTC/USDT:USDT"]["signal"]["votes"]["KI"]
+    ap.cur["live_gate"] = False                                                            # selbst abgeschaltet
+    for s in syms:
+        ap.step(s)
+    states = [ap.slots[s]["state"] for s in syms]
+    assert states.count("pending") == 2 and ap.slots["SOL/USDT:USDT"]["signal"]["votes"]["wartet"] == "schon 2 Positionen offen (Maximum 2)"
+    assert ap.status()["positions_open"] == 2 and ap.status()["max_positions"] == 2
+    ap.slots["SOL/USDT:USDT"]["signal"]["votes"]["Sicherheit"] = 0.9
+    assert ap._order(["BTC/USDT:USDT", "SOL/USDT:USDT"])[0] == "BTC/USDT:USDT"            # offene zuerst
+    # Lern-Pause und Anomalien abschaltbar
+    ap.cur.update(learn_n=1, learn_pf=10)
+    ap.trades = [{"symbol": "BTC/USDT:USDT", "net": -1.0, "time": time.time() * 1000}]
+    assert ap._learned_block("BTC/USDT:USDT").startswith("gelernt")
+    ap.cur["learn_block"] = False
+    assert ap._learned_block("BTC/USDT:USDT") == ""
+    ap.cur["anomaly_check"] = False
+    assert ap._anomaly("BTC/USDT:USDT", {}, _speed_df(120, 0.0), {"last": 100, "bid": 50, "ask": 150}, time.time()) == ""
+
+    # Selbst-Anpassung
+    from bot.speed import SpeedTrader
+    ap2 = _ap(fc, cfg={"adapt": True, "adapt_hours": 20, "adapt_min_trades": 3})
+    ap2.turbo_fn = lambda s: fc
+    base = dict(ap2.cur)
+    ap2.session.update(method="turbo", method_since=time.time() - 21 * 3600, base=base, method_log=[], allow_grid=False)
+    now_ms = time.time() * 1000
+    ap2.trades = [{"symbol": "BTC/USDT:USDT", "net": -0.2, "time": now_ms - i * 1000, "method": "turbo"} for i in range(4)]
+    ap2._adapt_check()
+    assert ap2.session["method"] == "normal" and not ap2.cur["turbo"] and not ap2.cur["fast"]
+    assert ap2.session["method_log"][-1]["from"] == "turbo" and "Selbst-Anpassung" in ap2.events[-1]
+    ap2._adapt_check()
+    assert ap2.session["method"] == "normal"                                               # erst nach 20 h wieder pruefen
+    ap2.session["method_since"] = time.time() - 21 * 3600                                  # normal: kein Abschluss in 20 h
+    ap2._adapt_check()
+    assert ap2.session["method"] == "fast" and ap2.cur["fast"] and not ap2.cur["turbo"]
+    ap2.trades += [{"symbol": "BTC/USDT:USDT", "net": -0.1, "time": now_ms - i * 997, "method": m} for m in ("normal", "fast") for i in range(4)]
+    ap2.session["method_since"] = time.time() - 21 * 3600
+    conf0 = ap2.cur["min_conf"]
+    ap2._adapt_check()                                                                    # alles im Minus -> strenger
+    assert ap2.session["method_log"][-1]["stricter"] and ap2.cur["min_conf"] == pytest.approx(conf0 + 0.01)
+    assert ap2.session["method"] == "normal"                                               # bestes Ergebnis je Trade
+    for t in ap2.trades:
+        t.update(gross=t["net"], fees=0.0)
+    st = ap2.status()
+    assert st["method_stats"]["turbo"]["n"] == 4 and st["method_name"].startswith("Normal")
+    ap3 = _ap(fc, cfg={"adapt": True, "adapt_hours": 20, "adapt_min_trades": 3})
+    ap3.session.update(method="normal", method_since=time.time() - 21 * 3600, base=dict(ap3.cur), method_log=[])
+    ap3.trades = [{"symbol": "BTC/USDT:USDT", "net": 0.3, "time": now_ms - i * 997, "method": "normal"} for i in range(4)]
+    ap3._adapt_check()
+    assert ap3.session["method"] == "normal"                                               # im Plus: bleibt
+    ap3.cur["adapt"] = False
+    ap3.trades = []
+    ap3._adapt_check()
+    assert ap3.session["method"] == "normal"                                               # abgeschaltet: bleibt
+    assert isinstance(SpeedTrader.METHOD_NAMES["turbo+netz"], str)
+
+
+def test_start_records_method_and_account_needs_confirmation_for_disabled_locks(tmp_path, monkeypatch):
+    from bot.dashboard import speed_start
+    from bot.speed import PaperBroker, SpeedTrader
+
+    fc = {"ok": True, "p_up": 0.62, "p_up_raw": 0.62, "band_pct": 0.5, "decision": "LONG", "decision_min": 30}
+    df = _speed_df(120, 0.0)
+    book = {"bids": [[99.99, 10]] * 20, "asks": [[100.01, 10]] * 20}
+    ap = SpeedTrader(lambda s: (df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}), {"loop_s": 0.05},
+                     forecast_fn=lambda s: fc, kind="ki")
+    ap.turbo_fn = lambda s: fc
+    ap.start(["BTC/USDT:USDT"], PaperBroker(lambda s: ap.market[s], ap.p), 87.0, "Simulation", turbo=True, fast=True,
+             max_positions=3, live_gate=False, fast_entry=False)
+    assert ap.session["method"] == "turbo" and ap.cur["loop_s"] == 1.0 and ap.session["params"]["live_gate"] is False
+    assert ap.session["base"]["turbo"] and ap.status()["method_name"] == "Turbo (1-Minuten-Modell)"
+    ap.stop(close=True)
+    ap.thread.join(5)
+
+    class Bot:
+        cfg = {"margin_mode": "isolated", "paper": {"start_equity": 35}}
+        speed = autopilot = ap
+        def speed_data(self, s): return df, book, {"last": 100.0, "bid": 99.99, "ask": 100.01}
+    body = {"symbols": ["BTC/USDT:USDT"], "target": "account", "confirm": "JA", "live_gate": False, "max_loss_pct": 0}
+
+    class Acc:
+        connected, demo = True, False
+    with pytest.raises(RuntimeError, match="Live-Sperre, Tagesverlust-Limit - nur mit Bestaetigung OHNE SCHUTZ"):
+        speed_start(Bot(), Acc(), body, ap)

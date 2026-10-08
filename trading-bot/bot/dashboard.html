@@ -117,6 +117,43 @@
   .kipanel .speedform label:has(input[type=checkbox]) { justify-content:flex-start; }
   .kipanel .speedform select { text-overflow:ellipsis; }
   .kipanel #ap-syms { display:flex; flex-wrap:wrap; gap:4px; }
+  .kiintro { font-size:12px; color:var(--muted, #94a3b8); margin:0 0 8px; line-height:1.45; }
+  .kiform { gap:8px !important; }
+  .kisec { border:1px solid rgba(148,163,184,.22); border-radius:9px; padding:6px 10px 8px; background:rgba(15,23,42,.35); }
+  .kisec > summary { cursor:pointer; font-weight:600; font-size:13px; padding:2px 0; list-style:none; }
+  .kisec > summary::-webkit-details-marker { display:none; }
+  .kisec > summary::before { content:"\25B8"; display:inline-block; width:14px; transition:transform .15s; }
+  .kisec[open] > summary::before { transform:rotate(90deg); }
+  .kipanel .krow { display:grid !important; grid-template-columns:max-content minmax(0,1fr); align-items:center; gap:2px 8px; padding:6px 0 4px;
+                   border-top:1px solid rgba(148,163,184,.12); justify-content:normal !important; }
+  .kipanel .krow > :nth-child(2) { justify-self:end; max-width:100%; }
+  .kipanel .krow.col > :nth-child(2) { justify-self:start; }
+  .kipanel .krow.col { grid-template-columns:1fr; }
+  .kipanel .krow > small, .kipanel label.krow > small { grid-column:1/-1; font-size:11px; color:var(--muted, #94a3b8); line-height:1.35; }
+  .kipanel .krow select { max-width:100% !important; }
+  .kipanel .krow input:not([type]) { width:52px; }
+  .kipanel label.kcb { display:flex; align-items:center; gap:6px; font-weight:500; }
+  .kipanel label.kcb.krow { display:grid !important; grid-template-columns:auto 1fr; }
+  .kipanel .kgrid { display:grid; grid-template-columns:1fr 1fr; gap:6px 10px; padding:6px 0 2px 20px; font-size:12px; }
+  .kipanel .kgrid label { display:flex !important; align-items:center; gap:4px; flex-wrap:wrap; }
+  .kipanel .kgrid input { width:52px; }
+  .kipanel .ksmall { font-size:11px; color:var(--muted, #94a3b8); padding:4px 0; }
+  .kipanel .kbtns { display:flex; flex-wrap:wrap; gap:6px; }
+  .kipanel .kbtns .btn { flex:1 1 auto; }
+  .apcard { border:1px solid rgba(148,163,184,.22); border-radius:9px; padding:8px 10px; margin-bottom:10px; font-size:12.5px; background:rgba(15,23,42,.35); }
+  .apcard .aphead { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:6px; }
+  .apcard .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11.5px; font-weight:600; border:1px solid rgba(148,163,184,.3); }
+  .apcard .pill.on { background:rgba(34,197,94,.15); border-color:rgba(34,197,94,.5); color:#4ade80; }
+  .apcard .pill.off { background:rgba(245,158,11,.12); border-color:rgba(245,158,11,.5); color:#fbbf24; }
+  .apcard .kpis { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:6px; margin:6px 0; }
+  .apcard .kpis div { background:rgba(148,163,184,.08); border-radius:7px; padding:4px 6px; }
+  .apcard .kpis span { display:block; font-size:10.5px; color:var(--muted, #94a3b8); }
+  .apcard .kpis b { font-size:13px; }
+  .apcard .chips { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0; }
+  .apcard .chip { font-size:11px; padding:1px 7px; border-radius:999px; background:rgba(148,163,184,.12); }
+  .apcard table { width:100%; font-size:11.5px; }
+  .apcard td, .apcard th { padding:3px 4px; vertical-align:top; }
+  .apcard h4 { margin:8px 0 4px; font-size:12px; color:var(--muted, #94a3b8); font-weight:600; }
   .speedhead { margin-bottom:6px; } .speedform { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:13px; }
   .speedform select, .speedform input { width:auto; padding:3px 6px; }
   .spsym { display:inline-flex; gap:3px; align-items:center; margin-right:4px; cursor:pointer; }
@@ -354,38 +391,85 @@
   <section class="panel">
     <div class="speed kipanel">
       <div id="kionly" class="sub" hidden style="margin-bottom:6px">&#10004; <b>Ein System:</b> die KI handelt. Die Bot-Strategie (Marktlage, Signale, Trendfilter) ist nur noch Eingabe fuer die KI und wird unten angezeigt.</div>
-      <div class="speedhead"><b>&#129302; KI-Autopilot</b> <small class="sub">handelt nach der KI-Prognose: kauft nur, wenn nach Gebuehren etwas uebrig bleiben kann, sichert Gewinne (nie mehr als die Haelfte zurueckgeben, ATR-Stop, RSI/Umkehrkerzen), verkauft einen Teil bei +1,5 R, steigt aus wenn die KI klar dreht oder die Prognosezeit vorbei ist</small></div>
-      <div class="speedform">
-        <span id="ap-syms"></span>
-        <label title="Stuendlich alle Bitget-USDT-Futures nach 24-h-Umsatz sortieren (enge Spreads, mind. 3 Tage alt) und die Top-N zusaetzlich handeln. Die Live-Sperre sortiert Maerkte ohne Vorteil aus."><input type="checkbox" id="ap-scan" autocomplete="off"> + Top <input id="ap-scan-n" value="10" style="width:36px" autocomplete="off"> Maerkte nach Umsatz (Scanner, 3 Plaetze fuer neue Listings, Rotation alle 10 min) <button class="btn sm" onclick="act('/api/bot/scan', {n: val('ap-scan-n')})">zeigen</button></label>
-        <label>Groesse <select id="ap-size" autocomplete="off" onchange="apSizeUnit()">
-          <option value="auto" selected>KI entscheidet (Risiko/Hebel)</option><option value="risk">Risiko % je Trade</option>
-          <option value="pct">% vom Konto</option><option value="usdt">fester Einsatz</option></select>
-          <input id="ap-sizeval" value="1" style="width:52px"> <span id="ap-unit">% Risiko</span></label>
-        <label>max. Hebel <input id="ap-lev" value="10" style="width:40px">x</label>
-        <label title="Erst einen Teil kaufen, den Rest nur im Gewinn nachkaufen - nie im Verlust"><input type="checkbox" id="ap-scale"> Teilkauf</label>
-        <label title="Nur Maerkte, auf denen die KI live nachweislich trifft (mind. 53 % von 100 geprueften Entscheidungen). Weniger Trades, aber nur dort, wo ein Vorteil belegt ist."><input type="checkbox" id="ap-proven" autocomplete="off"> Nur bewaehrte Maerkte</label>
-        <label title="Auf ausdruecklichen Wunsch: statt einer Position viele kleine Einheiten in KI-Richtung. Hauptposition bleibt offen, Einheiten im Gewinn werden verkauft, bei Kurs gegen das Netz wird bis zum Budget nachgekauft. Netz-Stop und KI-Drehung schliessen alles. Gebuehren fallen je Einheit an - siehe README."><input type="checkbox" id="ap-grid" autocomplete="off" onchange="document.getElementById('ap-grid-l').hidden = !this.checked"> Netz (Mini-Einheiten)</label>
-        <div id="ap-grid-l" hidden class="sub" style="display:flex;flex-wrap:wrap;gap:4px 8px">
-          Einheit <input id="ap-grid-unit" value="0.10" style="width:44px" autocomplete="off"> USDT Margin &middot;
-          Budget <input id="ap-grid-budget" value="10" style="width:40px" autocomplete="off"> USDT &middot;
-          Schritt <input id="ap-grid-step" value="0.6" style="width:36px" autocomplete="off"> % &middot;
-          Mitnahme <input id="ap-grid-take" value="1.0" style="width:36px" autocomplete="off"> % &middot;
-          Netz-Stop <input id="ap-grid-loss" value="50" style="width:36px" autocomplete="off"> % vom Budget
-        </div>
-        <label>Teilverkauf bei +1,5 R <select id="ap-part"><option value="0">aus</option><option value="25">25 %</option><option value="50" selected>50 %</option><option value="75">75 %</option></select></label>
-        <label>Tempo <select id="ap-fast" autocomplete="off"><option value="0">normal (bis 30 min)</option><option value="1">Fast (5-10 min)</option><option value="2">Turbo: Hebel-Speed-KI (1-Minuten-Modell)</option></select></label>
-        <small class="sub" id="ap-tempo-note">Fast/Turbo: Stops so eng, dass die Gebuehren meist ueber 1 R kosten - handelt nur bei positivem Erwartungswert, auf dem Konto also selten. In der Simulation mit Kosten-Schutz aus siehst du alle Trades.</small>
-        <label>KI-Sicherheit ab <select id="ap-conf" autocomplete="off"><option value="51">51 % (fast jede Neigung)</option><option value="52">52 %</option><option value="53">53 %</option><option value="54">54 %</option><option value="55">55 %</option><option value="56" selected>56 %</option><option value="58">58 %</option><option value="60">60 %</option></select></label>
-        <label>mit <select id="ap-target" autocomplete="off" onchange="document.getElementById('ap-raw-l').hidden = this.value !== 'paper'"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select></label>
-        <label id="ap-cost-l" title="Nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleiben kann (Erwartungswert nach Kosten, Stop mind. 4x die Kosten). Auf dem Konto abschaltbar - nur mit Bestaetigung OHNE SCHUTZ; Tagesverlust-Limit und Gesamt-Risiko bleiben."><input type="checkbox" id="ap-cost" checked autocomplete="off"> Kosten-Schutz</label>
-        <label id="ap-raw-l" title="Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - nur zum Zuschauen in der Simulation"><input type="checkbox" id="ap-raw"> Rohsignal (auch unbewaehrt)</label>
-        <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
-        <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)">Aus</button>
-        <button class="btn" id="ap-restart" hidden onclick="sessionRestart('ap')" title="Sofort wieder Ein mit den Einstellungen oben (Tempo, Groesse, Maerkte ...). Offene Positionen und Netze bleiben und laufen in der neuen Sitzung weiter - es wird nichts geschlossen.">Neu starten mit diesen Einstellungen</button>
-        <button class="btn red" id="ap-close" hidden onclick="sessionStop('ap', true)">Aus + Positionen jetzt schliessen</button>
-      </div>
+      <div class="speedhead"><b>&#129302; KI-Autopilot</b></div>
+      <div class="kiintro">Die KI sucht auf allen gewaehlten Maerkten Einstiege, setzt Stop und Ziel auf Bitget, sichert Gewinne und steigt aus, wenn sie dreht. Unten stellst du ein, <b>wo</b>, <b>wie</b>, <b>wie gross</b> und <b>mit welchen Sperren</b> sie handelt. Die Einstellungen merkt sich der Browser.</div>
       <div id="ap-status"></div>
+      <div class="speedform kiform" id="ap-form">
+
+        <details class="kisec" open><summary>1 &middot; Wo handeln</summary>
+          <div class="krow"><span>Konto</span><select id="ap-target" data-k="target" onchange="apChanged()"><option value="paper">Simulation (Spielgeld)</option><option value="account">Bitget-Konto (Reiter Konto)</option></select>
+            <small>Simulation: echte Kurse, kein Geld. Bitget-Konto: das im Reiter "Bitget-Konto" verbundene Konto (Test oder echt).</small></div>
+          <div class="krow col"><span>Maerkte</span><span id="ap-syms"></span>
+            <small>Die KI beobachtet alle angehakten Maerkte gleichzeitig und handelt dort, wo sie gerade am sichersten ist.</small></div>
+          <div class="krow"><label class="kcb"><input type="checkbox" id="ap-scan" data-k="scan" onchange="apChanged()"> Scanner: + Top</label><span><input id="ap-scan-n" data-k="scan_n" value="10" style="width:42px" onchange="apChanged()"> <button class="btn sm" onclick="act('/api/bot/scan', {n: val('ap-scan-n')})">zeigen</button></span>
+            <small>Nimmt zusaetzlich die umsatzstaerksten Bitget-Krypto-Futures dazu (nur 24/7-Maerkte, enge Spreads), 3 Plaetze fuer neue Listings, tauscht alle 10 min aus.</small></div>
+        </details>
+
+        <details class="kisec" open><summary>2 &middot; Methode</summary>
+          <div class="krow"><span>Tempo</span><select id="ap-fast" data-k="tempo" onchange="apChanged()"><option value="0">Normal - Prognose bis 30 min</option><option value="1">Fast - 5 bis 10 min</option><option value="2">Turbo - 1-Minuten-Modell</option></select>
+            <small id="ap-tempo-note"></small></div>
+          <div class="krow"><span>KI-Sicherheit ab</span><select id="ap-conf" data-k="min_conf" onchange="apChanged()"><option value="51">51 % - fast jede Neigung</option><option value="52">52 %</option><option value="53">53 %</option><option value="54">54 %</option><option value="55">55 %</option><option value="56" selected>56 % - empfohlen</option><option value="58">58 %</option><option value="60">60 % - nur sehr sichere</option></select>
+            <small>Wie sicher die KI mindestens sein muss. Niedriger = mehr Trades, aber auch mehr Fehltrades.</small></div>
+          <div class="krow"><label class="kcb"><input type="checkbox" id="ap-adapt" data-k="adapt" checked onchange="apChanged()"> Selbst-Anpassung nach</label><span><input id="ap-adapt-h" data-k="adapt_hours" value="20" style="width:42px" onchange="apChanged()"> Std</span>
+            <small>Bringt eine Methode so lange netto Verlust (oder keinen einzigen Trade), wechselt die KI selbst: erst auf noch nicht probierte Methoden, dann auf die mit dem besten Ergebnis. Ist alles im Minus, wird sie strenger (+1 % Sicherheit).</small></div>
+          <div class="krow"><label class="kcb"><input type="checkbox" id="ap-grid" data-k="grid" onchange="apChanged()"> Netz (Mini-Einheiten)</label><span></span>
+            <small>Statt einer Position viele kleine Einheiten: Hauptposition bleibt, bei Kurs dagegen wird nachgekauft, Einheiten im Gewinn werden einzeln verkauft. Im Test bisher netto negativ - siehe README.</small></div>
+          <div id="ap-grid-l" class="kgrid" hidden>
+            <label>Einheit <input id="ap-grid-unit" data-k="grid_unit_margin" value="0.10" onchange="apChanged()"> USDT Margin</label>
+            <label>Budget je Markt <input id="ap-grid-budget" data-k="grid_budget" value="10" onchange="apChanged()"> USDT</label>
+            <label>Nachkauf alle <input id="ap-grid-step" data-k="grid_step_pct" value="0.6" onchange="apChanged()"> %</label>
+            <label>Mitnahme ab <input id="ap-grid-take" data-k="grid_take_pct" value="1.0" onchange="apChanged()"> %</label>
+            <label>Netz-Stop bei <input id="ap-grid-loss" data-k="grid_max_loss_pct" value="50" onchange="apChanged()"> % vom Budget</label>
+          </div>
+        </details>
+
+        <details class="kisec" open><summary>3 &middot; Groesse &amp; Risiko</summary>
+          <div class="krow col"><span>Groesse je Trade</span><span><select id="ap-size" data-k="size_mode" onchange="apSizeUnit(); apChanged()"><option value="auto" selected>KI waehlt Hebel</option><option value="risk">Risiko %</option><option value="pct">% vom Konto</option><option value="usdt">fester Einsatz</option></select>
+            <input id="ap-sizeval" data-k="size_val" value="1" style="width:46px" onchange="apChanged()"> <span id="ap-unit">% Risiko</span></span>
+            <small>"KI waehlt Hebel" / "Risiko %": so viel Prozent des Kontos gehen verloren, wenn der Stop greift (1 % empfohlen). "% vom Konto" und "fester Einsatz" setzen die Margin direkt.</small></div>
+          <div class="krow"><span>max. Hebel</span><span><input id="ap-lev" data-k="leverage" value="10" style="width:46px" onchange="apChanged()"> x</span>
+            <small>Obergrenze. Die KI waehlt je Trade einen Hebel, bei dem die Liquidation weit hinter dem Stop liegt.</small></div>
+          <div class="krow"><span>gleichzeitig hoechstens</span><span><input id="ap-maxpos" data-k="max_positions" value="3" style="width:46px" onchange="apChanged()"> Positionen</span>
+            <small>Mehr Signale als Plaetze: die mit der hoechsten KI-Sicherheit kommen zuerst dran. 0 = unbegrenzt.</small></div>
+          <div class="krow"><span>Gesamt-Risiko</span><span><input id="ap-risk" data-k="max_open_risk_pct" value="6" style="width:46px" onchange="apChanged()"> % vom Konto</span>
+            <small>Alle offenen Positionen zusammen verlieren am Stop hoechstens so viel. 0 = aus.</small></div>
+          <div class="krow"><span>Tagesverlust-Limit</span><span><input id="ap-dayloss" data-k="max_loss_pct" value="5" style="width:46px" onchange="apChanged()"> % vom Konto</span>
+            <small>Ist heute so viel verloren, eroeffnet die KI bis Mitternacht (UTC) nichts Neues. Offene Positionen laufen weiter. 0 = aus.</small></div>
+          <div class="krow"><span>Teilverkauf bei +1,5 R</span><select id="ap-part" data-k="partial_frac" onchange="apChanged()"><option value="0">aus</option><option value="25">25 %</option><option value="50" selected>50 %</option><option value="75">75 %</option></select>
+            <small>Ist der Gewinn 1,5-mal so gross wie das Risiko, wird dieser Teil verkauft, der Rest laeuft mit nachgezogenem Stop.</small></div>
+          <div class="krow"><label class="kcb"><input type="checkbox" id="ap-scale" data-k="scale_in" onchange="apChanged()"> Teilkauf</label><span></span>
+            <small>Erst einen Teil kaufen, den Rest nur nachkaufen, wenn der Trade im Gewinn ist - nie im Verlust.</small></div>
+        </details>
+
+        <details class="kisec"><summary>4 &middot; Schutz-Sperren <span class="sub" id="ap-locks-sum"></span></summary>
+          <div class="ksmall">Jede Sperre verhindert Trades, die nach den bisherigen Daten wahrscheinlich Geld kosten. Du kannst jede abschalten - auf dem echten Konto nur mit Bestaetigung <b>OHNE SCHUTZ</b>.</div>
+          <label class="kcb krow"><input type="checkbox" id="ap-cost" data-k="cost_guard" checked onchange="apChanged()"> Kosten-Schutz
+            <small>Nur Trades, bei denen nach Gebuehren rechnerisch etwas uebrig bleibt (Erwartungswert, Stop mind. 4x die Kosten).</small></label>
+          <label class="kcb krow"><input type="checkbox" id="ap-gate" data-k="live_gate" checked onchange="apChanged()"> Live-Sperre
+            <small>Markt gesperrt, wenn die KI dort live unter 50 % trifft (ab 150 geprueften Entscheidungen).</small></label>
+          <label class="kcb krow"><input type="checkbox" id="ap-learn" data-k="learn_block" checked onchange="apChanged()"> Lern-Pause
+            <small>Markt pausiert, wenn er in den letzten 3 Tagen dauerhaft Verlust bringt oder die KI-Sicherheit dort nicht stimmt.</small></label>
+          <label class="kcb krow"><input type="checkbox" id="ap-brain" data-k="brain_veto" checked onchange="apChanged()"> Supergehirn-Veto
+            <small>Kein Einstieg, wenn die Mehrheit aller Blickwinkel (Bot-Strategie, Trend, Muster, Makro ...) klar dagegen ist.</small></label>
+          <label class="kcb krow"><input type="checkbox" id="ap-flow" data-k="flow_check" checked onchange="apChanged()"> Orderfluss-Bestaetigung
+            <small>Wartet, solange aggressive Kaeufer/Verkaeufer klar gegen die Richtung handeln.</small></label>
+          <label class="kcb krow"><input type="checkbox" id="ap-sr" data-k="sr_check" checked onchange="apChanged()"> Ziel-zu-nah-Pruefung
+            <small>Kein Einstieg, wenn Widerstand/Unterstuetzung naeher liegt als das Ziel (nur Tempo normal).</small></label>
+          <label class="kcb krow"><input type="checkbox" id="ap-anom" data-k="anomaly_check" checked onchange="apChanged()"> Markt-Anomalien
+            <small>Kein Einstieg bei Wartung, sehr weitem Spread, Kurssprung oder Abweichung vom Mark-Preis.</small></label>
+          <label class="kcb krow"><input type="checkbox" id="ap-proven" data-k="proven_only" onchange="apChanged()"> Nur bewaehrte Maerkte
+            <small>Zusaetzlich streng: nur Maerkte, auf denen die KI live mind. 53 % von 100 trifft.</small></label>
+          <label class="kcb krow" id="ap-raw-l"><input type="checkbox" id="ap-raw" data-k="use_raw" onchange="apChanged()"> Rohsignal (nur Simulation)
+            <small>Die KI handelt auch, solange sie sich noch nicht bewaehrt hat - zum Zuschauen.</small></label>
+        </details>
+
+        <div class="kbtns">
+          <button class="btn" id="ap-start" onclick="sessionStart('ap')">Ein</button>
+          <button class="btn" id="ap-restart" hidden onclick="sessionRestart('ap')" title="Uebernimmt die Einstellungen oben. Offene Positionen und Netze bleiben und laufen in der neuen Sitzung weiter - es wird nichts geschlossen.">Einstellungen uebernehmen</button>
+          <button class="btn" id="ap-stop" hidden onclick="sessionStop('ap', false)" title="Keine neuen Trades, offene Positionen laufen mit Stop und Ziel weiter">Aus</button>
+          <button class="btn red" id="ap-close" hidden onclick="sessionStop('ap', true)">Aus + alles schliessen</button>
+        </div>
+      </div>
       <div class="speedhead" style="margin-top:10px"><b>&#129504; Supergehirn</b> <small class="sub">fasst fuer den gewaehlten Markt alle Blickwinkel zusammen: KI 5 min, Hebel-Speed-KI, Ziel-vor-Stop, Bot-Strategie, Orderfluss, Muster, Makro, Zeitebenen. Die KI hat die Bot-Sicht als Merkmale gelernt und entscheidet; gehandelt wird nur mit positivem Erwartungswert nach Kosten.</small></div>
       <div id="brain"></div>
     </div>
@@ -1446,8 +1530,9 @@ function renderSession(k) {
   const syms = Object.keys((data || {}).symbols || {});
   if (syms.join() !== sessSymsKey[k]) {                  // Markt-Auswahl nur bei Aenderung neu bauen
     sessSymsKey[k] = syms.join();
+    const keep = k === "ap" ? (apSaved().syms || null) : null;
     document.getElementById(k + "-syms").innerHTML = syms.map((x, i) =>
-      `<label class="spsym"><input type="checkbox" class="${k}-sym" value="${x}" ${i === 0 || k === "ap" ? "checked" : ""}>${x.split("/")[0]}</label>`).join("");
+      `<label class="spsym"><input type="checkbox" class="${k}-sym" value="${x}" ${keep ? (keep.includes(x) ? "checked" : "") : (i === 0 || k === "ap" ? "checked" : "")} ${k === "ap" ? 'onchange="apChanged()"' : ""}>${x.split("/")[0]}</label>`).join("");
   }
   const out = html => {
     const el = document.getElementById(k + "-status");
@@ -1456,6 +1541,7 @@ function renderSession(k) {
     el.innerHTML = html; el._html = html;
     const d = el.querySelector("details"); if (d) d.open = open;
   };
+  if (k === "ap") { if (sp.active && sp.params && !apFill.done) apFill(sp.params, true); out(renderAuto(sp)); return; }
   if (!sp.active && !sp.trades && !(sp.events || []).length) { out(""); return; }
   const hm = s => s >= 3600 ? `${Math.floor(s / 3600)} Std ${Math.floor(s % 3600 / 60)} min` : `${Math.floor(s / 60)} min`;
   const q = v => v == null ? "-" : Math.round(v * 100) + " %";
@@ -1487,6 +1573,127 @@ async function pollSession() {
 }
 pollSession.until = {};
 setInterval(pollSession, 1000);
+const AP_KEY = "ki_autopilot_einstellungen_v2";
+const TEMPO_NOTE = {
+  "0": "Prognose 15-30 min, Stop aus der 30-min-Schwankung. Hier hat die KI live den groessten Vorsprung, die Gebuehren wiegen am wenigsten. Empfohlen.",
+  "1": "Prognose 5-10 min, engere Stops. Mehr Trades, aber die Gebuehren fressen einen groesseren Teil.",
+  "2": "Eigenes 1-Minuten-Modell plus die 5-min-KI. Sehr viele Signale, aber die Gebuehren kosten oft mehr als 1 R - mit Kosten-Schutz handelt es nur bei klarem Vorteil."
+};
+const AP_LOCKS = [["ap-cost", "Kosten-Schutz"], ["ap-gate", "Live-Sperre"], ["ap-learn", "Lern-Pause"], ["ap-brain", "Supergehirn-Veto"],
+                  ["ap-flow", "Orderfluss-Bestaetigung"], ["ap-sr", "Ziel-zu-nah-Pruefung"], ["ap-anom", "Markt-Anomalien"]];
+function apEl(id) { return document.getElementById(id); }
+function apNum(id) { return (apEl(id).value || "").replace(",", "."); }
+function apSaved() { try { return JSON.parse(localStorage.getItem(AP_KEY) || "{}"); } catch (e) { return {}; } }
+function apLocksOff() {
+  const off = AP_LOCKS.filter(([id]) => !apEl(id).checked).map(([, n]) => n);
+  if (Number(apNum("ap-dayloss")) === 0) off.push("Tagesverlust-Limit");
+  if (Number(apNum("ap-risk")) === 0) off.push("Gesamt-Risiko-Grenze");
+  return off;
+}
+function apBody() {
+  const b = { size_mode: val("ap-size"), min_conf: val("ap-conf"), fast: val("ap-fast") === "1" || val("ap-fast") === "2",
+              turbo: val("ap-fast") === "2", partial_frac: val("ap-part"), scale_in: apEl("ap-scale").checked,
+              max_positions: apNum("ap-maxpos"), max_open_risk_pct: apNum("ap-risk"), max_loss_pct: apNum("ap-dayloss"),
+              adapt: apEl("ap-adapt").checked, adapt_hours: apNum("ap-adapt-h"),
+              cost_guard: apEl("ap-cost").checked, live_gate: apEl("ap-gate").checked, learn_block: apEl("ap-learn").checked,
+              brain_veto: apEl("ap-brain").checked, flow_check: apEl("ap-flow").checked, sr_check: apEl("ap-sr").checked,
+              anomaly_check: apEl("ap-anom").checked, proven_only: apEl("ap-proven").checked,
+              use_raw: val("ap-target") === "paper" && apEl("ap-raw").checked };
+  const v = apNum("ap-sizeval");
+  if (b.size_mode === "usdt") b.margin_usdt = v; else if (b.size_mode === "pct") b.size_pct = v; else b.risk_pct = v;
+  if (apEl("ap-scan").checked) b.scan_top = apNum("ap-scan-n");
+  if (apEl("ap-grid").checked) Object.assign(b, { grid: true, grid_unit_margin: apNum("ap-grid-unit"), grid_budget: apNum("ap-grid-budget"),
+    grid_step_pct: apNum("ap-grid-step"), grid_take_pct: apNum("ap-grid-take"), grid_max_loss_pct: apNum("ap-grid-loss") });
+  return b;
+}
+function apChanged(noSave) {
+  apEl("ap-tempo-note").textContent = TEMPO_NOTE[val("ap-fast")] || "";
+  apEl("ap-grid-l").hidden = !apEl("ap-grid").checked;
+  apEl("ap-raw-l").hidden = val("ap-target") !== "paper";
+  const off = apLocksOff();
+  apEl("ap-locks-sum").textContent = off.length ? `- ${off.length} aus: ${off.join(", ")}` : "- alle an";
+  apEl("ap-locks-sum").className = off.length ? "warn" : "sub";
+  if (noSave) return;
+  const st = {};
+  document.querySelectorAll("#ap-form [data-k]").forEach(el => { st[el.id] = el.type === "checkbox" ? el.checked : el.value; });
+  st.syms = [...document.querySelectorAll(".ap-sym:checked")].map(x => x.value);
+  try { localStorage.setItem(AP_KEY, JSON.stringify(st)); } catch (e) { /* privater Modus */ }
+}
+function apFill(src, fromSession) {
+  // gemerkte Einstellungen (Browser) oder die der laufenden Sitzung ins Formular
+  if (fromSession) {
+    apFill.done = true;
+    const p = src, set = (id, v) => { if (v !== undefined && v !== null && apEl(id)) { if (apEl(id).type === "checkbox") apEl(id).checked = !!v; else apEl(id).value = v; } };
+    set("ap-fast", p.turbo ? "2" : p.fast ? "1" : "0");
+    if (p.min_conf) set("ap-conf", String(Math.round(p.min_conf * 100)));
+    set("ap-size", p.size_mode); apSizeUnit();
+    set("ap-sizeval", p.size_mode === "usdt" ? p.margin_usdt : p.size_mode === "pct" ? p.size_pct : p.risk_pct);
+    set("ap-lev", p.leverage); set("ap-maxpos", p.max_positions); set("ap-risk", p.max_open_risk_pct); set("ap-dayloss", p.max_loss_pct);
+    set("ap-adapt", p.adapt); set("ap-adapt-h", p.adapt_hours); set("ap-scale", p.scale_in);
+    if (p.partial_frac != null) set("ap-part", String(Math.round(p.partial_frac * 100)));
+    set("ap-cost", p.cost_guard); set("ap-gate", p.live_gate); set("ap-learn", p.learn_block); set("ap-brain", p.brain_veto);
+    set("ap-flow", p.flow_confirm == null ? true : p.flow_confirm > 0); set("ap-sr", p.sr_check); set("ap-anom", p.anomaly_check);
+    set("ap-proven", p.proven_only); set("ap-raw", p.use_raw); set("ap-grid", p.grid);
+    set("ap-grid-unit", p.grid_unit_margin); set("ap-grid-budget", p.grid_budget); set("ap-grid-step", p.grid_step_pct);
+    set("ap-grid-take", p.grid_take_pct); set("ap-grid-loss", p.grid_max_loss_pct);
+    if (p.scan_top) { set("ap-scan", true); set("ap-scan-n", p.scan_top); }
+  } else {
+    for (const [id, v] of Object.entries(src)) {
+      const el = apEl(id);
+      if (!el || id === "syms") continue;
+      if (el.type === "checkbox") el.checked = !!v; else el.value = v;
+    }
+    const u = apEl("ap-unit"); if (u) u.textContent = { auto: "% Risiko", risk: "% Risiko", pct: "% vom Konto", usdt: "USDT" }[val("ap-size")];
+  }
+  apChanged(true);
+}
+function renderAuto(sp) {
+  const hm = s => s >= 3600 ? `${Math.floor(s / 3600)} Std ${Math.floor(s % 3600 / 60)} min` : `${Math.floor(s / 60)} min`;
+  const q = v => v == null ? "-" : Math.round(v * 100) + " %";
+  const n2 = v => (v >= 0 ? "+" : "") + Number(v || 0).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const cls = v => (v || 0) >= 0 ? "up" : "down";
+  if (!sp.active && !sp.trades && !(sp.events || []).length) return `<div class="apcard"><div class="aphead"><span class="pill">AUS</span><span class="sub">Einstellungen pruefen und "Ein" druecken.</span></div></div>`;
+  const state = sp.active && !sp.stopping ? `<span class="pill on">AN</span>` : sp.active ? `<span class="pill off">STOPPT</span>` : `<span class="pill">AUS</span>`;
+  const since = sp.method_since ? Math.max(0, Date.now() / 1000 - sp.method_since) : 0;
+  const left = sp.adapt && sp.adapt_hours ? Math.max(0, sp.adapt_hours * 3600 - since) : null;
+  const head = `<div class="aphead">${state}<b>${sp.label || ""}</b>
+    ${sp.method_name ? `<span class="chip">Methode: <b>${sp.method_name}</b></span>` : ""}
+    ${sp.active ? `<span class="sub">seit ${hm(sp.running_s || 0)}${sp.resumed ? " &middot; nach Neustart fortgesetzt" : ""}</span>` : sp.stop_reason ? `<span class="sub">(${sp.stop_reason})</span>` : ""}</div>`;
+  const kpis = `<div class="kpis">
+    <div><span>Positionen</span><b>${sp.positions_open || 0}${sp.max_positions ? " / " + sp.max_positions : ""}</b></div>
+    <div><span>Abschluesse</span><b>${sp.trades || 0}</b> <small class="sub">${q(sp.hit)} im Plus</small></div>
+    <div><span>netto</span><b class="${cls(sp.net)}">${n2(sp.net)}</b></div>
+    <div><span>heute (alle Sitzungen)</span><b class="${cls(sp.day_net_all)}">${n2(sp.day_net_all)}</b></div>
+    <div><span>Gebuehren</span><b>${n2(-(sp.fees || 0))}</b></div>
+    <div><span>Risiko offen</span><b>${n2(-(sp.open_risk || 0))}</b></div></div>`;
+  const warn = [sp.pause_until ? `Tagesverlust-Limit erreicht - Pause bis ${time(sp.pause_until * 1000)}` : "",
+    sp.active && sp.adapt && left !== null ? `Selbst-Anpassung: Methode wird ${left > 0 ? "in " + hm(left) + " geprueft" : "gerade geprueft"} (wechselt, wenn sie ${sp.adapt_hours} Std netto verliert oder nichts handelt)${sp.min_conf_now ? " &middot; KI-Sicherheit ab " + Math.round(sp.min_conf_now * 100) + " %" : ""}` : ""]
+    .filter(Boolean).map(t => `<div class="sub" style="margin:2px 0">${t}</div>`).join("");
+  const reasons = sp.active && sp.reasons && Object.keys(sp.reasons).length ? `<h4>Warum gerade nichts Neues eroeffnet wird</h4><div class="chips">${Object.entries(sp.reasons).map(([r, n]) => `<span class="chip">${n}x ${r}</span>`).join("")}</div>` : "";
+  const order = { open: 0, grid: 0, pending: 1, idle: 2 };
+  const rows = Object.entries(sp.slots || {}).sort((a, b) => (order[a[1].state] ?? 3) - (order[b[1].state] ?? 3));
+  const row = ([s, v]) => {
+    const sg = v.signal || {}, side = v.side === 1 ? "LONG" : "SHORT";
+    const what = v.state === "open" ? `<b class="${v.side === 1 ? "up" : "down"}">${side}</b>${v.lev ? " x" + v.lev : ""} @ ${px(v.entry)}`
+      : v.state === "grid" ? `<b class="${v.side === 1 ? "up" : "down"}">NETZ ${side}</b> ${v.units || 0} Einh. @ ${px(v.entry)}`
+      : v.state === "pending" ? `Limit ${px(v.entry)}` : `<span class="sub">${sg.wartet ? "wartet" : "sucht"}</span>`;
+    const detail = v.state === "open" ? `Stop ${px(v.sl)}${v.tp ? " &middot; Ziel " + px(v.tp) : ""}${v.partial ? " &middot; Teil verkauft" : ""}`
+      : v.state === "grid" ? `Netz-Stop ${px(v.sl)}${sg.Netz ? " &middot; " + sg.Netz : ""}` : (sg.wartet || (sg.KI && !/^(LONG|SHORT)/.test(sg.KI) ? sg.KI : ""));
+    return `<tr><td><b>${s.split("/")[0]}</b></td><td>${what}</td><td class="sub">${sg.KI && /^(LONG|SHORT)/.test(sg.KI) ? sg.KI + (sg.Sicherheit ? " " + q(sg.Sicherheit) : "") : ""}</td><td class="sub">${detail || ""}</td></tr>`;
+  };
+  const busy = rows.filter(([, v]) => v.state !== "idle"), idle = rows.filter(([, v]) => v.state === "idle");
+  const table = `<h4>Maerkte</h4><div class="wrap"><table><tr><th>Markt</th><th>Zustand</th><th>KI</th><th>Details / Grund</th></tr>
+    ${busy.map(row).join("") || `<tr><td colspan="4" class="sub">keine offene Position</td></tr>`}</table></div>
+    ${idle.length ? `<details><summary class="sub">alle ${idle.length} wartenden Maerkte</summary><div class="wrap"><table>${idle.map(row).join("")}</table></div></details>` : ""}`;
+  const stats = Object.entries(sp.method_stats || {});
+  const methods = stats.length || (sp.method_log || []).length ? `<h4>Methoden (letzte 7 Tage)</h4><div class="wrap"><table><tr><th>Methode</th><th>Abschluesse</th><th>im Plus</th><th>netto</th></tr>
+    ${stats.map(([m, v]) => `<tr><td>${m === sp.method ? "<b>" + m + "</b> (aktiv)" : m}</td><td>${v.n}</td><td>${v.n ? Math.round(v.wins / v.n * 100) + " %" : "-"}</td><td class="${cls(v.net)}">${n2(v.net)}</td></tr>`).join("")}</table></div>
+    ${(sp.method_log || []).map(l => `<div class="sub">${time(l.time * 1000)}: ${l.from} &rarr; <b>${l.to}</b> (${l.why}${l.stricter ? ", strenger" : ""})</div>`).join("")}` : "";
+  const last = (sp.last_trades || []).length ? `<h4>Letzte Abschluesse</h4><div class="wrap"><table><tr><th>Markt</th><th>Richtung</th><th>Grund</th><th>Dauer</th><th>netto</th></tr>
+    ${sp.last_trades.map(t => `<tr><td>${t.symbol.split("/")[0]}</td><td class="${t.side === "long" ? "up" : "down"}">${t.side.toUpperCase()}</td><td>${t.why}</td><td>${t.secs >= 120 ? Math.round(t.secs / 60) + " min" : t.secs + " s"}</td><td class="${cls(t.net)}">${n2(t.net)}</td></tr>`).join("")}</table></div>` : "";
+  return `<div class="apcard">${head}${kpis}${warn}${reasons}${table}${methods}${last}
+    <details><summary class="sub">Ablauf</summary><div class="sub">${(sp.events || []).join("<br>")}</div></details></div>`;
+}
 function apSizeUnit() {
   const m = val("ap-size"), el = document.getElementById("ap-sizeval");
   document.getElementById("ap-unit").textContent = { auto: "% Risiko", risk: "% Risiko", pct: "% vom Konto", usdt: "USDT" }[m];
@@ -1516,22 +1723,7 @@ async function sessionStart(k, carry) {
   const body = { symbols: syms, leverage: val(k + "-lev"), target: val(k + "-target"), carry: !!carry };
   if (k === "sp") body.margin_usdt = val("sp-margin").replace(",", ".");
   if (k === "sp") body.aggressiveness = val("sp-agg");
-  if (k === "ap") {
-    body.size_mode = val("ap-size");
-    const v = val("ap-sizeval").replace(",", ".");
-    if (body.size_mode === "usdt") body.margin_usdt = v; else if (body.size_mode === "pct") body.size_pct = v; else body.risk_pct = v;
-    body.scale_in = document.getElementById("ap-scale").checked;
-    body.proven_only = document.getElementById("ap-proven").checked;
-    if (document.getElementById("ap-scan").checked) body.scan_top = val("ap-scan-n");
-    body.partial_frac = val("ap-part");
-    if (document.getElementById("ap-grid").checked) {
-      body.grid = true;
-      body.grid_unit_margin = val("ap-grid-unit").replace(",", "."); body.grid_budget = val("ap-grid-budget").replace(",", ".");
-      body.grid_step_pct = val("ap-grid-step").replace(",", "."); body.grid_take_pct = val("ap-grid-take").replace(",", ".");
-      body.grid_max_loss_pct = val("ap-grid-loss").replace(",", ".");
-    }
-  }
-  if (k === "ap") { body.min_conf = val("ap-conf"); body.fast = val("ap-fast") === "1"; body.turbo = val("ap-fast") === "2"; body.use_raw = body.target === "paper" && document.getElementById("ap-raw").checked; body.cost_guard = document.getElementById("ap-cost").checked; }
+  if (k === "ap") Object.assign(body, apBody());
   const name = k === "ap" ? "KI-Autopilot" : "Speed-Trading";
   if (body.target === "account") {
     if (!acc || !acc.connected) return toast("Erst im Reiter Bitget-Konto ein Konto verbinden", false);
@@ -1546,8 +1738,9 @@ async function sessionStart(k, carry) {
       if (!r3 || r3[0].trim().toUpperCase() !== "NETZ") return toast("Nicht gestartet - Bestaetigung NETZ fehlt", false);
       body.confirm_grid = "NETZ";
     }
-    if (k === "ap" && body.cost_guard === false) {
-      const r2 = await askBox("OHNE KOSTEN-SCHUTZ auf dem Konto: Die KI handelt dann auch Trades, bei denen die Gebuehren rechnerisch mehr kosten als der Stop (Turbo/Fast). Tagesverlust-Limit 5 % und Gesamt-Risiko 3 % bleiben. Zum Bestaetigen OHNE SCHUTZ eintippen:", [["Bestaetigung", ""]]);
+    const off = k === "ap" ? apLocksOff() : [];
+    if (off.length) {
+      const r2 = await askBox(`Auf dem Konto abgeschaltet: ${off.join(", ")}. Die KI handelt dann auch dort, wo diese Sperren nach den bisherigen Daten Verluste verhindert haben. Zum Bestaetigen OHNE SCHUTZ eintippen:`, [["Bestaetigung", ""]]);
       if (!r2 || r2[0].trim().toUpperCase() !== "OHNE SCHUTZ") return toast("Nicht gestartet - Bestaetigung OHNE SCHUTZ fehlt", false);
       body.confirm_nocost = "OHNE SCHUTZ";
     }
@@ -1571,6 +1764,7 @@ async function pollForecast() {
 }
 setInterval(pollForecast, 10000);
 setTimeout(pollForecast, 1500);
+setTimeout(() => { const st = apSaved(); if (Object.keys(st).length) apFill(st, false); else apChanged(true); }, 0);
 async function pollBrain() {
   const sym = view === "acc" ? accSym : selected;
   const el = document.getElementById("brain");

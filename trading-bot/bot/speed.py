@@ -67,6 +67,16 @@ AUTO_DEFAULTS = {
     "grid_flip_conf": 0.53,    # Trendwende: KI neigt ab dieser Sicherheit zur Gegenseite -> ganzes Netz schliessen
     "grid_stale_x": 12.0,      # Netz ohne Gewinn nach 12 x Vorhersagezeit schliessen (nicht endlos aussitzen; Test: 12)
     "proven_only": False,      # nur Maerkte handeln, auf denen die KI live nachweislich trifft (>= 53 % von 100)
+    # --- Sperren, einzeln abschaltbar (Oberflaeche "Schutz-Sperren") ---
+    "live_gate": True,         # Markt sperren, wenn die KI dort live unter 50 % trifft (ab 150 geprueften Entscheidungen)
+    "learn_block": True,       # Markt pausieren nach dauerhaften Verlusten (Gewinnfaktor, Not-Aus bei falscher Sicherheit)
+    "sr_check": True,          # kein Einstieg, wenn Widerstand/Unterstuetzung das Ziel verhindert (normales Tempo)
+    "anomaly_check": True,     # kein Einstieg bei Wartung, weitem Spread, Kurssprung, Mark-Abweichung
+    "max_positions": 3,        # hoechstens so viele Positionen gleichzeitig (0 = unbegrenzt)
+    # --- Selbst-Anpassung: Methode wechseln, wenn sie ueber adapt_hours nicht funktioniert ---
+    "adapt": True,
+    "adapt_hours": 20.0,
+    "adapt_min_trades": 6,     # erst ab so vielen Abschluessen im Fenster bewerten (0 Abschluesse = auch wechseln)
     "brain_veto": True,        # Supergehirn: klar gegen die Richtung (Gewicht >= brain_margin) -> kein Einstieg / Netz zu
     "brain_margin": 1.0,
     "fast_entry": True,        # Schnell-Einstieg: deutlich ueber der noetigen Sicherheit -> sofort zum Marktpreis
@@ -511,12 +521,13 @@ class SpeedTrader:
                     raise ValueError("Netz: Mitnahme muss ueber den Hin- und Rueckgebuehren liegen")
                 if float(p["grid_budget"]) < float(p["grid_unit_margin"]):
                     raise ValueError("Netz: Budget kleiner als eine Einheit")
-            if self.kind == "ki" and p.get("turbo"):
-                p.update(TURBO_AUTO)
-                if getattr(self, "turbo_fn", None) is None:
-                    raise ValueError("Turbo-KI ist hier nicht verfuegbar")
-            elif self.kind == "ki" and p.get("fast"):
-                p.update(FAST_AUTO)
+            if self.kind == "ki" and p.get("turbo") and getattr(self, "turbo_fn", None) is None:
+                raise ValueError("Turbo-KI ist hier nicht verfuegbar")
+            base = dict(p)                                       # Grundeinstellungen - Methoden setzen darauf auf
+            method = (("turbo" if p.get("turbo") else "fast" if p.get("fast") else "normal")
+                      + ("+netz" if p.get("grid") else "")) if self.kind == "ki" else None
+            if self.kind == "ki":
+                p = self._method_params(base, method)
             minutes = int(p.get("minutes") or 0)              # 0 = laeuft, bis "Aus" gedrueckt wird
             if self.kind == "ki" and p.get("use_raw") and label != "Simulation":
                 raise ValueError("Rohsignal (unbewaehrte KI) nur in der Simulation")
@@ -531,10 +542,10 @@ class SpeedTrader:
             now = time.time()
             self.session = {"symbols": list(symbols), "start": now, "label": label, "stopping": False,
                             "end": now + minutes * 60 if minutes > 0 else float("inf"),
-                            "equity0": equity, "params": {k: p.get(k) for k in ("minutes", "margin_usdt", "leverage",
-                                                                                 "aggressiveness", "min_conf", "use_raw", "fast", "turbo",
-                                                                                 "size_mode", "size_pct", "risk_pct",
-                                                                                 "scale_in", "partial_frac")}}
+                            "equity0": equity, "params": {k: base.get(k) for k in self.PARAM_KEYS},
+                            "base": {k: v for k, v in base.items() if not callable(v)},
+                            "method": method, "method_since": now, "method_log": [],
+                            "allow_grid": bool(base.get("grid"))}
             self.slots = {s: {"state": "idle"} for s in symbols}
             for s_, v in keep.items():
                 self.slots[s_] = v
@@ -549,6 +560,96 @@ class SpeedTrader:
             self.thread = threading.Thread(target=self._run, daemon=True, name=self.kind)
             self.thread.start()
             return f"{self.name} ist an ({label}) - laeuft, bis du Aus drueckst"
+
+    PARAM_KEYS = ("minutes", "margin_usdt", "leverage", "aggressiveness", "min_conf", "use_raw", "fast", "turbo",
+                  "size_mode", "size_pct", "risk_pct", "scale_in", "partial_frac", "cost_guard", "proven_only",
+                  "grid", "grid_unit_margin", "grid_budget", "grid_step_pct", "grid_take_pct", "grid_max_loss_pct",
+                  "max_positions", "max_open_risk_pct", "max_loss_pct", "adapt", "adapt_hours", "live_gate",
+                  "learn_block", "brain_veto", "flow_confirm", "sr_check", "anomaly_check", "scan_top")
+    METHOD_NAMES = {"normal": "Normal (Prognose bis 30 min)", "fast": "Fast (5-10 min)",
+                    "turbo": "Turbo (1-Minuten-Modell)", "normal+netz": "Netz, Tempo normal",
+                    "fast+netz": "Netz, Tempo Fast", "turbo+netz": "Netz, Turbo"}
+
+    def _method_params(self, base: dict, method: str) -> dict:
+        """Einstellungen fuer eine Methode: Tempo (normal/fast/turbo) und Netz an/aus auf den Grundeinstellungen."""
+        tempo, _, grid = method.partition("+")
+        p = {**base, "fast": tempo in ("fast", "turbo"), "turbo": tempo == "turbo", "grid": grid == "netz"}
+        if tempo == "turbo":
+            p.update(TURBO_AUTO)
+        elif tempo == "fast":
+            p.update(FAST_AUTO)
+        return p
+
+    def _method_candidates(self) -> list[str]:
+        tempos = ["normal", "fast"] + (["turbo"] if getattr(self, "turbo_fn", None) else [])
+        out = list(tempos)
+        if self.session.get("allow_grid"):
+            out += [t + "+netz" for t in tempos]
+        return out
+
+    def method_stats(self, days: float = 7.0) -> dict:
+        """Ergebnis je Methode (diese und fruehere Sitzungen, gleiches Konto) in den letzten Tagen."""
+        since = (time.time() - days * 86400) * 1000
+        seen, out = set(), {}
+        for t in list(getattr(self, "history", []) or []) + list(self.trades):
+            key = (t.get("time"), t.get("symbol"), t.get("net"), t.get("method"), t.get("why"))
+            if key in seen or not t.get("method") or (t.get("time") or 0) < since:
+                continue
+            seen.add(key)
+            m = out.setdefault(t["method"], {"n": 0, "net": 0.0, "wins": 0})
+            m["n"] += 1
+            m["net"] += float(t.get("net") or 0)
+            m["wins"] += 1 if (t.get("net") or 0) > 0 else 0
+        for m in out.values():
+            m["net"] = round(m["net"], 4)
+        return out
+
+    def _adapt_check(self) -> None:
+        """Selbst-Anpassung: laeuft die aktuelle Methode adapt_hours lang ohne Erfolg (netto im Minus bei mind.
+        adapt_min_trades Abschluessen, oder gar kein Abschluss), wird auf die naechste Methode gewechselt -
+        zuerst noch nicht probierte, sonst die mit dem besten Ergebnis je Trade der letzten 7 Tage. Ist alles
+        im Minus, wird zusaetzlich die noetige KI-Sicherheit um 1 Punkt angehoben (strenger, weniger Trades)."""
+        p, ses = self.cur, self.session
+        if self.kind != "ki" or not p.get("adapt") or not ses.get("method") or ses.get("stopping"):
+            return
+        hours = float(p.get("adapt_hours") or 20)
+        now = time.time()
+        if now - float(ses.get("method_since") or now) < hours * 3600:
+            return
+        win0 = (now - hours * 3600) * 1000
+        rows = [t for t in self.trades if t.get("method") == ses["method"] and (t.get("time") or 0) >= win0]
+        net, n = sum(float(t.get("net") or 0) for t in rows), len(rows)
+        bad = (n >= int(p.get("adapt_min_trades") or 0) and net < 0) or n == 0
+        if not bad:
+            return
+        stats = self.method_stats()
+        cands = [m for m in self._method_candidates() if m != ses["method"]]
+        if not cands:
+            return
+        tried = {m for m, v in stats.items() if v["n"] >= 3}
+        fresh = [m for m in cands if m not in tried]
+        if fresh:
+            nxt = fresh[0]
+        else:
+            nxt = max(cands, key=lambda m: stats.get(m, {}).get("net", 0) / max(stats.get(m, {}).get("n", 1), 1))
+        stricter = not fresh and all(stats.get(m, {}).get("net", 0) < 0 for m in cands)
+        old = ses["method"]
+        base = dict(ses.get("base") or p)
+        if stricter:
+            base["min_conf"] = min(0.62, round(float(base.get("min_conf") or 0.56) + 0.01, 3))
+            ses["base"] = base
+        new = self._method_params(base, nxt)
+        for k in ("log_path",):
+            if k in p:
+                new[k] = p[k]
+        self.cur = new
+        why = (f"{n} Abschluesse, netto {net:+.2f} USDT" if n else "kein einziger Abschluss")
+        ses["method_log"] = (ses.get("method_log") or [])[-9:] + [{"from": old, "to": nxt, "time": int(now), "why": why,
+                                                                   "stricter": stricter}]
+        ses["method"], ses["method_since"] = nxt, now
+        self._event(f"Selbst-Anpassung: {self.METHOD_NAMES.get(old, old)} in {hours:g} Std: {why} - wechsle auf "
+                    f"{self.METHOD_NAMES.get(nxt, nxt)}" + (f", KI-Sicherheit jetzt ab {round(base['min_conf'] * 100)} %" if stricter else ""))
+        self._persist()
 
     # --- Sitzung ueber einen Neustart retten -----------------------------
     def _state_path(self):
@@ -679,7 +780,7 @@ class SpeedTrader:
                 if not ses["stopping"]:
                     if time.time() >= ses["end"]:
                         ses.update(stopping=True, stop_reason="Zeit abgelaufen")
-                    elif self._day_net() <= -ses["equity0"] * self.cur["max_loss_pct"] / 100 \
+                    elif self.cur.get("max_loss_pct") and self._day_net() <= -ses["equity0"] * self.cur["max_loss_pct"] / 100 \
                             and time.time() >= ses.get("pause_until", 0):
                         # Tagesverlust-Limit: heute keine neuen Trades mehr, offene Positionen laufen weiter,
                         # morgen (UTC) geht es weiter - die Sitzung bleibt an
@@ -692,8 +793,9 @@ class SpeedTrader:
                     if not any(v.get("state") in ("open", "grid") for v in self.slots.values()):
                         break                                   # nichts mehr offen -> Sitzung zu Ende
                 self._rotate()
+                self._adapt_check()
                 wait = self.cur["loop_s"]
-                for sym in list(ses["symbols"]):
+                for sym in self._order(ses["symbols"]):
                     try:
                         self.step(sym)
                     except Exception as e:  # noqa: BLE001 - ein Fehler darf die Sitzung nicht beenden
@@ -735,6 +837,17 @@ class SpeedTrader:
             self._event("Scanner: " + (f"neu {', '.join(added)}" if added else "") + (" · " if added and dropped else "")
                         + (f"raus {', '.join(dropped)}" if dropped else ""))
             self._persist()
+
+    def _order(self, symbols) -> list:
+        """Offene Positionen zuerst, dann die Maerkte mit der staerksten letzten KI-Sicherheit - so bekommen bei
+        begrenzten Plaetzen (max_positions) die besten Signale den Vorrang."""
+        def key(s):
+            v = self.slots.get(s) or {}
+            if v.get("state") in ("open", "pending", "grid"):
+                return (0, 0.0)
+            conf = ((v.get("signal") or {}).get("votes") or {}).get("Sicherheit") or 0
+            return (1, -float(conf))
+        return sorted(list(symbols), key=key)
 
     def _backoff(self, e: Exception) -> float:
         """Bitget bremst (Ratenlimit) oder Netz weg -> kurz Pause statt weiter hammern (sonst IP-Sperre)."""
@@ -838,7 +951,7 @@ class SpeedTrader:
         if fc.get("veto"):
             return 0, {"KI": fc["decision"], "Sicherheit": fc["confidence"], "wartet": fc["veto"]}, fc
         live = fc.get("live") or {}
-        if not self.cur.get("use_raw") and live.get("n", 0) >= self.cur.get("gate_min_n", 150) \
+        if not self.cur.get("use_raw") and self.cur.get("live_gate", True) and live.get("n", 0) >= self.cur.get("gate_min_n", 150) \
                 and (live.get("hit") or 0) < self.cur.get("gate_min_hit", 0.5):
             return 0, {"KI": f"Markt gesperrt: trifft live nur {round((live.get('hit') or 0) * 100)} % "
                              f"von {live['n']}"}, fc
@@ -981,7 +1094,7 @@ class SpeedTrader:
         """Lernen aus den eigenen Abschluessen: Markt pausieren, solange er in den letzten 3 Tagen
         dauerhaft Geld verliert (Gewinnfaktor unter learn_pf bei mind. learn_n Abschluessen)."""
         p = self.cur
-        if not p.get("learn_n"):
+        if not p.get("learn_n") or not p.get("learn_block", True):
             return ""
         since = (time.time() - 3 * 86400) * 1000
         rows = [t for t in list(getattr(self, "history", [])) + self.trades
@@ -1027,7 +1140,7 @@ class SpeedTrader:
         wall = fc.get("sr_up_pct") if side == 1 else fc.get("sr_dn_pct")
         # Turbo/Fast: die Marken aus dem 1-/5-Minuten-Chart liegen fast immer naeher als 1,2 R - das wuerde fast
         # jeden Trade verhindern; dort gilt nur der ATR-Stop, das Ziel bleibt tp_r x R
-        if wall and p.get("size_mode") == "auto" and not p.get("turbo") and not p.get("fast"):
+        if wall and p.get("size_mode") == "auto" and not p.get("turbo") and not p.get("fast") and p.get("sr_check", True):
             room = price * wall / 100 * 0.9
             if room < tp_d:
                 if room < 1.2 * r:
@@ -1050,6 +1163,11 @@ class SpeedTrader:
                 sl["signal"]["votes"] = {**votes, "wartet": f"Sitzungs-Limit: {p['max_trades']} Abschluesse erreicht - Neu starten"}
                 return
             if side == 0 or self.session.get("stopping"):
+                return
+            mx = int(p.get("max_positions") or 0)
+            busy = sum(1 for v in self.slots.values() if v.get("state") in ("open", "pending", "grid"))
+            if mx and busy >= mx:
+                sl["signal"]["votes"] = {**votes, "wartet": f"schon {busy} Positionen offen (Maximum {mx})"}
                 return
             if self.cur.get("proven_only") and self.kind == "ki":
                 live = (fc or {}).get("live") or {}
@@ -1136,6 +1254,7 @@ class SpeedTrader:
                 # Zustand merken, dann absichern (schlaegt der Stop fehl, wird nie ein zweites Mal gekauft)
                 avg = self.broker.add(sym, side, qty)
                 shift = avg - price
+                sl["method"] = self.session.get("method")
                 sl.update(state="open", side=side, qty=qty, full=full, price=avg, entry=avg, opened=now, placed=now,
                           sl=stop + shift, tp=target + shift, r0=abs(avg - stop - shift), best=avg, lev=lev, taker_in=True,
                           why_in={k: v for k, v in votes.items() if k != "wartet"}, h_min=(fc or {}).get("decision_min"))
@@ -1144,6 +1263,7 @@ class SpeedTrader:
                             f"(Ziel {sl['tp']:.6g}, Stop {sl['sl']:.6g})")
                 return
             oid = self.broker.place_entry(sym, side, qty, price)
+            sl["method"] = self.session.get("method")
             sl.update(state="pending", oid=oid, side=side, qty=qty, full=full, price=price, sl=stop, tp=target,
                       placed=now, lev=lev, why_in={k: v for k, v in votes.items() if k != "wartet"},
                       h_min=(fc or {}).get("decision_min"))
@@ -1292,6 +1412,7 @@ class SpeedTrader:
                                                           f"> {cap:g} % von {total:.0f} USDT = {total * cap / 100:.2f}")}
             return
         avg = self.broker.add(sym, side, qty)
+        sl["method"] = self.session.get("method")
         sl.update(state="grid", side=side, qty=qty, entry=avg, price=avg, opened=now, lev=lev, taker_in=True, _sym=sym,
                   units=[{"entry": avg, "qty": qty, "time": now}], last_add=avg, sl=None, tp=None, added_margin=0.0,
                   why_in={k: v for k, v in votes.items() if k != "wartet"}, h_min=(fc or {}).get("decision_min"))
@@ -1366,7 +1487,8 @@ class SpeedTrader:
         t = {"symbol": sym, "side": "long" if sl["side"] == 1 else "short", "entry": unit["entry"], "exit": px,
              "qty": unit["qty"], "gross": round(gross, 6), "fees": round(fees, 6), "net": round(gross - fees, 6),
              "why": why, "secs": round(time.time() - unit.get("time", time.time())), "time": int(time.time() * 1000),
-             "kind": self.kind, "label": self.session.get("label"), "why_in": sl.get("why_in"), "h_min": sl.get("h_min")}
+             "kind": self.kind, "label": self.session.get("label"), "why_in": sl.get("why_in"), "h_min": sl.get("h_min"),
+             "method": sl.get("method")}
         self.trades.append(t)
         self._save_trade(t)
 
@@ -1572,6 +1694,8 @@ class SpeedTrader:
         """Schutz vor Boersen-Anomalien (belegte Bitget-Vorfaelle): Wartung, zu weiter Spread, Kurs-Sprung in
         einer Minute, Letztkurs weit weg vom Mark-Preis. Dann kein neuer Einstieg."""
         p = self.cur
+        if not p.get("anomaly_check", True):
+            return ""
         status_fn = getattr(self, "status_fn", None)
         if status_fn:
             try:
@@ -1762,7 +1886,7 @@ class SpeedTrader:
                             "net": round(gross - fees, 6), "why": "Teilverkauf",
                             "secs": round(time.time() - sl.get("opened", time.time())), "time": int(time.time() * 1000),
                             "kind": self.kind, "label": self.session.get("label"), "why_in": sl.get("why_in"),
-                            "h_min": sl.get("h_min")})
+                            "h_min": sl.get("h_min"), "method": sl.get("method")})
         self._save_trade(self.trades[-1])
 
     def _balance(self) -> tuple[float, float]:
@@ -1831,7 +1955,7 @@ class SpeedTrader:
              "qty": sl["qty"], "gross": round(gross, 6), "fees": round(fees, 6), "net": round(gross - fees, 6),
              "why": why, "secs": round(time.time() - sl.get("opened", time.time())), "time": int(time.time() * 1000),
              "kind": self.kind, "label": self.session.get("label"), "why_in": sl.get("why_in"), "h_min": sl.get("h_min"),
-             "partial": bool(sl.get("partial_done")), "added": bool(sl.get("added"))}
+             "partial": bool(sl.get("partial_done")), "added": bool(sl.get("added")), "method": sl.get("method")}
         self.trades.append(t)
         self._save_trade(t)
         self._event(f"{sym.split(':')[0]} {why}: netto {t['net']:+.4f} USDT")
@@ -1902,8 +2026,17 @@ class SpeedTrader:
     def status(self) -> dict:
         tr = self.trades
         wins = [t for t in tr if t["net"] > 0]
+        ses = self.session
         return {
             "reasons": self.reasons(),
+            "method": ses.get("method"), "method_name": self.METHOD_NAMES.get(ses.get("method") or "", ses.get("method")),
+            "method_since": ses.get("method_since"), "method_log": (ses.get("method_log") or [])[-5:][::-1],
+            "method_stats": self.method_stats() if self.kind == "ki" else {},
+            "adapt": bool(self.cur.get("adapt")) if getattr(self, "cur", None) else False,
+            "adapt_hours": (self.cur or {}).get("adapt_hours") if getattr(self, "cur", None) else None,
+            "max_positions": (self.cur or {}).get("max_positions") if getattr(self, "cur", None) else None,
+            "min_conf_now": (self.cur or {}).get("min_conf") if getattr(self, "cur", None) else None,
+            "positions_open": sum(1 for v in self.slots.values() if v.get("state") in ("open", "pending", "grid")),
             "active": self.active, "kind": self.kind, "name": self.name, "label": self.session.get("label"), "symbols": self.session.get("symbols", []),
             "stopping": bool(self.session.get("stopping")),
             "running_s": int(time.time() - self.session.get("start", time.time())) if self.active else 0,
