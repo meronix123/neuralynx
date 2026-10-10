@@ -443,6 +443,11 @@ wo dauerhaft Geld verloren geht.
 4. Auf dem Handy oeffnen, Passwort eingeben. Nach 5 Fehlversuchen 15 Minuten Sperre.
 Ausschalten: `python run.py fernzugriff aus`.
 
+## Umzug auf einen anderen PC
+
+Schritt fuer Schritt in `UMZUG.md`: Bot stoppen, `.env`, `data/`, `state.json` und `config.yaml` einpacken,
+auf dem neuen PC Code von GitHub holen, Daten einspielen, Dienst einrichten. Nie auf zwei PCs gleichzeitig laufen lassen.
+
 ## Installation (Windows)
 
 1. Python 3.11 oder neuer installieren: https://www.python.org/downloads/
